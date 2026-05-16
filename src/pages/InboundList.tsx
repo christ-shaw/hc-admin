@@ -1,0 +1,194 @@
+import { useEffect, useState } from 'react';
+import { Table, Button, Input, Select, MessagePlugin, Dialog } from 'tdesign-react';
+import { Search, RotateCcw } from 'lucide-react';
+import { InboundRecord, InboundFilters, CHANNEL_TYPE_MAP } from '../types';
+import { useInbound } from '../hooks/useInbound';
+import { useLogs } from '../hooks/useLogs';
+import { useStorage } from '../hooks/useStorage';
+import { formatDate, getTotalQuantity, getChannelTypeText } from '../utils/format';
+import { RecordDetail } from '../components/RecordDetail';
+import { RecordEdit } from '../components/RecordEdit';
+
+export function InboundList() {
+  const inbound = useInbound();
+  const logs = useLogs();
+  const { notifyRecordChange } = useStorage();
+
+  const [detailVisible, setDetailVisible] = useState(false);
+  const [editVisible, setEditVisible] = useState(false);
+  const [currentRecord, setCurrentRecord] = useState<InboundRecord | null>(null);
+  const [deleteConfirmVisible, setDeleteConfirmVisible] = useState(false);
+
+  const [filters, setFilters] = useState<InboundFilters>({});
+  const [channelTypeFilter, setChannelTypeFilter] = useState('');
+
+  useEffect(() => {
+    inbound.fetchRecords();
+  }, []);
+
+  const handleSearch = () => {
+    inbound.resetFilters();
+    const searchFilters = { ...filters };
+    if (channelTypeFilter) searchFilters.channelType = channelTypeFilter;
+    inbound.fetchRecords(null, searchFilters);
+  };
+
+  const handleReset = () => {
+    setFilters({});
+    setChannelTypeFilter('');
+    inbound.resetFilters();
+    inbound.fetchRecords(null, {});
+  };
+
+  const handleDetail = (record: InboundRecord) => {
+    setCurrentRecord(record);
+    setDetailVisible(true);
+  };
+
+  const handleEdit = () => {
+    setDetailVisible(false);
+    setEditVisible(true);
+  };
+
+  const handleSave = async (recordId: string, updateData: Record<string, unknown>) => {
+    const success = await inbound.updateRecord(recordId, updateData as Partial<InboundRecord>);
+    if (success) {
+      const logResult = await logs.saveOperationLog('update', 'inbound', recordId, updateData.customerName as string, '网页用户');
+      await notifyRecordChange('update', 'inbound', { ...currentRecord, ...updateData } as Record<string, unknown>, logResult?._id);
+      inbound.fetchRecords(null, inbound.filters);
+    }
+    return success;
+  };
+
+  const handleDelete = async () => {
+    if (!currentRecord) return;
+    const success = await inbound.deleteRecord(currentRecord._id);
+    if (success) {
+      await logs.saveOperationLog('delete', 'inbound', currentRecord._id, currentRecord.customerName, '网页用户');
+      await notifyRecordChange('delete', 'inbound', currentRecord as unknown as Record<string, unknown>);
+      MessagePlugin.success('删除成功');
+      setDeleteConfirmVisible(false);
+      setDetailVisible(false);
+      inbound.fetchRecords(null, inbound.filters);
+    } else {
+      MessagePlugin.error('删除失败');
+    }
+  };
+
+  const columns = [
+    { colKey: 'inboundDate', title: '入库日期', width: 110, cell: ({ row }: { row: InboundRecord }) => formatDate(row.inboundDate, false) },
+    { colKey: 'customerName', title: '客户名称', width: 120, ellipsis: true },
+    { colKey: 'type', title: '渠道类型', width: 90, cell: ({ row }: { row: InboundRecord }) => getChannelTypeText(row.type) },
+    { colKey: 'shopName', title: '渠道名称', width: 100, ellipsis: true },
+    { colKey: 'trackingNumber', title: '快递单号', width: 120, ellipsis: true },
+    { colKey: 'phoneModels', title: '手机型号', width: 180, cell: ({ row }: { row: InboundRecord }) =>
+      row.phoneModels?.map(m => `${m.model} x${m.quantity}`).join(', ') || '-'
+    },
+    { colKey: 'totalQuantity', title: '数量', width: 60, cell: ({ row }: { row: InboundRecord }) => getTotalQuantity(row) },
+    { colKey: 'hasIssue', title: '异常', width: 60, cell: ({ row }: { row: InboundRecord }) =>
+      row.hasIssue ? <span className="text-danger">是</span> : <span className="text-gray-400">否</span>
+    },
+    {
+      colKey: 'op', title: '操作', width: 80, fixed: 'right' as const,
+      cell: ({ row }: { row: InboundRecord }) => (
+        <Button variant="text" theme="primary" size="small" onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleDetail(row); }}>
+          详情
+        </Button>
+      ),
+    },
+  ];
+
+  const displayRecords = inbound.getPageRecords(inbound.currentPage);
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h1 className="text-2xl font-semibold text-gray-800">入库记录</h1>
+        <p className="text-gray-500 mt-1">管理所有入库记录</p>
+      </div>
+
+      {/* 筛选栏 */}
+      <div className="glass-card p-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3 items-end">
+          <Input placeholder="客户名称" value={filters.customerName || ''} onChange={(val) => setFilters(prev => ({ ...prev, customerName: val as string }))} />
+          <Select
+            placeholder="渠道类型"
+            value={channelTypeFilter}
+            onChange={(val) => setChannelTypeFilter(val as string)}
+            options={[{ label: '全部', value: '' }, ...Object.entries(CHANNEL_TYPE_MAP).map(([value, label]) => ({ label, value }))]}
+          />
+          <Input placeholder="渠道名称" value={filters.shopName || ''} onChange={(val) => setFilters(prev => ({ ...prev, shopName: val as string }))} />
+          <Input placeholder="快递单号" value={filters.trackingNumber || ''} onChange={(val) => setFilters(prev => ({ ...prev, trackingNumber: val as string }))} />
+          <Input placeholder="手机型号" value={filters.model || ''} onChange={(val) => setFilters(prev => ({ ...prev, model: val as string }))} />
+          <Select
+            placeholder="异常状态"
+            value={filters.hasIssue === undefined ? '' : String(filters.hasIssue)}
+            onChange={(val) => setFilters(prev => ({ ...prev, hasIssue: val === '' ? undefined : val === 'true' }))}
+            options={[{ label: '全部', value: '' }, { label: '有异常', value: 'true' }, { label: '正常', value: 'false' }]}
+          />
+          <input type="date" className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-primary" placeholder="开始日期" value={filters.startDate || ''} onChange={(e) => setFilters(prev => ({ ...prev, startDate: e.target.value }))} />
+          <input type="date" className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-primary" placeholder="结束日期" value={filters.endDate || ''} onChange={(e) => setFilters(prev => ({ ...prev, endDate: e.target.value }))} />
+        </div>
+        <div className="flex gap-2 mt-3">
+          <Button theme="primary" icon={<Search size={16} />} onClick={handleSearch}>查询</Button>
+          <Button variant="outline" icon={<RotateCcw size={16} />} onClick={handleReset}>重置</Button>
+        </div>
+      </div>
+
+      {/* 表格 */}
+      <div className="glass-card">
+        <Table
+          data={displayRecords}
+          columns={columns}
+          loading={inbound.loading}
+          rowKey="_id"
+          tableLayout="fixed"
+          hover
+          stripe
+          onRowClick={({ row }) => handleDetail(row as InboundRecord)}
+        />
+        {/* 分页 */}
+        <div className="flex justify-center items-center gap-2 py-4 border-t border-gray-100">
+          <Button size="small" variant="outline" disabled={inbound.currentPage <= 1}>
+            首页
+          </Button>
+          <span className="text-sm text-gray-500">第 {inbound.currentPage} 页</span>
+          <Button size="small" variant="outline" disabled={!inbound.hasMore}
+            onClick={() => inbound.fetchRecords(inbound.cursor)}>
+            下一页
+          </Button>
+          <span className="text-sm text-gray-400">共 {inbound.totalRecords} 条</span>
+        </div>
+      </div>
+
+      {/* 详情弹窗 */}
+      <RecordDetail
+        visible={detailVisible}
+        record={currentRecord}
+        type="inbound"
+        onClose={() => setDetailVisible(false)}
+        onEdit={handleEdit}
+        onDelete={() => setDeleteConfirmVisible(true)}
+      />
+
+      {/* 编辑弹窗 */}
+      <RecordEdit
+        visible={editVisible}
+        record={currentRecord}
+        type="inbound"
+        onClose={() => setEditVisible(false)}
+        onSave={handleSave}
+      />
+
+      {/* 删除确认 */}
+      <Dialog
+        header="确认删除"
+        visible={deleteConfirmVisible}
+        onClose={() => setDeleteConfirmVisible(false)}
+        onConfirm={handleDelete}
+      >
+        <p>确定要删除这条入库记录吗？此操作不可撤销。</p>
+      </Dialog>
+    </div>
+  );
+}

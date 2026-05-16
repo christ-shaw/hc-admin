@@ -1,0 +1,1382 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>出入库记录查询系统</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📦</text></svg>">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+            background: #f5f5f5;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+            position: relative;
+        }
+
+        .header h1 {
+            color: #333;
+            font-size: 28px;
+            margin-bottom: 10px;
+        }
+
+        /* 设置按钮样式 */
+        .settings-btn {
+            position: absolute;
+            right: 0;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 40px;
+            height: 40px;
+            border: 1px solid #d9d9d9;
+            border-radius: 50%;
+            background: white;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s;
+            font-size: 20px;
+        }
+
+        .settings-btn:hover {
+            border-color: #1890ff;
+            color: #1890ff;
+        }
+
+        /* 下拉菜单样式 */
+        .dropdown-menu {
+            position: absolute;
+            right: 0;
+            top: calc(100% + 8px);
+            background: white;
+            border: 1px solid #e8e8e8;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            min-width: 160px;
+            display: none;
+            z-index: 100;
+            overflow: hidden;
+        }
+
+        .dropdown-menu.active {
+            display: block;
+        }
+
+        .dropdown-item {
+            padding: 12px 16px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+            font-size: 14px;
+            color: #333;
+        }
+
+        .dropdown-item:hover {
+            background-color: #f5f5f5;
+        }
+
+        .dropdown-item:first-child {
+            border-radius: 8px 8px 0 0;
+        }
+
+        .dropdown-item:last-child {
+            border-radius: 0 0 8px 8px;
+        }
+
+        .nav-tabs {
+            background: white;
+            border-radius: 8px 8px 0 0;
+            padding: 0 20px;
+            display: flex;
+            gap: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            border-bottom: 2px solid #e8e8e8;
+        }
+
+        .nav-tab {
+            padding: 16px 24px;
+            font-size: 16px;
+            font-weight: 500;
+            color: #666;
+            cursor: pointer;
+            transition: all 0.3s;
+            position: relative;
+            border-bottom: 3px solid transparent;
+        }
+
+        .nav-tab:hover {
+            color: #1890ff;
+        }
+
+        .nav-tab.active {
+            color: #1890ff;
+            border-bottom-color: #1890ff;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .filter-section {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        .filter-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 15px;
+        }
+
+        .filter-form {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            align-items: end;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .form-group label {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 5px;
+            font-weight: 500;
+        }
+
+        .form-group input {
+            padding: 10px;
+            border: 1px solid #d9d9d9;
+            border-radius: 4px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+
+        .form-group input:focus {
+            outline: none;
+            border-color: #1890ff;
+            box-shadow: 0 0 0 2px rgba(24,144,255,0.2);
+        }
+
+        .form-group select {
+            padding: 10px;
+            border: 1px solid #d9d9d9;
+            border-radius: 4px;
+            font-size: 14px;
+            background-color: #fff;
+            cursor: pointer;
+        }
+
+        .form-group select:focus {
+            outline: none;
+            border-color: #1890ff;
+            box-shadow: 0 0 0 2px rgba(24,144,255,0.2);
+        }
+
+        .filter-actions {
+            display: flex;
+            gap: 10px;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-weight: 500;
+        }
+
+        .btn-primary {
+            background: #1890ff;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #40a9ff;
+        }
+
+        .btn-secondary {
+            background: #fff;
+            border: 1px solid #d9d9d9;
+            color: #333;
+        }
+
+        .btn-secondary:hover {
+            border-color: #1890ff;
+            color: #1890ff;
+        }
+
+        .btn-danger {
+            background: #ff4d4f;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #ff7875;
+        }
+
+        .main-content {
+            display: none;
+        }
+
+        .main-content.active {
+            display: block;
+        }
+
+        .panel {
+            background: white;
+            border-radius: 0 0 8px 8px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        .panel-title {
+            font-size: 20px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #e8e8e8;
+        }
+
+        .inbound .panel-title {
+            color: #52c41a;
+            border-color: #52c41a;
+        }
+
+        .outbound .panel-title {
+            color: #ff4d4f;
+            border-color: #ff4d4f;
+        }
+
+        .loading {
+            text-align: center;
+            color: #999;
+            padding: 40px;
+        }
+
+        .error {
+            text-align: center;
+            color: #ff4d4f;
+            padding: 40px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #e8e8e8;
+        }
+
+        th {
+            background: #fafafa;
+            font-weight: 600;
+            color: #666;
+        }
+
+        tbody tr {
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+
+        tbody tr:hover {
+            background-color: #f0f0f0;
+        }
+
+        /* 异常记录标识 - 红色 */
+        tbody tr.has-issue {
+            background-color: #fff5f5;
+            border-left: 4px solid #ff4d4f;
+        }
+
+        tbody tr.has-issue:hover {
+            background-color: #ffe7e7;
+        }
+
+        tbody tr.has-issue td {
+            color: #cf1322;
+        }
+
+        .empty {
+            text-align: center;
+            color: #999;
+            padding: 40px;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+        }
+
+        .modal.active {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-content {
+            background: white;
+            border-radius: 8px;
+            width: 90%;
+            max-width: 600px;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+
+        .modal-header {
+            padding: 20px;
+            border-bottom: 1px solid #e8e8e8;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-title {
+            font-size: 20px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .close-btn {
+            background: none;
+            border: none;
+            font-size: 28px;
+            cursor: pointer;
+            color: #999;
+            padding: 0;
+            width: 32px;
+            height: 32px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .close-btn:hover {
+            color: #333;
+        }
+
+        .modal-actions {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .modal-actions .btn {
+            padding: 8px 16px;
+            font-size: 14px;
+        }
+
+        .modal-body {
+            padding: 20px;
+        }
+
+        .detail-item {
+            display: flex;
+            padding: 12px 0;
+            border-bottom: 1px solid #f0f0f0;
+        }
+
+        .detail-label {
+            font-weight: 600;
+            color: #666;
+            width: 120px;
+            flex-shrink: 0;
+        }
+
+        .detail-value {
+            color: #333;
+            word-break: break-all;
+        }
+
+        .detail-remark {
+            flex-direction: column;
+        }
+
+        .detail-remark .detail-value {
+            width: 100%;
+            margin-top: 8px;
+        }
+
+        .readonly-textarea {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #e8e8e8;
+            border-radius: 4px;
+            background: #fafafa;
+            color: #333;
+            font-size: 14px;
+            line-height: 1.5;
+            resize: none;
+            cursor: default;
+        }
+
+        /* 异常记录备注框 - 红色 */
+        .readonly-textarea.has-issue {
+            background: #fff5f5;
+            border: 1px solid #ff4d4f;
+            color: #cf1322;
+        }
+
+        .type-inbound {
+            color: #52c41a;
+        }
+
+        .type-outbound {
+            color: #ff4d4f;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+
+        .badge-inbound {
+            background: #f6ffed;
+            color: #52c41a;
+        }
+
+        .badge-outbound {
+            background: #fff1f0;
+            color: #ff4d4f;
+        }
+
+        .phone-models {
+            margin-top: 8px;
+        }
+
+        .phone-model-item {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            padding: 8px 0;
+            color: #666;
+            flex-wrap: nowrap;
+        }
+
+        .phone-model-item .phone-brand-select {
+            flex: 1;
+            min-width: 0;
+            padding: 8px;
+            border: 1px solid #d9d9d9;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+
+        .phone-model-item .phone-model-select {
+            flex: 2;
+            min-width: 0;
+            padding: 8px;
+            border: 1px solid #d9d9d9;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+
+        .phone-model-item .phone-quantity {
+            flex: 1;
+            padding: 8px;
+            border: 1px solid #d9d9d9;
+            border-radius: 4px;
+            font-size: 14px;
+            flex-shrink: 0;
+        }
+
+        .phone-model-item .btn {
+            flex-shrink: 0;
+            padding: 6px 12px;
+        }
+
+        .photo-gallery {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+            gap: 10px;
+            margin-top: 10px;
+        }
+
+        .photo-item {
+            position: relative;
+            padding-bottom: 100%;
+            overflow: hidden;
+            border-radius: 4px;
+            border: 1px solid #e8e8e8;
+            cursor: pointer;
+        }
+
+        .photo-item img {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transition: transform 0.3s;
+        }
+
+        .photo-item:hover img {
+            transform: scale(1.05);
+        }
+
+        .section-title {
+            font-weight: 600;
+            color: #333;
+            margin-top: 16px;
+            margin-bottom: 8px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #f0f0f0;
+        }
+
+        .phone-model-item input,
+        .phone-model-item select {
+            padding: 8px;
+            border: 1px solid #d9d9d9;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+
+        .modal-body #edit-form .form-group {
+            margin-bottom: 15px;
+        }
+
+        .modal-body #edit-form label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+            color: #666;
+        }
+
+        .modal-body #edit-form input,
+        .modal-body #edit-form select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #d9d9d9;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+
+        .modal-body #edit-form button {
+            margin-top: 10px;
+        }
+
+        @media (max-width: 768px) {
+            .main-content {
+                grid-template-columns: 1fr;
+            }
+
+            th, td {
+                padding: 8px;
+                font-size: 14px;
+            }
+        }
+
+        .pagination {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 8px;
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid #e8e8e8;
+        }
+
+        .pagination button {
+            padding: 8px 16px;
+            border: 1px solid #d9d9d9;
+            background: white;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+
+        .pagination button:hover:not(:disabled) {
+            border-color: #1890ff;
+            color: #1890ff;
+        }
+
+        .pagination button:disabled {
+            color: #d9d9d9;
+            cursor: not-allowed;
+            background: #fafafa;
+        }
+
+        .pagination .active {
+            background: #1890ff;
+            color: white;
+            border-color: #1890ff;
+        }
+
+        .pagination-info {
+            font-size: 14px;
+            color: #666;
+            margin: 0 12px;
+        }
+
+        /* 统计页面样式 */
+        .stats-panel {
+            background: white;
+            border-radius: 0 0 8px 8px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        .stats-panel .panel-title {
+            color: #722ed1;
+            border-color: #722ed1;
+            margin-bottom: 20px;
+        }
+
+        .date-selector {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            align-items: center;
+        }
+
+        .date-input {
+            padding: 8px 12px;
+            border: 1px solid #d9d9d9;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+
+        .stats-table-container {
+            overflow-x: auto;
+        }
+
+        .stats-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+
+        .stats-table th {
+            background: #fafafa;
+            padding: 12px;
+            text-align: left;
+            border-bottom: 2px solid #e8e8e8;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .stats-table td {
+            padding: 12px;
+            border-bottom: 1px solid #e8e8e8;
+        }
+
+        .stats-table tr:hover {
+            background: #fafafa;
+        }
+
+        .stats-table .inbound-col {
+            color: #52c41a;
+            font-weight: 500;
+        }
+
+        .stats-table .outbound-col {
+            color: #ff4d4f;
+            font-weight: 500;
+        }
+
+        .stats-table .change-positive {
+            color: #52c41a;
+        }
+
+        .stats-table .change-negative {
+            color: #ff4d4f;
+        }
+
+        .stats-table .empty-message {
+            text-align: center;
+            color: #999;
+            padding: 40px;
+        }
+
+        /* 日志页面样式 */
+        .tag {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .tag-create {
+            background: #f6ffed;
+            color: #52c41a;
+            border: 1px solid #b7eb8f;
+        }
+
+        /* 可双击的日志行样式 */
+        .clickable-row {
+            background-color: #fafafa !important;
+        }
+
+        .clickable-row:hover {
+            background-color: #e6f7ff !important;
+        }
+
+        /* 原始记录数据显示样式 */
+        .raw-record-detail {
+            padding: 10px;
+        }
+
+        .raw-record-detail h3 {
+            margin-bottom: 15px;
+            color: #333;
+            font-size: 16px;
+            border-bottom: 1px solid #e8e8e8;
+            padding-bottom: 10px;
+        }
+
+        .raw-json {
+            background: #f5f5f5;
+            border: 1px solid #e8e8e8;
+            border-radius: 4px;
+            padding: 15px;
+            font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+            font-size: 12px;
+            line-height: 1.6;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 500px;
+            overflow-y: auto;
+        }
+
+        /* 修改历史样式 */
+        .record-history {
+            padding: 10px;
+        }
+
+        .record-history h3 {
+            margin-bottom: 10px;
+            color: #333;
+            font-size: 16px;
+            border-bottom: 1px solid #e8e8e8;
+            padding-bottom: 10px;
+        }
+
+        .history-summary {
+            color: #666;
+            font-size: 13px;
+            margin-bottom: 15px;
+        }
+
+        .history-item {
+            border: 1px solid #e8e8e8;
+            border-radius: 6px;
+            margin-bottom: 15px;
+            overflow: hidden;
+        }
+
+        .history-header {
+            background: #fafafa;
+            padding: 10px 15px;
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            border-bottom: 1px solid #e8e8e8;
+            font-size: 13px;
+        }
+
+        .history-index {
+            font-weight: 600;
+            color: #1890ff;
+        }
+
+        .history-time {
+            color: #666;
+        }
+
+        .history-operator {
+            color: #52c41a;
+        }
+
+        .changes-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .changes-table th,
+        .changes-table td {
+            padding: 10px;
+            text-align: left;
+            border-bottom: 1px solid #f0f0f0;
+            font-size: 13px;
+        }
+
+        .changes-table th {
+            background: #fafafa;
+            font-weight: 500;
+            color: #666;
+        }
+
+        .changes-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .changes-table .field-name {
+            font-weight: 500;
+            color: #333;
+            width: 100px;
+        }
+
+        .changes-table .old-value,
+        .changes-table .new-value {
+            width: 45%;
+        }
+
+        .changes-table pre {
+            margin: 0;
+            font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+            word-break: break-all;
+            background: #f5f5f5;
+            padding: 8px;
+            border-radius: 4px;
+            max-height: 150px;
+            overflow-y: auto;
+        }
+
+        .changes-table .old-value pre {
+            background: #fff2f0;
+            border-left: 3px solid #ff4d4f;
+        }
+
+        .changes-table .new-value pre {
+            background: #f6ffed;
+            border-left: 3px solid #52c41a;
+        }
+
+        .tag-update {
+            background: #e6f7ff;
+            color: #1890ff;
+            border: 1px solid #91d5ff;
+        }
+
+        .tag-delete {
+            background: #fff2f0;
+            color: #ff4d4f;
+            border: 1px solid #ffccc7;
+        }
+
+        .tag-inbound {
+            background: #f6ffed;
+            color: #52c41a;
+            border: 1px solid #b7eb8f;
+        }
+
+        .tag-outbound {
+            background: #fff2f0;
+            color: #ff4d4f;
+            border: 1px solid #ffccc7;
+        }
+
+        /* 手机型号列表样式 */
+        .phone-models-list {
+            max-height: 500px;
+            overflow-y: auto;
+        }
+
+        .phone-model-actions {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #f0f0f0;
+        }
+
+        .add-form {
+            background: #f5f7fa;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+        }
+
+        .add-form-title {
+            font-size: 15px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 12px;
+        }
+
+        .add-form .form-group {
+            margin-bottom: 12px;
+        }
+
+        .add-form .form-group label {
+            display: block;
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 6px;
+        }
+
+        .add-form .form-input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #d9d9d9;
+            border-radius: 4px;
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+
+        .add-form .form-input:focus {
+            outline: none;
+            border-color: #1890ff;
+        }
+
+        .add-form textarea.form-input {
+            resize: vertical;
+            min-height: 60px;
+        }
+
+        .form-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 12px;
+        }
+
+        .brand-item {
+            margin-bottom: 8px;
+        }
+
+        .brand-header {
+            padding: 12px 16px;
+            background: #f5f7fa;
+            border-radius: 6px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: all 0.2s;
+            user-select: none;
+        }
+
+        .brand-header:hover {
+            background: #e8eaed;
+        }
+
+        .brand-name {
+            font-size: 15px;
+            color: #333;
+            font-weight: 600;
+        }
+
+        .brand-arrow {
+            font-size: 12px;
+            color: #999;
+            transition: transform 0.3s;
+        }
+
+        .brand-header.expanded .brand-arrow {
+            transform: rotate(180deg);
+        }
+
+        .brand-models {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.3s ease-out;
+            background: #fff;
+        }
+
+        .brand-models.expanded {
+            max-height: 1000px;
+        }
+
+        .phone-model-list-item {
+            padding: 10px 16px 10px 32px;
+            border-bottom: 1px solid #f0f0f0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .phone-model-list-item:last-child {
+            border-bottom: none;
+        }
+
+        .phone-model-name {
+            font-size: 14px;
+            color: #666;
+        }
+
+        .phone-model-count {
+            font-size: 13px;
+            color: #999;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>出入库记录查询系统</h1>
+            <button class="settings-btn" onclick="toggleSettingsMenu(event)" title="设置">⚙️</button>
+            <div class="dropdown-menu" id="settings-dropdown">
+                <div class="dropdown-item" onclick="openPhoneModelsModal()">📱 读取手机型号</div>
+            </div>
+        </div>
+
+        <!-- 导航标签页 -->
+        <div class="nav-tabs">
+            <div class="nav-tab active" onclick="switchTab('inbound')">📦 入库记录</div>
+            <div class="nav-tab" onclick="switchTab('outbound')">📤 出库记录</div>
+            <div class="nav-tab" onclick="switchTab('stats')">📊 统计分析</div>
+            <div class="nav-tab" onclick="switchTab('logs')">📋 操作日志</div>
+        </div>
+
+        <!-- 入库记录标签页内容 -->
+        <div id="tab-inbound" class="tab-content active">
+            <!-- 过滤查询区域 -->
+            <div class="filter-section">
+            <div class="filter-title">🔍 筛选查询</div>
+            <div class="filter-form">
+                <div class="form-group">
+                    <label>客户/供应商名称</label>
+                    <input type="text" id="filter-name" placeholder="输入客户或供应商名称">
+                </div>
+                <div class="form-group">
+                    <label>渠道类型</label>
+                    <select id="filter-type">
+                        <option value="">全部</option>
+                        <option value="return">归还</option>
+                        <option value="afterSale">售后</option>
+                        <option value="recycle">回收</option>
+                        <option value="purchase">采购</option>
+                        <option value="normal">正常</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>渠道名称</label>
+                    <select id="filter-shopname">
+                        <option value="">全部</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>入库开始日期</label>
+                    <input type="date" id="filter-date-inbound-start">
+                </div>
+                <div class="form-group">
+                    <label>入库结束日期</label>
+                    <input type="date" id="filter-date-inbound-end">
+                </div>
+                <div class="form-group">
+                    <label>入库快递单号</label>
+                    <input type="text" id="filter-tracking" placeholder="输入快递单号">
+                </div>
+                <div class="form-group">
+                    <label>手机型号</label>
+                    <input type="text" id="filter-phone-model" placeholder="输入手机型号">
+                </div>
+                <div class="form-group">
+                    <label>异常状态</label>
+                    <select id="filter-has-issue">
+                        <option value="">全部</option>
+                        <option value="true">有异常</option>
+                        <option value="false">正常</option>
+                    </select>
+                </div>
+                <div class="filter-actions">
+                    <button class="btn btn-primary" onclick="applyFilters()">查询</button>
+                    <button class="btn btn-secondary" onclick="resetFilters()">重置</button>
+                </div>
+            </div>
+        </div>
+
+            <div class="main-content active">
+                <div class="panel inbound">
+                    <div class="panel-title">📦 入库记录</div>
+                    <div id="inbound-list">
+                        <div class="loading">加载中...</div>
+                    </div>
+                    <div id="inbound-pagination" class="pagination"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 出库记录标签页内容 -->
+        <div id="tab-outbound" class="tab-content">
+            <!-- 过滤查询区域 -->
+            <div class="filter-section">
+                <div class="filter-title">🔍 筛选查询</div>
+                <div class="filter-form">
+                    <div class="form-group">
+                        <label>客户/供应商名称</label>
+                        <input type="text" id="filter-name-outbound" placeholder="输入客户或供应商名称">
+                    </div>
+                    <div class="form-group">
+                        <label>出库开始日期</label>
+                        <input type="date" id="filter-date-outbound-start">
+                    </div>
+                    <div class="form-group">
+                        <label>出库结束日期</label>
+                        <input type="date" id="filter-date-outbound-end">
+                    </div>
+                    <div class="form-group">
+                        <label>手机型号</label>
+                        <input type="text" id="filter-phone-model-outbound" placeholder="输入手机型号">
+                    </div>
+                    <div class="filter-actions">
+                        <button class="btn btn-primary" onclick="applyFilters()">查询</button>
+                        <button class="btn btn-secondary" onclick="resetFilters()">重置</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="main-content active">
+                <div class="panel outbound">
+                    <div class="panel-title">📤 出库记录</div>
+                    <div id="outbound-list">
+                        <div class="loading">加载中...</div>
+                    </div>
+                    <div id="outbound-pagination" class="pagination"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 统计分析标签页内容 -->
+        <div id="tab-stats" class="tab-content">
+            <div class="stats-panel">
+                <div class="panel-title">📊 按手机型号统计</div>
+                
+                <!-- 日期选择器 -->
+                <div class="date-selector">
+                    <input type="date" id="stats-date" class="date-input">
+                    <button class="btn-primary" onclick="loadPhoneModelStats()">查询</button>
+                </div>
+
+                <!-- 按型号统计表格 -->
+                <div class="stats-table-container">
+                    <table class="stats-table">
+                        <thead>
+                            <tr>
+                                <th>手机型号</th>
+                                <th>入库数量</th>
+                                <th>出库数量</th>
+                            </tr>
+                        </thead>
+                        <tbody id="phone-model-stats-body">
+                            <tr>
+                                <td colspan="3" class="empty-message">请选择日期查询</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- 订单数统计表格 -->
+                <div class="stats-table-container" style="margin-top: 20px;">
+                    <div style="font-size: 16px; font-weight: 600; color: #722ed1; margin-bottom: 12px;">📋 订单数统计</div>
+                    <table class="stats-table">
+                        <thead>
+                            <tr>
+                                <th>类型</th>
+                                <th>订单数</th>
+                            </tr>
+                        </thead>
+                        <tbody id="order-stats-body">
+                            <tr>
+                                <td colspan="2" class="empty-message">请选择日期查询</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- 操作日志标签页内容 -->
+        <div id="tab-logs" class="tab-content">
+            <!-- 过滤查询区域 -->
+            <div class="filter-section">
+                <div class="filter-title">🔍 日志筛选</div>
+                <div class="filter-form">
+                    <div class="form-group">
+                        <label>操作人</label>
+                        <input type="text" id="filter-logs-operator" placeholder="输入操作人">
+                    </div>
+                    <div class="form-group">
+                        <label>操作类型</label>
+                        <select id="filter-logs-operation-type">
+                            <option value="">全部</option>
+                            <option value="create">创建</option>
+                            <option value="update">更新</option>
+                            <option value="delete">删除</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>日志类型</label>
+                        <select id="filter-logs-log-type">
+                            <option value="">全部</option>
+                            <option value="inbound">入库</option>
+                            <option value="outbound">出库</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>开始日期</label>
+                        <input type="date" id="filter-logs-start-date">
+                    </div>
+                    <div class="form-group">
+                        <label>结束日期</label>
+                        <input type="date" id="filter-logs-end-date">
+                    </div>
+                    <div class="form-group" style="display: flex; align-items: flex-end; gap: 10px;">
+                        <button class="btn btn-primary" onclick="applyLogsFilters()">查询</button>
+                        <button class="btn btn-secondary" onclick="resetLogsFilters()">重置</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="record-panel">
+                <div class="panel-title">📋 操作日志列表</div>
+                <div id="logs-list" class="record-list">
+                    <!-- 动态加载日志列表 -->
+                </div>
+                <div id="logs-pagination" class="pagination-container">
+                    <!-- 动态加载分页 -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 详情弹窗 -->
+    <div class="modal" id="detail-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="modal-title">记录详情</div>
+                <div class="modal-actions">
+                    <button id="detail-edit-btn" class="btn btn-primary" onclick="openEditModal()">编辑</button>
+                    <button id="detail-delete-btn" class="btn btn-danger" onclick="confirmDelete()">删除</button>
+                    <button class="close-btn" onclick="closeModal()">&times;</button>
+                </div>
+            </div>
+            <div class="modal-body" id="detail-content">
+            </div>
+        </div>
+    </div>
+
+    <!-- 编辑弹窗 -->
+    <div class="modal" id="edit-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="modal-title">编辑记录</div>
+                <div class="modal-actions">
+                    <button class="btn btn-primary" onclick="saveRecord()">保存</button>
+                    <button class="close-btn" onclick="closeEditModal()">&times;</button>
+                </div>
+            </div>
+            <div class="modal-body" id="edit-content">
+            </div>
+        </div>
+    </div>
+
+    <!-- 手机型号列表弹窗 -->
+    <div class="modal" id="phone-models-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="modal-title">📱 手机型号列表</div>
+                <div class="modal-actions">
+                    <button class="close-btn" onclick="closePhoneModelsModal()">&times;</button>
+                </div>
+            </div>
+            <div class="modal-body">
+                <!-- 操作按钮区域 -->
+                <div class="phone-model-actions">
+                    <button class="btn btn-primary" onclick="showAddBrandForm()">添加品牌</button>
+                    <button class="btn btn-primary" onclick="showAddModelForm()">添加型号</button>
+                </div>
+
+                <!-- 添加品牌表单 -->
+                <div id="add-brand-form" class="add-form" style="display: none;">
+                    <div class="add-form-title">添加新品牌</div>
+                    <div class="form-group">
+                        <input type="text" id="new-brand-name" placeholder="输入品牌名称" class="form-input">
+                    </div>
+                    <div class="form-actions">
+                        <button class="btn btn-primary" onclick="submitAddBrand()">确认添加</button>
+                        <button class="btn btn-secondary" onclick="hideAddBrandForm()">取消</button>
+                    </div>
+                </div>
+
+                <!-- 添加型号表单 -->
+                <div id="add-model-form" class="add-form" style="display: none;">
+                    <div class="add-form-title">添加手机型号</div>
+                    <div class="form-group">
+                        <label>选择品牌：</label>
+                        <select id="model-brand-select" class="form-input">
+                            <option value="">请选择品牌</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>输入型号（多个型号用逗号分隔）：</label>
+                        <textarea id="new-models-input" class="form-input" rows="3" placeholder="例如：iPhone 15, iPhone 15 Pro, iPhone 15 Pro Max"></textarea>
+                    </div>
+                    <div class="form-actions">
+                        <button class="btn btn-primary" onclick="submitAddModels()">确认添加</button>
+                        <button class="btn btn-secondary" onclick="hideAddModelForm()">取消</button>
+                    </div>
+                </div>
+
+                <!-- 手机型号列表 -->
+                <div id="phone-models-content" class="phone-models-list">
+                    <div class="loading">加载中...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 云开发 SDK -->
+    <script src="https://static.cloudbase.net/cloudbase-js-sdk/latest/cloudbase.full.js"></script>
+    <!-- Chart.js 图表库 (使用 jsdelivr CDN) -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <!-- 模块化脚本（按依赖顺序加载） -->
+    <script src="js/config.js?v=202605052144"></script>
+    <script src="js/state.js?v=202605052144"></script>
+    <script src="js/utils.js?v=202605052144"></script>
+    <script src="js/api.js?v=202605052144"></script>
+    <script src="js/render.js?v=202605052144"></script>
+    <script src="app.js?v=202605052144"></script>
+
+    <!-- 版本信息 -->
+    <div style="text-align: center; color: #999; font-size: 12px; margin-top: 20px; padding: 10px;">
+        出入库记录查询系统 v1.0.0
+    </div>
+</body>
+</html>
