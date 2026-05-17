@@ -1,64 +1,52 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import cloudbase from '@cloudbase/js-sdk';
+
 const ENV_ID = import.meta.env.VITE_CLOUDBASE_ENV;
+const ACCESS_KEY = import.meta.env.VITE_CLOUDBASE_ACCESS_KEY;
 
-let app: any = null;
-let initPromise: Promise<boolean> | null = null;
+const app = cloudbase.init({
+  env: ENV_ID,
+  region: 'ap-shanghai',
+  accessKey: ACCESS_KEY,
+  auth: { detectSessionInUrl: true },
+});
 
-/** 确保 CloudBase 已初始化，自动初始化无需登录 */
-export async function ensureInit(): Promise<boolean> {
-  if (app) return true;
-  if (initPromise) return initPromise;
+export const auth = app.auth({ persistence: 'local' });
 
-  initPromise = (async () => {
-    if (!ENV_ID) {
-      console.error('CloudBase 环境 ID 未配置');
-      return false;
-    }
-
-    try {
-      const sdkModule = await import('@cloudbase/js-sdk');
-      let cloudbase: any = sdkModule;
-      while (cloudbase.default && typeof cloudbase.default === 'object') {
-        cloudbase = cloudbase.default;
-      }
-      if (typeof cloudbase !== 'function' && typeof cloudbase.init !== 'function') {
-        console.error('CloudBase SDK 导入异常:', sdkModule);
-        return false;
-      }
-      app = cloudbase.init ? cloudbase.init({ env: ENV_ID }) : cloudbase({ env: ENV_ID });
-
-      // 自动匿名登录（对用户透明）
-      const auth = app.auth({ persistence: 'local' });
-      const loginState = await auth.getLoginState();
-      if (!loginState) {
-        await auth.signInAnonymously();
-        console.log('CloudBase 匿名登录完成');
-      } else {
-        console.log('CloudBase 已有登录状态');
-      }
-      return true;
-    } catch (err) {
-      console.error('CloudBase 初始化失败:', err);
-      initPromise = null;
-      return false;
-    }
-  })();
-
-  return initPromise;
+/** 获取当前登录会话，未登录返回 null */
+export async function getSession() {
+  const { data } = await auth.getSession();
+  return data?.session || null;
 }
 
-/** 获取 CloudBase 实例（需先调用 ensureInit） */
-export function getApp(): any {
-  if (!app) {
-    throw new Error('CloudBase 未初始化');
-  }
-  return app;
+/** 用户名密码登录 */
+export async function signIn(username: string, password: string) {
+  return auth.signInWithPassword({ username, password });
 }
 
-/** 调用云函数（自动初始化） */
+/** 登出 */
+export async function signOut() {
+  return auth.signOut();
+}
+
+/** 获取当前用户信息 */
+export async function getCurrentUser() {
+  const { data } = await auth.getUser();
+  return data?.user || null;
+}
+
+/** 获取当前操作人名称（优先昵称，其次用户名，最后用户ID） */
+export async function getCurrentOperatorName(): Promise<string> {
+  const user = await getCurrentUser();
+  if (!user) return '未知用户';
+  return (user as any).user_metadata?.nickName
+    || (user as any).user_metadata?.username
+    || (user as any).id?.slice(0, 8)
+    || '未知用户';
+}
+
+/** 调用云函数 */
 export async function callFunction<T = any>(name: string, data?: Record<string, unknown>): Promise<T> {
-  await ensureInit();
-  const appInstance = getApp();
-  const result = await appInstance.callFunction({ name, data });
+  const result = await app.callFunction({ name, data });
   return result.result as T;
 }

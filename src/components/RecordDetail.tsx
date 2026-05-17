@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Dialog, Tag, Loading } from 'tdesign-react';
 import { InboundRecord, OutboundRecord, CHANNEL_TYPE_MAP } from '../types';
 import { formatDate, getTotalQuantity } from '../utils/format';
@@ -18,24 +18,53 @@ export function RecordDetail({ visible, record, type, onClose, onEdit, onDelete 
   const { getRealImageUrl } = useStorage();
   const { fetchRecordHistory } = useLogs();
   const [imageUrls, setImageUrls] = useState<Record<string, string>>({});
+  const [imagesLoading, setImagesLoading] = useState(false);
   const [historyVisible, setHistoryVisible] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyData, setHistoryData] = useState<Array<Record<string, unknown>>>([]);
-  const [imagesLoaded, setImagesLoaded] = useState(false);
+  const [previewVisible, setPreviewVisible] = useState(false);
+  const [previewSrc, setPreviewSrc] = useState('');
 
   const isInbound = type === 'inbound';
 
-  const loadImages = async (photos: string[]) => {
-    const urls: Record<string, string> = {};
-    for (const photo of photos) {
-      const url = await getRealImageUrl(photo);
-      urls[photo] = url;
+  // 当 record 变化时，重置并加载图片
+  useEffect(() => {
+    const photos = record?.phonePhotos;
+    if (!photos || photos.length === 0) {
+      setImageUrls({});
+      setImagesLoading(false);
+      return;
     }
-    setImageUrls(urls);
-    setImagesLoaded(true);
-  };
 
-  const loadHistory = async () => {
+    let cancelled = false;
+    setImagesLoading(true);
+    setImageUrls({});
+
+    (async () => {
+      const urls: Record<string, string> = {};
+      for (const photo of photos) {
+        if (cancelled) return;
+        try {
+          const url = await getRealImageUrl(photo);
+          if (!cancelled) {
+            urls[photo] = url;
+            // 逐个更新，让已加载的图片立刻显示
+            setImageUrls({ ...urls });
+          }
+        } catch {
+          if (!cancelled) {
+            urls[photo] = photo; // 兜底使用原始值
+            setImageUrls({ ...urls });
+          }
+        }
+      }
+      if (!cancelled) setImagesLoading(false);
+    })();
+
+    return () => { cancelled = true; };
+  }, [record?._id, getRealImageUrl]);
+
+  const loadHistory = useCallback(async () => {
     if (!record?._id) return;
     setHistoryVisible(true);
     setHistoryLoading(true);
@@ -44,14 +73,11 @@ export function RecordDetail({ visible, record, type, onClose, onEdit, onDelete 
       setHistoryData((result.data || []) as Array<Record<string, unknown>>);
     }
     setHistoryLoading(false);
-  };
+  }, [record?._id, fetchRecordHistory]);
 
   if (!record) return null;
 
   const photos = record.phonePhotos || [];
-  if (photos.length > 0 && !imagesLoaded) {
-    loadImages(photos);
-  }
 
   return (
     <>
@@ -107,17 +133,40 @@ export function RecordDetail({ visible, record, type, onClose, onEdit, onDelete 
           {photos.length > 0 && (
             <div>
               <span className="text-sm text-gray-500">照片：</span>
-              <div className="grid grid-cols-4 gap-2 mt-2">
-                {photos.map((photo, i) => (
-                  <a key={i} href={imageUrls[photo] || photo} target="_blank" rel="noreferrer">
-                    <img
-                      src={imageUrls[photo] || photo}
-                      alt={`照片${i + 1}`}
-                      className="w-full h-20 object-cover rounded-lg border border-gray-200 hover:opacity-80 transition-opacity"
-                    />
-                  </a>
-                ))}
-              </div>
+              {imagesLoading && Object.keys(imageUrls).length === 0 ? (
+                <div className="flex items-center gap-2 py-4"><Loading size="small" /><span className="text-xs text-gray-400">加载中...</span></div>
+              ) : (
+                <div className="grid grid-cols-4 gap-2 mt-2">
+                  {photos.map((photo, i) => {
+                    const src = imageUrls[photo];
+                    const isLoaded = !!src;
+                    return (
+                      <div key={i} className="relative group">
+                        {isLoaded ? (
+                          <img
+                            src={src}
+                            alt={`照片${i + 1}`}
+                            onClick={() => {
+                              setPreviewSrc(src);
+                              setPreviewVisible(true);
+                            }}
+                            onError={(e) => {
+                              // 图片加载失败时替换为占位图
+                              (e.target as HTMLImageElement).style.display = 'none';
+                              (e.target as HTMLImageElement).nextElementSibling?.classList.remove('hidden');
+                            }}
+                            className="w-full h-20 object-cover rounded-lg border border-gray-200 hover:opacity-80 hover:shadow-md transition-all cursor-zoom-in"
+                          />
+                        ) : null}
+                        {/* 加载中占位 / 加载失败占位 */}
+                        <div className={`w-full h-20 rounded-lg border border-gray-200 bg-gray-100 flex items-center justify-center text-gray-400 text-xs ${isLoaded ? 'hidden' : ''}`}>
+                          {isLoaded ? '' : '加载中...'}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -173,6 +222,27 @@ export function RecordDetail({ visible, record, type, onClose, onEdit, onDelete 
           </div>
         )}
       </Dialog>
+
+      {/* 照片预览弹窗 */}
+      {previewVisible && (
+        <div
+          className="fixed inset-0 z-[9999] bg-black/80 flex items-center justify-center"
+          onClick={() => setPreviewVisible(false)}
+        >
+          <button
+            className="absolute top-4 right-4 w-10 h-10 rounded-full bg-white/20 hover:bg-white/40 flex items-center justify-center text-white text-xl transition-colors cursor-pointer z-10"
+            onClick={() => setPreviewVisible(false)}
+          >
+            ✕
+          </button>
+          <img
+            src={previewSrc}
+            alt="照片预览"
+            className="max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          />
+        </div>
+      )}
     </>
   );
 }

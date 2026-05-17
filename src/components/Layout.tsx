@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Layout as TLayout } from 'tdesign-react';
+import { useState, useEffect } from 'react';
+import { Layout as TLayout, MessagePlugin } from 'tdesign-react';
 import {
   Package,
   ArrowDownCircle,
@@ -11,8 +11,11 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   LayoutDashboard,
+  LogOut,
+  User,
 } from 'lucide-react';
 import { useNavigate, useLocation } from 'react-router-dom';
+import { getCurrentUser, signOut } from '../lib/cloudbase';
 
 const { Header, Content, Aside } = TLayout;
 
@@ -30,6 +33,19 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
   const navigate = useNavigate();
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(false);
+  const [currentUser, setCurrentUser] = useState<{ id?: string; user_metadata?: { username?: string; nickName?: string } } | null>(null);
+
+  useEffect(() => {
+    getCurrentUser().then(user => {
+      if (user) setCurrentUser(user);
+    });
+  }, []);
+
+  const handleLogout = async () => {
+    await signOut();
+    MessagePlugin.success('已退出登录');
+    navigate('/login', { replace: true });
+  };
 
   return (
     <TLayout className="h-screen">
@@ -76,13 +92,31 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
 
       <TLayout>
         {/* 顶栏 */}
-        <Header className="!bg-white/80 !backdrop-blur-xl border-b border-gray-100 !h-14 flex items-center px-6">
+        <Header className="!bg-white/80 !backdrop-blur-xl border-b border-gray-100 !h-14 flex items-center justify-between px-6">
           <button
             onClick={() => setCollapsed(!collapsed)}
             className="text-gray-500 hover:text-primary transition-colors"
           >
             {collapsed ? <PanelLeftOpen size={20} /> : <PanelLeftClose size={20} />}
           </button>
+
+          {/* 用户信息 + 退出 */}
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2 text-sm text-gray-600">
+              <User size={16} className="text-gray-400" />
+              <span className="text-gray-500">用户名:</span>
+              <span className="font-medium text-gray-800">
+                {currentUser?.user_metadata?.nickName || currentUser?.user_metadata?.username || currentUser?.id?.slice(0, 8) || '--'}
+              </span>
+            </div>
+            <button
+              onClick={handleLogout}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-500 hover:text-danger hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
+            >
+              <LogOut size={16} />
+              <span>退出</span>
+            </button>
+          </div>
         </Header>
 
         {/* 内容区 */}

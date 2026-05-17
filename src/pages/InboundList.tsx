@@ -6,6 +6,7 @@ import { useInbound } from '../hooks/useInbound';
 import { useLogs } from '../hooks/useLogs';
 import { useStorage } from '../hooks/useStorage';
 import { formatDate, getTotalQuantity, getChannelTypeText } from '../utils/format';
+import { getCurrentOperatorName } from '../lib/cloudbase';
 import { RecordDetail } from '../components/RecordDetail';
 import { RecordEdit } from '../components/RecordEdit';
 
@@ -53,7 +54,8 @@ export function InboundList() {
   const handleSave = async (recordId: string, updateData: Record<string, unknown>) => {
     const success = await inbound.updateRecord(recordId, updateData as Partial<InboundRecord>);
     if (success) {
-      const logResult = await logs.saveOperationLog('update', 'inbound', recordId, updateData.customerName as string, '网页用户');
+      const operator = await getCurrentOperatorName();
+      const logResult = await logs.saveOperationLog('update', 'inbound', recordId, updateData.customerName as string, operator);
       await notifyRecordChange('update', 'inbound', { ...currentRecord, ...updateData } as Record<string, unknown>, logResult?._id);
       inbound.fetchRecords(null, inbound.filters);
     }
@@ -64,7 +66,8 @@ export function InboundList() {
     if (!currentRecord) return;
     const success = await inbound.deleteRecord(currentRecord._id);
     if (success) {
-      await logs.saveOperationLog('delete', 'inbound', currentRecord._id, currentRecord.customerName, '网页用户');
+      const operator = await getCurrentOperatorName();
+      await logs.saveOperationLog('delete', 'inbound', currentRecord._id, currentRecord.customerName, operator);
       await notifyRecordChange('delete', 'inbound', currentRecord as unknown as Record<string, unknown>);
       MessagePlugin.success('删除成功');
       setDeleteConfirmVisible(false);
