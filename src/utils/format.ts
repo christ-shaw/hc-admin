@@ -3,6 +3,13 @@ export function formatDate(dateStr: string | Date | { $date: string } | null, wi
   if (!dateStr) return '-';
 
   const actualDateStr = typeof dateStr === 'object' && '$date' in dateStr ? dateStr.$date : dateStr;
+
+  // 纯日期字符串（YYYY-MM-DD）直接返回，不经 Date 解析，避免浏览器时区偏移
+  if (typeof actualDateStr === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(actualDateStr)) {
+    if (!withTime) return actualDateStr;
+    return `${actualDateStr} 00:00`;
+  }
+
   const date = new Date(actualDateStr as string);
   if (isNaN(date.getTime())) return '-';
 

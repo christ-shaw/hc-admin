@@ -13,6 +13,11 @@ import {
   LayoutDashboard,
   LogOut,
   User,
+  ShoppingCart,
+  Receipt,
+  Building2,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { getCurrentUser, signOut } from '../lib/cloudbase';
@@ -27,12 +32,21 @@ const navItems = [
   { path: '/stats', label: '统计分析', Icon: BarChart3 },
   { path: '/logs', label: '操作日志', Icon: FileText },
   { path: '/models', label: '型号管理', Icon: Smartphone },
+  { path: '/orders', label: '订单管理', Icon: ShoppingCart },
+  {
+    label: '发票', Icon: Receipt,
+    children: [
+      { path: '/invoices', label: '开票管理', Icon: FileText },
+      { path: '/companies', label: '公司信息', Icon: Building2 },
+    ],
+  },
 ];
 
 export function AppLayout({ children }: { children: React.ReactNode }) {
   const navigate = useNavigate();
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(false);
+  const [expandedMenus, setExpandedMenus] = useState<string[]>(['发票']);
   const [currentUser, setCurrentUser] = useState<{ id?: string; user_metadata?: { username?: string; nickName?: string } } | null>(null);
 
   useEffect(() => {
@@ -40,6 +54,15 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
       if (user) setCurrentUser(user);
     });
   }, []);
+
+  const toggleMenu = (label: string) => {
+    setExpandedMenus(prev =>
+      prev.includes(label) ? prev.filter(l => l !== label) : [...prev, label]
+    );
+  };
+
+  const isGroupActive = (children: { path: string }[]) =>
+    children.some(c => location.pathname === c.path);
 
   const handleLogout = async () => {
     await signOut();
@@ -69,7 +92,56 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
 
           {/* 导航列表 */}
           <nav className="flex-1 pt-4 px-2 space-y-1">
-            {navItems.map(({ path, label, Icon }) => {
+            {navItems.map((item) => {
+              // 带子菜单的分组
+              if ('children' in item && item.children) {
+                const groupActive = isGroupActive(item.children);
+                const expanded = expandedMenus.includes(item.label);
+                return (
+                  <div key={item.label}>
+                    <button
+                      onClick={() => toggleMenu(item.label)}
+                      className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 cursor-pointer ${
+                        groupActive
+                          ? 'text-white bg-white/15 shadow-[0_0_20px_rgba(0,82,217,0.3)]'
+                          : 'text-white/60 hover:text-white hover:bg-white/10'
+                      }`}
+                    >
+                      <item.Icon size={18} className="flex-shrink-0" />
+                      {!collapsed && (
+                        <>
+                          <span className="text-sm whitespace-nowrap flex-1 text-left">{item.label}</span>
+                          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                        </>
+                      )}
+                    </button>
+                    {expanded && !collapsed && (
+                      <div className="ml-5 mt-1 space-y-1">
+                        {item.children.map((child) => {
+                          const isActive = location.pathname === child.path;
+                          return (
+                            <button
+                              key={child.path}
+                              onClick={() => navigate(child.path)}
+                              className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-lg transition-all duration-200 cursor-pointer ${
+                                isActive
+                                  ? 'text-white bg-white/15'
+                                  : 'text-white/50 hover:text-white hover:bg-white/10'
+                              }`}
+                            >
+                              <child.Icon size={16} className="flex-shrink-0" />
+                              <span className="text-sm whitespace-nowrap">{child.label}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              }
+
+              // 普通菜单项
+              const { path, label, Icon } = item as { path: string; label: string; Icon: React.ComponentType<{ size?: number; className?: string }> };
               const isActive = location.pathname === path;
               return (
                 <button

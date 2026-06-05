@@ -29,8 +29,11 @@ export function RecordDetail({ visible, record, type, onClose, onEdit, onDelete 
 
   // 当 record 变化时，重置并加载图片
   useEffect(() => {
-    const photos = record?.phonePhotos;
-    if (!photos || photos.length === 0) {
+    const packagePhotos = isInbound ? (record as InboundRecord)?.packagePhotos : [];
+    const phonePhotos = record?.phonePhotos;
+    const allPhotos = [...(packagePhotos || []), ...(phonePhotos || [])];
+
+    if (allPhotos.length === 0) {
       setImageUrls({});
       setImagesLoading(false);
       return;
@@ -42,7 +45,7 @@ export function RecordDetail({ visible, record, type, onClose, onEdit, onDelete 
 
     (async () => {
       const urls: Record<string, string> = {};
-      for (const photo of photos) {
+      for (const photo of allPhotos) {
         if (cancelled) return;
         try {
           const url = await getRealImageUrl(photo);
@@ -62,7 +65,7 @@ export function RecordDetail({ visible, record, type, onClose, onEdit, onDelete 
     })();
 
     return () => { cancelled = true; };
-  }, [record?._id, getRealImageUrl]);
+  }, [record?._id, getRealImageUrl, isInbound]);
 
   const loadHistory = useCallback(async () => {
     if (!record?._id) return;
@@ -77,7 +80,8 @@ export function RecordDetail({ visible, record, type, onClose, onEdit, onDelete 
 
   if (!record) return null;
 
-  const photos = record.phonePhotos || [];
+  const packagePhotos = isInbound ? (record as InboundRecord).packagePhotos || [] : [];
+  const phonePhotos = record.phonePhotos || [];
 
   return (
     <>
@@ -129,42 +133,33 @@ export function RecordDetail({ visible, record, type, onClose, onEdit, onDelete 
           } />
           {record.remark && <DetailItem label="备注" value={record.remark} />}
 
-          {/* 照片 */}
-          {photos.length > 0 && (
+          {/* 包裹照片 */}
+          {isInbound && packagePhotos.length > 0 && (
             <div>
-              <span className="text-sm text-gray-500">照片：</span>
+              <span className="text-sm text-gray-500">包裹照片：</span>
               {imagesLoading && Object.keys(imageUrls).length === 0 ? (
                 <div className="flex items-center gap-2 py-4"><Loading size="small" /><span className="text-xs text-gray-400">加载中...</span></div>
               ) : (
                 <div className="grid grid-cols-4 gap-2 mt-2">
-                  {photos.map((photo, i) => {
-                    const src = imageUrls[photo];
-                    const isLoaded = !!src;
-                    return (
-                      <div key={i} className="relative group">
-                        {isLoaded ? (
-                          <img
-                            src={src}
-                            alt={`照片${i + 1}`}
-                            onClick={() => {
-                              setPreviewSrc(src);
-                              setPreviewVisible(true);
-                            }}
-                            onError={(e) => {
-                              // 图片加载失败时替换为占位图
-                              (e.target as HTMLImageElement).style.display = 'none';
-                              (e.target as HTMLImageElement).nextElementSibling?.classList.remove('hidden');
-                            }}
-                            className="w-full h-20 object-cover rounded-lg border border-gray-200 hover:opacity-80 hover:shadow-md transition-all cursor-zoom-in"
-                          />
-                        ) : null}
-                        {/* 加载中占位 / 加载失败占位 */}
-                        <div className={`w-full h-20 rounded-lg border border-gray-200 bg-gray-100 flex items-center justify-center text-gray-400 text-xs ${isLoaded ? 'hidden' : ''}`}>
-                          {isLoaded ? '' : '加载中...'}
-                        </div>
-                      </div>
-                    );
-                  })}
+                  {packagePhotos.map((photo, i) => (
+                    <PhotoItem key={`pkg-${i}`} photo={photo} imageUrls={imageUrls} onPreview={(src) => { setPreviewSrc(src); setPreviewVisible(true); }} />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 手机照片 */}
+          {phonePhotos.length > 0 && (
+            <div>
+              <span className="text-sm text-gray-500">手机照片：</span>
+              {imagesLoading && Object.keys(imageUrls).length === 0 ? (
+                <div className="flex items-center gap-2 py-4"><Loading size="small" /><span className="text-xs text-gray-400">加载中...</span></div>
+              ) : (
+                <div className="grid grid-cols-4 gap-2 mt-2">
+                  {phonePhotos.map((photo, i) => (
+                    <PhotoItem key={`phone-${i}`} photo={photo} imageUrls={imageUrls} onPreview={(src) => { setPreviewSrc(src); setPreviewVisible(true); }} />
+                  ))}
                 </div>
               )}
             </div>
@@ -252,6 +247,30 @@ function DetailItem({ label, value }: { label: string; value: React.ReactNode })
     <div className="flex py-2 border-b border-gray-50">
       <span className="w-24 text-sm text-gray-500 flex-shrink-0">{label}</span>
       <div className="text-sm text-gray-800">{value}</div>
+    </div>
+  );
+}
+
+function PhotoItem({ photo, imageUrls, onPreview }: { photo: string; imageUrls: Record<string, string>; onPreview: (src: string) => void }) {
+  const src = imageUrls[photo];
+  const isLoaded = !!src;
+  return (
+    <div className="relative group">
+      {isLoaded ? (
+        <img
+          src={src}
+          alt="照片"
+          onClick={() => onPreview(src)}
+          onError={(e) => {
+            (e.target as HTMLImageElement).style.display = 'none';
+            (e.target as HTMLImageElement).nextElementSibling?.classList.remove('hidden');
+          }}
+          className="w-full h-20 object-cover rounded-lg border border-gray-200 hover:opacity-80 hover:shadow-md transition-all cursor-zoom-in"
+        />
+      ) : null}
+      <div className={`w-full h-20 rounded-lg border border-gray-200 bg-gray-100 flex items-center justify-center text-gray-400 text-xs ${isLoaded ? 'hidden' : ''}`}>
+        加载中...
+      </div>
     </div>
   );
 }

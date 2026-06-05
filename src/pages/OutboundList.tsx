@@ -27,7 +27,12 @@ export function OutboundList() {
 
   const handleSearch = () => {
     outbound.resetFilters();
-    outbound.fetchRecords(null, filters);
+    const searchFilters: OutboundFilters = { ...filters };
+    // trim 字符串字段，避免前后空格导致查不到
+    if (searchFilters.customerName) searchFilters.customerName = searchFilters.customerName.trim();
+    if (searchFilters.trackingNumber) searchFilters.trackingNumber = searchFilters.trackingNumber.trim();
+    if (searchFilters.model) searchFilters.model = searchFilters.model.trim();
+    outbound.fetchRecords(null, searchFilters);
   };
 
   const handleReset = () => {
@@ -128,9 +133,13 @@ export function OutboundList() {
           tableLayout="fixed"
           hover
           stripe
-          onRowClick={({ row }) => handleDetail(row as OutboundRecord)}
+
         />
         <div className="flex justify-center items-center gap-2 py-4 border-t border-gray-100">
+          <Button size="small" variant="outline" disabled={outbound.currentPage <= 1}
+            onClick={() => outbound.setCurrentPage(outbound.currentPage - 1)}>
+            上一页
+          </Button>
           <span className="text-sm text-gray-500">第 {outbound.currentPage} 页</span>
           <Button size="small" variant="outline" disabled={!outbound.hasMore}
             onClick={() => outbound.fetchRecords(outbound.cursor)}>

@@ -308,11 +308,11 @@ MIT
 
 ## 部署信息
 
-**部署时间**: 2026-04-14 21:35
+**部署时间**: 2026-06-04 09:24
 
 ### 访问地址
 
-**前端应用**: https://cloud1-8gvbotkt966e5e19-1405003451.tcloudbaseapp.com/?v=202604142135
+**前端应用**: https://cloud1-8gvbotkt966e5e19-1405003451.tcloudbaseapp.com/?v=202606040924
 
 ### 云开发资源
 
@@ -341,6 +341,10 @@ MIT
      - saveOperationLog - 保存操作日志
      - getRecordHistory - 获取记录历史
      - sendWechatNotification - 企业微信通知
+     - queryOrders - 查询订单记录
+     - saveOrders - 批量保存订单记录
+     - deleteOrder - 删除订单记录
+     - updateOrder - 更新订单记录
 
 3. **数据库**
    - 实例ID: tnt-fpj1zozis
@@ -352,6 +356,7 @@ MIT
      - shops - 店铺信息
      - user_whitelist - 用户白名单
      - record_history - 记录修改历史
+     - orders - 订单记录
 
 4. **云存储**
    - 存储桶: 636c-cloud1-8gvbotkt966e5e19-1405003451

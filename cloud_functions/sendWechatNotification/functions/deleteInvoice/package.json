@@ -1,0 +1,9 @@
+{
+  "name": "deleteInvoice",
+  "version": "1.0.0",
+  "description": "删除发票记录",
+  "main": "index.js",
+  "dependencies": {
+    "wx-server-sdk": "~2.6.3"
+  }
+}

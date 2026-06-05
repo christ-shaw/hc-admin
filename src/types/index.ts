@@ -13,6 +13,7 @@ export interface InboundRecord {
   shopName: string;
   trackingNumber: string;
   phoneModels: PhoneModelItem[];
+  packagePhotos?: string[];
   phonePhotos?: string[];
   hasIssue?: boolean;
   remark?: string;
@@ -107,6 +108,95 @@ export const CHANNEL_TYPE_MAP: Record<string, string> = {
   normal: '正常',
 };
 
+/** 订单记录 —— 对齐 Excel「订单明细」工作表 25 列 */
+export interface OrderRecord {
+  _id: string;
+  serialNumber: number;             // 序号
+  date: string;                     // 日期
+  orderSource: string;              // 订单来源: 新增/服务
+  orderAttribute: string;           // 订单属性: 租赁1/租赁2
+  orderType: string;                // 订单类型: 新增业务/租后发货/租后退货/仅退款/退租金
+  salesChannel: string;             // 销售渠道
+  salesperson: string;              // 人员
+  channelCategory: string;          // 渠道类别
+  onlineOrderNumber: string;        // 网店订单号
+  customerName: string;             // 客户名称
+  brand: string;                    // 品牌
+  productName: string;              // 货品名称
+  specification: string;            // 规格
+  quantity: number;                 // 数量
+  unitPrice: number;                // 单价
+  amount: number;                   // 金额
+  paymentAccount: string;           // 收款账户
+  trackingNumber: string;           // 物流单号
+  consignee: string;                // 收/发货人
+  status: string;                   // 订单状态: 已发货/--/未发货
+  customerRemark: string;           // 客服备注
+  transferProductName: string;      // 转租赁2货品名称
+  transferSpecification: string;    // 转租赁2规格
+  paidPeriod: number;               // 已交租期
+  paidRent: number;                 // 已交租金
+  createTime?: { $date: string };
+}
+
+/** 订单状态映射 */
+export const ORDER_STATUS_MAP: Record<string, string> = {
+  '已发货': '已发货',
+  '未发货': '未发货',
+  '--': '--',
+};
+
+/** 订单来源映射 */
+export const ORDER_SOURCE_MAP: Record<string, string> = {
+  '新增': '新增',
+  '服务': '服务',
+};
+
+/** 订单属性映射 */
+export const ORDER_ATTRIBUTE_MAP: Record<string, string> = {
+  '租赁1': '租赁1',
+  '租赁2': '租赁2',
+};
+
+/** 订单类型映射 */
+export const ORDER_TYPE_MAP: Record<string, string> = {
+  '新增业务': '新增业务',
+  '租后发货': '租后发货',
+  '租后退货': '租后退货',
+  '仅退款': '仅退款',
+  '退租金': '退租金',
+};
+
+/** 销售渠道映射 */
+export const SALES_CHANNEL_MAP: Record<string, string> = {
+  '租机乐': '租机乐',
+  '汇租机': '汇租机',
+  '极客矩阵': '极客矩阵',
+  '云界互联': '云界互联',
+  '倬石电子': '倬石电子',
+  '云途': '云途',
+};
+
+/** 渠道类别映射 */
+export const CHANNEL_CATEGORY_MAP: Record<string, string> = {
+  '平台': '平台',
+  '线下': '线下',
+};
+
+/** 订单筛选条件 */
+export interface OrderFilters {
+  customerName?: string;
+  salesperson?: string;
+  salesChannel?: string;
+  orderType?: string;
+  orderSource?: string;
+  orderAttribute?: string;
+  status?: string;
+  onlineOrderNumber?: string;
+  startDate?: string;
+  endDate?: string;
+}
+
 /** 统计数据 */
 export interface StatsData {
   dates: string[];
@@ -143,4 +233,59 @@ export interface HistoryItem {
   operator: string;
   operationTime: string;
   changes: HistoryChange[];
+}
+
+/** 电子发票文件 */
+export interface InvoiceFile {
+  fileID: string;                 // 云存储文件ID，如 cloud://env-id/invoices/xxx.png
+  fileName: string;               // 原始文件名
+}
+
+/** 发票记录 */
+export interface InvoiceRecord {
+  _id: string;
+  applyDate: string;              // 申请日期
+  companyName: string;            // 公司名称（单位名称）
+  applicant: string;              // 开票申请人
+  shopName: string;               // 店铺名字
+  status: '未开票' | '已开票';    // 开票状态
+  taxId: string;                  // 纳税人识别号
+  registeredAddress: string;      // 注册地址
+  contactPhone: string;           // 联系电话
+  bankName: string;               // 开户行名称
+  bankAccount: string;            // 账号
+  bankCode: string;               // 开户行行号
+  invoiceCategory: string;        // 开票类目
+  invoiceAmount: number;          // 开票金额
+  invoiceFiles?: InvoiceFile[];   // 电子发票图片（多张）
+  completedTime?: string;         // 开票完成时间
+  createTime?: { $date: string };
+}
+
+/** 发票状态映射 */
+export const INVOICE_STATUS_MAP: Record<string, string> = {
+  '未开票': '未开票',
+  '已开票': '已开票',
+};
+
+/** 发票筛选条件 */
+export interface InvoiceFilters {
+  companyName?: string;
+  applicant?: string;
+  status?: string;
+  startDate?: string;
+  endDate?: string;
+}
+
+/** 公司模版 */
+export interface CompanyTemplate {
+  _id: string;
+  companyName: string;            // 单位名称
+  taxId: string;                  // 纳税人识别号
+  registeredAddress: string;      // 注册地址
+  contactPhone: string;           // 联系电话
+  bankName: string;               // 开户行名称
+  bankAccount: string;            // 账号
+  bankCode: string;               // 开户行行号
+  createTime?: { $date: string };
 }

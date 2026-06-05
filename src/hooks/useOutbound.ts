@@ -50,11 +50,12 @@ export function useOutbound() {
 
       setState(prev => {
         const newRecords = cursor ? [...prev.records, ...records] : records;
+        const totalPages = Math.ceil(newRecords.length / PAGE_SIZE);
         return {
           records: newRecords,
           cursor: nextCursor,
           hasMore,
-          currentPage: Math.ceil(newRecords.length / PAGE_SIZE),
+          currentPage: cursor ? Math.min(prev.currentPage + 1, totalPages) : 1,
           totalRecords: newRecords.length,
           filters: currentFilters,
           loading: false,
@@ -105,10 +106,14 @@ export function useOutbound() {
     }));
   }, []);
 
+  const setCurrentPage = useCallback((page: number) => {
+    setState(prev => ({ ...prev, currentPage: page }));
+  }, []);
+
   const getPageRecords = useCallback((page: number): OutboundRecord[] => {
     const start = (page - 1) * PAGE_SIZE;
     return state.records.slice(start, start + PAGE_SIZE);
   }, [state.records]);
 
-  return { ...state, fetchRecords, updateRecord, deleteRecord, resetFilters, getPageRecords };
+  return { ...state, fetchRecords, updateRecord, deleteRecord, resetFilters, getPageRecords, setCurrentPage };
 }

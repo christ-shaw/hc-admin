@@ -29,7 +29,12 @@ export function InboundList() {
 
   const handleSearch = () => {
     inbound.resetFilters();
-    const searchFilters = { ...filters };
+    const searchFilters: InboundFilters = { ...filters };
+    // trim 字符串字段，避免前后空格导致查不到
+    if (searchFilters.customerName) searchFilters.customerName = searchFilters.customerName.trim();
+    if (searchFilters.shopName) searchFilters.shopName = searchFilters.shopName.trim();
+    if (searchFilters.trackingNumber) searchFilters.trackingNumber = searchFilters.trackingNumber.trim();
+    if (searchFilters.model) searchFilters.model = searchFilters.model.trim();
     if (channelTypeFilter) searchFilters.channelType = channelTypeFilter;
     inbound.fetchRecords(null, searchFilters);
   };
@@ -148,12 +153,13 @@ export function InboundList() {
           tableLayout="fixed"
           hover
           stripe
-          onRowClick={({ row }) => handleDetail(row as InboundRecord)}
+
         />
         {/* 分页 */}
         <div className="flex justify-center items-center gap-2 py-4 border-t border-gray-100">
-          <Button size="small" variant="outline" disabled={inbound.currentPage <= 1}>
-            首页
+          <Button size="small" variant="outline" disabled={inbound.currentPage <= 1}
+            onClick={() => inbound.setCurrentPage(inbound.currentPage - 1)}>
+            上一页
           </Button>
           <span className="text-sm text-gray-500">第 {inbound.currentPage} 页</span>
           <Button size="small" variant="outline" disabled={!inbound.hasMore}
