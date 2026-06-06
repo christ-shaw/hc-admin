@@ -103,7 +103,7 @@ export async function callFunction<T = any>(name: string, data?: Record<string, 
 export async function uploadToCloudStorage(cloudPath: string, file: File): Promise<string> {
   const result = await app.uploadFile({
     cloudPath,
-    filePath: file,
+    filePath: file as unknown as string,
   });
   return result.fileID;
 }

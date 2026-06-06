@@ -257,7 +257,11 @@ export interface InvoiceRecord {
   bankCode: string;               // 开户行行号
   invoiceCategory: string;        // 开票类目
   invoiceAmount: number;          // 开票金额
+  phoneModel?: string;            // 手机型号（二手手机类目）
+  phoneQuantity?: number;         // 手机数量（二手手机类目）
+  unitPrice?: number;             // 单价（二手手机类目）
   invoiceFiles?: InvoiceFile[];   // 电子发票图片（多张）
+  attachments?: InvoiceFile[];    // 开票附件（多张）
   completedTime?: string;         // 开票完成时间
   createTime?: { $date: string };
 }

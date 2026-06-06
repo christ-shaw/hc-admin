@@ -393,6 +393,10 @@ export const PAYMENT_ACCOUNTS = [
 /** 店铺名字列表 */
 export const SHOP_NAMES = ['倬石电子', '云途', '租机乐', '汇创'];
 
+/** 开票类目列表 */
+export const INVOICE_CATEGORIES = ['租赁服务费', '二手手机'] as const;
+export type InvoiceCategory = typeof INVOICE_CATEGORIES[number];
+
 /** 所有品牌列表 */
 export const BRANDS = Object.keys(PRODUCT_DICT).sort((a, b) => a.localeCompare(b, 'zh-CN'));
 

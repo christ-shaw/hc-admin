@@ -5,7 +5,7 @@ import { InvoiceRecord, InvoiceFilters, INVOICE_STATUS_MAP, CompanyTemplate, Inv
 import { useInvoices } from '../hooks/useInvoices';
 import { callFunction, getCurrentOperatorName, uploadToCloudStorage, getCloudFileURLs } from '../lib/cloudbase';
 import { formatDate } from '../utils/format';
-import { SHOP_NAMES } from '../data/productDict';
+import { SHOP_NAMES, INVOICE_CATEGORIES } from '../data/productDict';
 
 const STATUS_TAG_THEME: Record<string, 'success' | 'warning' | 'danger' | 'default'> = {
   '已开票': 'success',
@@ -26,6 +26,10 @@ const EMPTY_INVOICE: Omit<InvoiceRecord, '_id' | 'createTime'> = {
   bankCode: '',
   invoiceCategory: '',
   invoiceAmount: 0,
+  phoneModel: '',
+  phoneQuantity: 0,
+  unitPrice: 0,
+  attachments: [],
 };
 
 export function Invoices() {
@@ -36,7 +40,7 @@ export function Invoices() {
   const [currentRecord, setCurrentRecord] = useState<InvoiceRecord | null>(null);
   const [addVisible, setAddVisible] = useState(false);
   const [addForm, setAddForm] = useState<Omit<InvoiceRecord, '_id' | 'createTime'>>(EMPTY_INVOICE);
-  const [addStep, setAddStep] = useState(1); // 1=选择店铺, 2=公司信息, 3=开票类目和金额
+  const [addStep, setAddStep] = useState(1); // 1=选择店铺, 2=公司信息, 3=开票类目和金额, 4=上传附件
   const [editVisible, setEditVisible] = useState(false);
   const [editForm, setEditForm] = useState<Omit<InvoiceRecord, '_id' | 'createTime'>>(EMPTY_INVOICE);
   const [editId, setEditId] = useState('');
@@ -57,6 +61,10 @@ export function Invoices() {
   const [uploadFiles, setUploadFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
   const uploadInputRef = useRef<HTMLInputElement>(null);
+
+  // 新增发票 - 附件上传相关状态
+  const [addAttachFiles, setAddAttachFiles] = useState<File[]>([]);
+  const addAttachInputRef = useRef<HTMLInputElement>(null);
 
   // 预览相关状态
   const [previewVisible, setPreviewVisible] = useState(false);
@@ -158,6 +166,7 @@ export function Invoices() {
     const applicant = await getCurrentOperatorName();
     setAddForm({ ...EMPTY_INVOICE, applyDate: dateStr, applicant });
     setAddStep(1);
+    setAddAttachFiles([]);
     setAddVisible(true);
   };
 
@@ -171,7 +180,31 @@ export function Invoices() {
       MessagePlugin.warning('请填写单位名称');
       return;
     }
-    setAddStep(prev => Math.min(prev + 1, 3));
+    if (addStep === 3) {
+      if (!addForm.invoiceCategory) {
+        MessagePlugin.warning('请选择开票类目');
+        return;
+      }
+      if (addForm.invoiceCategory === '二手手机') {
+        if (!addForm.phoneModel?.trim()) {
+          MessagePlugin.warning('请输入手机型号');
+          return;
+        }
+        if (!addForm.phoneQuantity || addForm.phoneQuantity <= 0) {
+          MessagePlugin.warning('请输入手机数量');
+          return;
+        }
+        if (!addForm.unitPrice || addForm.unitPrice <= 0) {
+          MessagePlugin.warning('请输入单价');
+          return;
+        }
+      }
+      if (!addForm.invoiceAmount || addForm.invoiceAmount <= 0) {
+        MessagePlugin.warning('请填写开票金额');
+        return;
+      }
+    }
+    setAddStep(prev => Math.min(prev + 1, 4));
   };
 
   /** 新增 - 上一步 */
@@ -180,12 +213,20 @@ export function Invoices() {
   };
 
   const handleAddSave = async () => {
-    if (!addForm.companyName.trim()) {
-      MessagePlugin.warning('请填写单位名称');
-      return;
-    }
     setSaving(true);
     try {
+      // 先上传附件到云存储
+      const attachments: InvoiceFile[] = [];
+      for (const file of addAttachFiles) {
+        const timestamp = Date.now();
+        const ext = file.name.split('.').pop() || 'bin';
+        const cloudPath = `invoices/attachments/${timestamp}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
+        const fileID = await uploadToCloudStorage(cloudPath, file);
+        attachments.push({ fileID, fileName: file.name });
+      }
+
+      const formToSave = { ...addForm, attachments };
+
       if (!companySelected) {
         const queryResult = await callFunction<{ success?: boolean; data: CompanyTemplate[] }>('queryCompanies', {
           data: { companyName: addForm.companyName.trim(), limit: 1 },
@@ -197,7 +238,7 @@ export function Invoices() {
           return;
         }
       }
-      await doSaveInvoice();
+      await doSaveInvoice(formToSave);
     } catch (err) {
       MessagePlugin.error('新增异常: ' + String(err));
       setSaving(false);
@@ -222,7 +263,18 @@ export function Invoices() {
           },
         },
       });
-      await doSaveInvoice();
+
+      // 上传附件
+      const attachments: InvoiceFile[] = [];
+      for (const file of addAttachFiles) {
+        const timestamp = Date.now();
+        const ext = file.name.split('.').pop() || 'bin';
+        const cloudPath = `invoices/attachments/${timestamp}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
+        const fileID = await uploadToCloudStorage(cloudPath, file);
+        attachments.push({ fileID, fileName: file.name });
+      }
+
+      await doSaveInvoice({ ...addForm, attachments });
     } catch (err) {
       MessagePlugin.error('新增异常: ' + String(err));
       setSaving(false);
@@ -230,13 +282,14 @@ export function Invoices() {
   };
 
   /** 实际保存发票 */
-  const doSaveInvoice = async () => {
-    const result = await invoices.addInvoice(addForm);
+  const doSaveInvoice = async (formToSave?: Omit<InvoiceRecord, '_id' | 'createTime'>) => {
+    const result = await invoices.addInvoice(formToSave || addForm);
     if (result.success) {
       MessagePlugin.success('新增发票申请成功');
       setAddVisible(false);
       setAddForm(EMPTY_INVOICE);
       setAddStep(1);
+      setAddAttachFiles([]);
       setCompanySelected(false);
     } else {
       MessagePlugin.error('新增失败: ' + (result.errMsg || '未知错误'));
@@ -261,7 +314,11 @@ export function Invoices() {
       bankCode: record.bankCode,
       invoiceCategory: record.invoiceCategory,
       invoiceAmount: record.invoiceAmount,
+      phoneModel: record.phoneModel || '',
+      phoneQuantity: record.phoneQuantity || 0,
+      unitPrice: record.unitPrice || 0,
       invoiceFiles: record.invoiceFiles,
+      attachments: record.attachments,
       completedTime: record.completedTime,
     });
     setEditVisible(true);
@@ -347,7 +404,7 @@ export function Invoices() {
       for (const file of uploadFiles) {
         const timestamp = Date.now();
         const ext = file.name.split('.').pop() || 'png';
-        const cloudPath = `invoices/${uploadTarget._id}_${timestamp}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
+        const cloudPath = `invoices/invoices_img/${uploadTarget._id}_${timestamp}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
         const fileID = await uploadToCloudStorage(cloudPath, file);
         invoiceFiles.push({ fileID, fileName: file.name });
       }
@@ -546,7 +603,19 @@ export function Invoices() {
             <DetailRow label="账号" value={currentRecord.bankAccount} />
             <DetailRow label="开户行行号" value={currentRecord.bankCode} />
             <DetailRow label="开票类目" value={currentRecord.invoiceCategory} />
+            {currentRecord.invoiceCategory === '二手手机' && (
+              <>
+                <DetailRow label="手机型号" value={currentRecord.phoneModel} />
+                <DetailRow label="手机数量" value={currentRecord.phoneQuantity} />
+                <DetailRow label="单价" value={currentRecord.unitPrice ? `¥${currentRecord.unitPrice}` : '-'} />
+              </>
+            )}
             <DetailRow label="开票金额" value={currentRecord.invoiceAmount ? `¥${currentRecord.invoiceAmount}` : '-'} />
+            {currentRecord.attachments && currentRecord.attachments.length > 0 && (
+              <DetailRow label="开票附件" value={
+                <InvoiceAttachmentPreview files={currentRecord.attachments} />
+              } />
+            )}
             {currentRecord.status === '已开票' && (
               <>
                 <div className="border-t border-gray-100 pt-3 mt-3">
@@ -579,7 +648,7 @@ export function Invoices() {
             </div>
             <div className="flex gap-2">
               <Button onClick={() => setAddVisible(false)}>取消</Button>
-              {addStep < 3 ? (
+              {addStep < 4 ? (
                 <Button theme="primary" icon={<ChevronRight size={16} />} onClick={handleAddNext}>下一步</Button>
               ) : (
                 <Button theme="primary" loading={saving} icon={<Check size={16} />} onClick={handleAddSave}>提交申请</Button>
@@ -595,6 +664,7 @@ export function Invoices() {
               { step: 1, label: '选择店铺' },
               { step: 2, label: '公司信息' },
               { step: 3, label: '开票类目' },
+              { step: 4, label: '上传附件' },
             ].map((item, idx) => (
               <div key={item.step} className="flex items-center">
                 <div className="flex flex-col items-center">
@@ -611,7 +681,7 @@ export function Invoices() {
                     {item.label}
                   </span>
                 </div>
-                {idx < 2 && (
+                {idx < 3 && (
                   <div className={`w-16 h-0.5 mx-2 mb-4 ${addStep > item.step ? 'bg-blue-500' : 'bg-gray-200'}`} />
                 )}
               </div>
@@ -701,16 +771,69 @@ export function Invoices() {
             <div className="py-4">
               <h4 className="text-sm font-medium text-gray-600 mb-4">开票类目和金额</h4>
               <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">开票类目</label>
-                  <Input placeholder="开票类目" value={addForm.invoiceCategory}
-                    onChange={val => setAddForm(prev => ({ ...prev, invoiceCategory: val as string }))} />
+                <div className="col-span-2">
+                  <label className="block text-xs text-gray-500 mb-1">开票类目 <span className="text-red-500">*</span></label>
+                  <Select placeholder="请选择开票类目" value={addForm.invoiceCategory || undefined}
+                    onChange={val => setAddForm(prev => ({
+                      ...prev,
+                      invoiceCategory: val as string,
+                      // 切换类目时重置相关字段
+                      ...(val !== '二手手机' ? { phoneModel: '', phoneQuantity: 0, unitPrice: 0, invoiceAmount: 0 } : {}),
+                    }))}
+                    options={Array.from(INVOICE_CATEGORIES).map(v => ({ label: v, value: v }))}
+                    popupProps={{ attach: 'body', zIndex: 6000 }}
+                    size="large" />
                 </div>
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">开票金额</label>
-                  <Input type="number" placeholder="开票金额" value={addForm.invoiceAmount ? String(addForm.invoiceAmount) : ''}
-                    onChange={val => setAddForm(prev => ({ ...prev, invoiceAmount: Number(val) }))} />
-                </div>
+
+                {/* 二手手机 - 动态字段 */}
+                {addForm.invoiceCategory === '二手手机' && (
+                  <>
+                    <div>
+                      <label className="block text-xs text-gray-500 mb-1">手机型号 <span className="text-red-500">*</span></label>
+                      <Input placeholder="请输入手机型号" value={addForm.phoneModel || ''}
+                        onChange={val => setAddForm(prev => ({ ...prev, phoneModel: val as string }))} />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-gray-500 mb-1">手机数量 <span className="text-red-500">*</span></label>
+                      <Input type="number" placeholder="请输入数量" min={1} value={addForm.phoneQuantity || ''}
+                        onChange={val => {
+                          const qty = Number(val) || 0;
+                          setAddForm(prev => ({
+                            ...prev,
+                            phoneQuantity: qty,
+                            invoiceAmount: qty * (prev.unitPrice || 0),
+                          }));
+                        }} />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-gray-500 mb-1">单价 <span className="text-red-500">*</span></label>
+                      <Input type="number" placeholder="请输入单价" min={0} value={addForm.unitPrice || ''}
+                        onChange={val => {
+                          const price = Number(val) || 0;
+                          setAddForm(prev => ({
+                            ...prev,
+                            unitPrice: price,
+                            invoiceAmount: (prev.phoneQuantity || 0) * price,
+                          }));
+                        }} />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-gray-500 mb-1">开票金额</label>
+                      <Input type="number" placeholder="自动计算" value={addForm.invoiceAmount || ''}
+                        readonly disabled
+                        className="bg-gray-50" />
+                    </div>
+                  </>
+                )}
+
+                {/* 租赁服务费 - 手动输入金额 */}
+                {addForm.invoiceCategory === '租赁服务费' && (
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">开票金额 <span className="text-red-500">*</span></label>
+                    <Input type="number" placeholder="请输入开票金额" value={addForm.invoiceAmount ? String(addForm.invoiceAmount) : ''}
+                      onChange={val => setAddForm(prev => ({ ...prev, invoiceAmount: Number(val) }))} />
+                  </div>
+                )}
               </div>
               {/* 已填信息确认 */}
               <div className="mt-6 p-3 bg-gray-50 rounded-lg">
@@ -719,6 +842,72 @@ export function Invoices() {
                   <div><span className="text-gray-400">店铺：</span><span className="text-gray-700">{addForm.shopName || '-'}</span></div>
                   <div><span className="text-gray-400">单位：</span><span className="text-gray-700">{addForm.companyName || '-'}</span></div>
                   <div><span className="text-gray-400">申请人：</span><span className="text-gray-700">{addForm.applicant || '-'}</span></div>
+                  <div><span className="text-gray-400">类目：</span><span className="text-gray-700">{addForm.invoiceCategory || '-'}</span></div>
+                  {addForm.invoiceCategory === '二手手机' && (
+                    <>
+                      <div><span className="text-gray-400">型号：</span><span className="text-gray-700">{addForm.phoneModel || '-'}</span></div>
+                      <div><span className="text-gray-400">数量×单价：</span><span className="text-gray-700">{addForm.phoneQuantity || 0} × {addForm.unitPrice || 0}</span></div>
+                    </>
+                  )}
+                  <div><span className="text-gray-400">金额：</span><span className="text-gray-700 font-medium">¥{addForm.invoiceAmount || 0}</span></div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 步骤4: 上传附件 */}
+          {addStep === 4 && (
+            <div className="py-4">
+              <h4 className="text-sm font-medium text-gray-600 mb-4">上传开票附件（可选）</h4>
+              <div>
+                <input
+                  ref={addAttachInputRef}
+                  type="file"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => {
+                    const files = e.target.files;
+                    if (files) {
+                      setAddAttachFiles(prev => [...prev, ...Array.from(files)]);
+                    }
+                    if (addAttachInputRef.current) addAttachInputRef.current.value = '';
+                  }}
+                />
+                <Button variant="outline" icon={<Upload size={16} />} onClick={() => addAttachInputRef.current?.click()}>
+                  选择附件
+                </Button>
+                <span className="text-xs text-gray-400 ml-2">支持图片、PDF、Word、Excel等文件</span>
+              </div>
+              {addAttachFiles.length > 0 && (
+                <div className="mt-3 space-y-2">
+                  {addAttachFiles.map((file, index) => (
+                    <div key={index} className="flex items-center justify-between px-3 py-2 bg-gray-50 rounded-lg">
+                      <div className="flex items-center gap-2 flex-1 min-w-0">
+                        <Upload size={14} className="text-gray-400 flex-shrink-0" />
+                        <span className="text-sm text-gray-700 truncate">{file.name}</span>
+                        <span className="text-xs text-gray-400 flex-shrink-0">({(file.size / 1024).toFixed(1)}KB)</span>
+                      </div>
+                      <button
+                        type="button"
+                        className="w-6 h-6 flex items-center justify-center text-gray-400 hover:text-red-500 cursor-pointer flex-shrink-0"
+                        onClick={() => setAddAttachFiles(prev => prev.filter((_, i) => i !== index))}
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {/* 完整信息确认 */}
+              <div className="mt-6 p-3 bg-gray-50 rounded-lg">
+                <h5 className="text-xs font-medium text-gray-500 mb-2">提交信息确认</h5>
+                <div className="grid grid-cols-3 gap-2 text-xs">
+                  <div><span className="text-gray-400">店铺：</span><span className="text-gray-700">{addForm.shopName || '-'}</span></div>
+                  <div><span className="text-gray-400">单位：</span><span className="text-gray-700">{addForm.companyName || '-'}</span></div>
+                  <div><span className="text-gray-400">申请人：</span><span className="text-gray-700">{addForm.applicant || '-'}</span></div>
+                  <div><span className="text-gray-400">类目：</span><span className="text-gray-700">{addForm.invoiceCategory || '-'}</span></div>
+                  <div><span className="text-gray-400">金额：</span><span className="text-gray-700 font-medium">¥{addForm.invoiceAmount || 0}</span></div>
+                  <div><span className="text-gray-400">附件：</span><span className="text-gray-700">{addAttachFiles.length}个文件</span></div>
                 </div>
               </div>
             </div>
@@ -960,8 +1149,14 @@ function InvoiceFormFields({ form, onChange, isEdit = false, onCompanyNameChange
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="block text-xs text-gray-500 mb-1">开票类目</label>
-            <Input placeholder="开票类目" value={form.invoiceCategory}
-              onChange={val => onChange(prev => ({ ...prev, invoiceCategory: val as string }))} />
+            <Select placeholder="请选择开票类目" value={form.invoiceCategory || undefined}
+              onChange={val => onChange(prev => ({
+                ...prev,
+                invoiceCategory: val as string,
+                ...(val !== '二手手机' ? { phoneModel: '', phoneQuantity: 0, unitPrice: 0, invoiceAmount: 0 } : {}),
+              }))}
+              options={Array.from(INVOICE_CATEGORIES).map(v => ({ label: v, value: v }))}
+              popupProps={{ attach: 'body', zIndex: 6000 }} />
           </div>
           <div>
             <label className="block text-xs text-gray-500 mb-1">店铺名字 <span className="text-red-500">*</span></label>
@@ -970,11 +1165,56 @@ function InvoiceFormFields({ form, onChange, isEdit = false, onCompanyNameChange
               options={SHOP_NAMES.map(v => ({ label: v, value: v }))}
               popupProps={{ attach: 'body' }} />
           </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">开票金额</label>
-            <Input type="number" placeholder="开票金额" value={form.invoiceAmount ? String(form.invoiceAmount) : ''}
-              onChange={val => onChange(prev => ({ ...prev, invoiceAmount: Number(val) }))} />
-          </div>
+
+          {/* 二手手机 - 动态字段 */}
+          {form.invoiceCategory === '二手手机' && (
+            <>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">手机型号</label>
+                <Input placeholder="请输入手机型号" value={form.phoneModel || ''}
+                  onChange={val => onChange(prev => ({ ...prev, phoneModel: val as string }))} />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">手机数量</label>
+                <Input type="number" placeholder="请输入数量" min={1} value={form.phoneQuantity || ''}
+                  onChange={val => {
+                    const qty = Number(val) || 0;
+                    onChange(prev => ({ ...prev, phoneQuantity: qty, invoiceAmount: qty * (prev.unitPrice || 0) }));
+                  }} />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">单价</label>
+                <Input type="number" placeholder="请输入单价" min={0} value={form.unitPrice || ''}
+                  onChange={val => {
+                    const price = Number(val) || 0;
+                    onChange(prev => ({ ...prev, unitPrice: price, invoiceAmount: (prev.phoneQuantity || 0) * price }));
+                  }} />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">开票金额</label>
+                <Input type="number" placeholder="自动计算" value={form.invoiceAmount || ''}
+                  readonly disabled />
+              </div>
+            </>
+          )}
+
+          {/* 租赁服务费 - 手动输入金额 */}
+          {form.invoiceCategory === '租赁服务费' && (
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">开票金额</label>
+              <Input type="number" placeholder="开票金额" value={form.invoiceAmount ? String(form.invoiceAmount) : ''}
+                onChange={val => onChange(prev => ({ ...prev, invoiceAmount: Number(val) }))} />
+            </div>
+          )}
+
+          {/* 未选择类目 - 显示金额输入 */}
+          {!form.invoiceCategory && (
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">开票金额</label>
+              <Input type="number" placeholder="开票金额" value={form.invoiceAmount ? String(form.invoiceAmount) : ''}
+                onChange={val => onChange(prev => ({ ...prev, invoiceAmount: Number(val) }))} />
+            </div>
+          )}
         </div>
       </div>
 
@@ -1010,10 +1250,12 @@ function InvoiceFormFields({ form, onChange, isEdit = false, onCompanyNameChange
   );
 }
 
-/** 详情弹窗中展示发票图片 */
+/** 详情弹窗中展示发票图片（预览+放大） */
 function InvoiceImagePreview({ files }: { files: InvoiceFile[] }) {
   const [urls, setUrls] = useState<Array<{ fileID: string; tempFileURL: string; fileName: string }>>([]);
   const [loading, setLoading] = useState(true);
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const [lightboxAlt, setLightboxAlt] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -1041,16 +1283,29 @@ function InvoiceImagePreview({ files }: { files: InvoiceFile[] }) {
   if (urls.length === 0) return <span className="text-xs text-gray-400">暂无图片</span>;
 
   return (
-    <div className="flex gap-2 flex-wrap">
-      {urls.map((item, i) => (
-        <img
-          key={i}
-          src={item.tempFileURL}
-          alt={item.fileName}
-          className="w-20 h-20 object-contain border rounded"
-        />
-      ))}
-    </div>
+    <>
+      <div className="flex gap-2 flex-wrap">
+        {urls.map((item, i) => (
+          <div
+            key={i}
+            className="relative group cursor-pointer"
+            onClick={() => { setLightboxSrc(item.tempFileURL); setLightboxAlt(item.fileName); }}
+          >
+            <img
+              src={item.tempFileURL}
+              alt={item.fileName}
+              className="w-20 h-20 object-cover border rounded hover:border-blue-400 transition-colors"
+            />
+            <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 rounded transition-colors flex items-center justify-center">
+              <Eye size={16} className="text-white opacity-0 group-hover:opacity-100 transition-opacity" />
+            </div>
+          </div>
+        ))}
+      </div>
+      {lightboxSrc && (
+        <ImageLightbox src={lightboxSrc} alt={lightboxAlt} onClose={() => { setLightboxSrc(null); setLightboxAlt(''); }} />
+      )}
+    </>
   );
 }
 
@@ -1061,5 +1316,131 @@ function DetailRow({ label, value }: { label: string; value: React.ReactNode }) 
       <span className="w-32 text-gray-500 flex-shrink-0">{label}</span>
       <div className="text-gray-800">{display}</div>
     </div>
+  );
+}
+
+/** 判断文件是否为图片 */
+function isImageFile(fileName: string) {
+  const ext = fileName.split('.').pop()?.toLowerCase() || '';
+  return ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(ext);
+}
+
+/** 图片灯箱组件 */
+function ImageLightbox({ src, alt, onClose }: { src: string; alt: string; onClose: () => void }) {
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', handleKey);
+    document.body.style.overflow = 'hidden';
+    return () => { document.removeEventListener('keydown', handleKey); document.body.style.overflow = ''; };
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70" onClick={onClose}>
+      <div className="relative max-w-[90vw] max-h-[90vh]" onClick={e => e.stopPropagation()}>
+        <img src={src} alt={alt} className="max-w-full max-h-[85vh] object-contain rounded shadow-2xl" />
+        <button
+          type="button"
+          className="absolute -top-3 -right-3 w-8 h-8 bg-white rounded-full flex items-center justify-center shadow-lg text-gray-600 hover:text-gray-900 cursor-pointer"
+          onClick={onClose}
+        >
+          <X size={18} />
+        </button>
+        <div className="absolute bottom-0 left-0 right-0 flex justify-center gap-3 py-3">
+          <button
+            type="button"
+            className="px-4 py-1.5 bg-white/90 rounded-lg text-sm text-gray-700 hover:bg-white shadow cursor-pointer"
+            onClick={() => {
+              const a = document.createElement('a');
+              a.href = src;
+              a.download = alt;
+              a.target = '_blank';
+              document.body.appendChild(a);
+              a.click();
+              document.body.removeChild(a);
+            }}
+          >
+            <Download size={14} className="inline mr-1" />下载
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** 详情弹窗中展示附件列表（预览+放大） */
+function InvoiceAttachmentPreview({ files }: { files: InvoiceFile[] }) {
+  const [urls, setUrls] = useState<Array<{ fileID: string; tempFileURL: string; fileName: string }>>([]);
+  const [loading, setLoading] = useState(true);
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const [lightboxAlt, setLightboxAlt] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    const fetchUrls = async () => {
+      try {
+        const fileIDs = files.map(f => f.fileID);
+        const result = await getCloudFileURLs(fileIDs);
+        if (!cancelled) {
+          setUrls(result.map((u, i) => ({
+            ...u,
+            fileName: files[i]?.fileName || `附件${i + 1}`,
+          })));
+        }
+      } catch {
+        // ignore
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    fetchUrls();
+    return () => { cancelled = true; };
+  }, [files]);
+
+  if (loading) return <span className="text-xs text-gray-400">加载中...</span>;
+  if (urls.length === 0) return <span className="text-xs text-gray-400">暂无附件</span>;
+
+  const handleDownload = (url: string, fileName: string) => {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    a.target = '_blank';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
+  return (
+    <>
+      <div className="grid grid-cols-3 gap-2">
+        {urls.map((item, i) => {
+          const isImg = isImageFile(item.fileName);
+          if (isImg) {
+            return (
+              <div
+                key={i}
+                className="relative group border border-gray-200 rounded-lg overflow-hidden cursor-pointer hover:border-blue-400 transition-colors"
+                onClick={() => { setLightboxSrc(item.tempFileURL); setLightboxAlt(item.fileName); }}
+              >
+                <img src={item.tempFileURL} alt={item.fileName} className="w-full h-24 object-cover" />
+                <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors flex items-center justify-center">
+                  <Eye size={20} className="text-white opacity-0 group-hover:opacity-100 transition-opacity" />
+                </div>
+                <div className="px-2 py-1 text-xs text-gray-500 truncate bg-gray-50">{item.fileName}</div>
+              </div>
+            );
+          }
+          return (
+            <div key={i} className="flex flex-col items-center justify-center border border-gray-200 rounded-lg p-3 hover:border-blue-400 hover:bg-blue-50/30 transition-colors cursor-pointer"
+              onClick={() => handleDownload(item.tempFileURL, item.fileName)}>
+              <Download size={24} className="text-gray-400 mb-1" />
+              <span className="text-xs text-gray-600 truncate w-full text-center">{item.fileName}</span>
+            </div>
+          );
+        })}
+      </div>
+      {lightboxSrc && (
+        <ImageLightbox src={lightboxSrc} alt={lightboxAlt} onClose={() => { setLightboxSrc(null); setLightboxAlt(''); }} />
+      )}
+    </>
   );
 }
