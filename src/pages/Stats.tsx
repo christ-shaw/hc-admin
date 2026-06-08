@@ -49,13 +49,13 @@ export function Stats() {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-semibold text-gray-800">统计分析</h1>
-        <p className="text-gray-500 mt-1">出入库数据统计与趋势</p>
+        <p className="text-gray-500 mt-1">租赁数据统计与趋势</p>
       </div>
 
       {/* 趋势图 */}
       <div className="glass-card p-6">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold text-gray-800">出入库趋势（近7天）</h2>
+          <h2 className="text-lg font-semibold text-gray-800">租赁趋势（近7天）</h2>
           <Button theme="primary" icon={<Search size={16} />} onClick={handleLoadChart} loading={loading}>
             加载趋势
           </Button>

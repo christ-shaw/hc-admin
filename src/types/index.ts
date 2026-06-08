@@ -129,7 +129,9 @@ export interface OrderRecord {
   amount: number;                   // 金额
   paymentAccount: string;           // 收款账户
   trackingNumber: string;           // 物流单号
-  consignee: string;                // 收/发货人
+  consignee: string;                // 收货人名称
+  consigneePhone: string;           // 收货人电话
+  consigneeAddress: string;         // 收货人地址
   status: string;                   // 订单状态: 已发货/--/未发货
   customerRemark: string;           // 客服备注
   transferProductName: string;      // 转租赁2货品名称
@@ -139,10 +141,23 @@ export interface OrderRecord {
   createTime?: { $date: string };
 }
 
+/** 货品条目（新增订单时支持多条） */
+export interface ProductItem {
+  brand: string;
+  productName: string;
+  specification: string;
+  quantity: number;
+  unitPrice: number;
+  amount: number;
+  paymentAccount: string;
+}
+
 /** 订单状态映射 */
 export const ORDER_STATUS_MAP: Record<string, string> = {
   '已发货': '已发货',
-  '未发货': '未发货',
+  '不用发货': '不用发货',
+  '退货已收': '退货已收',
+  '退发已发': '退发已发',
   '--': '--',
 };
 
@@ -169,12 +184,22 @@ export const ORDER_TYPE_MAP: Record<string, string> = {
 
 /** 销售渠道映射 */
 export const SALES_CHANNEL_MAP: Record<string, string> = {
-  '租机乐': '租机乐',
-  '汇租机': '汇租机',
-  '极客矩阵': '极客矩阵',
-  '云界互联': '云界互联',
-  '倬石电子': '倬石电子',
+  'A人人租': 'A人人租',
+  'F人人租': 'F人人租',
   '云途': '云途',
+  '汇租机': '汇租机',
+  '租机乐': '租机乐',
+  '倬石电子': '倬石电子',
+  '云界互联': '云界互联',
+  '极客矩阵': '极客矩阵',
+  '极速闪租': '极速闪租',
+  'L人人租': 'L人人租',
+  'J人人租': 'J人人租',
+  'G人人租': 'G人人租',
+  'X/ZZ': 'X/ZZ',
+  'X/LL': 'X/LL',
+  'X/XX': 'X/XX',
+  'X/YY': 'X/YY',
 };
 
 /** 渠道类别映射 */

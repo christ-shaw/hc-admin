@@ -5,4 +5,4 @@ export const WECHAT_WEBHOOK_URL = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/s
 export const ENABLE_WECHAT_PUSH = true;
 
 /** 每页条数 */
-export const PAGE_SIZE = 10;
+export const PAGE_SIZE = 20;

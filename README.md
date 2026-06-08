@@ -308,11 +308,11 @@ MIT
 
 ## 部署信息
 
-**部署时间**: 2026-06-06 07:36
+**部署时间**: 2026-06-08 15:55
 
 ### 访问地址
 
-**前端应用**: https://cloud1-8gvbotkt966e5e19-1405003451.tcloudbaseapp.com/?v=202606060736
+**前端应用**: https://cloud1-8gvbotkt966e5e19-1405003451.tcloudbaseapp.com/?v=202606081555
 
 ### 云开发资源
 
@@ -345,6 +345,8 @@ MIT
      - saveOrders - 批量保存订单记录
      - deleteOrder - 删除订单记录
      - updateOrder - 更新订单记录
+     - getAndIncrementCounter - 获取计数器并自增
+     - manageCounter - 管理计数器（获取/设置）
 
 3. **数据库**
    - 实例ID: tnt-fpj1zozis
@@ -357,6 +359,7 @@ MIT
      - user_whitelist - 用户白名单
      - record_history - 记录修改历史
      - orders - 订单记录
+     - system_counters - 系统计数器
 
 4. **云存储**
    - 存储桶: 636c-cloud1-8gvbotkt966e5e19-1405003451

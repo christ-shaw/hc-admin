@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Layout as TLayout, MessagePlugin } from 'tdesign-react';
 import {
   Package,
@@ -18,9 +18,10 @@ import {
   Building2,
   ChevronDown,
   ChevronRight,
+  Settings,
 } from 'lucide-react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { getCurrentUser, signOut } from '../lib/cloudbase';
+import { getCurrentUser, signOut, callFunction } from '../lib/cloudbase';
 
 const { Header, Content, Aside } = TLayout;
 
@@ -40,6 +41,7 @@ const navItems = [
       { path: '/companies', label: '公司信息', Icon: Building2 },
     ],
   },
+  { path: '/settings', label: '系统设置', Icon: Settings },
 ];
 
 export function AppLayout({ children }: { children: React.ReactNode }) {
@@ -48,12 +50,31 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
   const [collapsed, setCollapsed] = useState(false);
   const [expandedMenus, setExpandedMenus] = useState<string[]>(['发票']);
   const [currentUser, setCurrentUser] = useState<{ id?: string; user_metadata?: { username?: string; nickName?: string } } | null>(null);
+  const [pendingCount, setPendingCount] = useState(0);
 
   useEffect(() => {
     getCurrentUser().then(user => {
       if (user) setCurrentUser(user);
     });
   }, []);
+
+  /** 获取待开票数量 */
+  const fetchPendingCount = useCallback(async () => {
+    try {
+      const result = await callFunction<{ success?: boolean; total: number }>('countPendingInvoices');
+      if (result.success) {
+        setPendingCount(result.total);
+      }
+    } catch {
+      // 静默失败，不影响主界面
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchPendingCount();
+    const timer = setInterval(fetchPendingCount, 60000);
+    return () => clearInterval(timer);
+  }, [fetchPendingCount]);
 
   const toggleMenu = (label: string) => {
     setExpandedMenus(prev =>
@@ -85,7 +106,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
             </div>
             {!collapsed && (
               <span className="text-white font-semibold text-base whitespace-nowrap">
-                出入库管理
+                租赁综合管理
               </span>
             )}
           </div>
@@ -101,13 +122,16 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
                   <div key={item.label}>
                     <button
                       onClick={() => toggleMenu(item.label)}
-                      className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 cursor-pointer ${
+                      className={`w-full relative flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 cursor-pointer ${
                         groupActive
                           ? 'text-white bg-white/15 shadow-[0_0_20px_rgba(0,82,217,0.3)]'
                           : 'text-white/60 hover:text-white hover:bg-white/10'
                       }`}
                     >
                       <item.Icon size={18} className="flex-shrink-0" />
+                      {item.label === '发票' && pendingCount > 0 && (
+                        <span className="absolute top-2 right-2 bg-red-500 rounded-full w-2 h-2" />
+                      )}
                       {!collapsed && (
                         <>
                           <span className="text-sm whitespace-nowrap flex-1 text-left">{item.label}</span>
@@ -123,14 +147,19 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
                             <button
                               key={child.path}
                               onClick={() => navigate(child.path)}
-                              className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-lg transition-all duration-200 cursor-pointer ${
+                              className={`w-full relative flex items-center gap-3 px-4 py-2.5 rounded-lg transition-all duration-200 cursor-pointer ${
                                 isActive
                                   ? 'text-white bg-white/15'
                                   : 'text-white/50 hover:text-white hover:bg-white/10'
                               }`}
                             >
                               <child.Icon size={16} className="flex-shrink-0" />
-                              <span className="text-sm whitespace-nowrap">{child.label}</span>
+                              <span className="text-sm whitespace-nowrap flex-1 text-left">{child.label}</span>
+                              {child.path === '/invoices' && pendingCount > 0 && (
+                                <span className="bg-red-500 text-white text-xs font-bold rounded-full min-w-[20px] h-5 flex items-center justify-center px-1.5 leading-none">
+                                  {pendingCount > 99 ? '99+' : pendingCount}
+                                </span>
+                              )}
                             </button>
                           );
                         })}

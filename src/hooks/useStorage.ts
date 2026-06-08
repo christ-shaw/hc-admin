@@ -49,7 +49,7 @@ export function useStorage() {
         detailContent += `\n\n日志ID: ${operationLogId}`;
       }
 
-      const title = `📦 出入库记录${actionName}`;
+      const title = `📦 租赁记录${actionName}`;
       const content = `${typeName}记录${actionName}\n\n${detailContent}`;
 
       const timestamp = new Date().toLocaleString('zh-CN');

@@ -432,6 +432,10 @@ export function Invoices() {
     }
   };
 
+  // 主预览弹窗灯箱状态
+  const [previewLightboxSrc, setPreviewLightboxSrc] = useState<string | null>(null);
+  const [previewLightboxAlt, setPreviewLightboxAlt] = useState('');
+
   /** 预览电子发票 */
   const handlePreview = async (record: InvoiceRecord) => {
     setPreviewRecord(record);
@@ -494,16 +498,10 @@ export function Invoices() {
             删除
           </Button>
           {row.status === '已开票' ? (
-            <>
-              <Button variant="text" theme="primary" size="small"
-                onClick={(e: React.MouseEvent) => { e.stopPropagation(); handlePreview(row); }}>
-                <Eye size={14} className="mr-0.5" />预览
-              </Button>
-              <Button variant="text" theme="primary" size="small"
-                onClick={(e: React.MouseEvent) => { e.stopPropagation(); handlePreview(row); }}>
-                <Download size={14} className="mr-0.5" />下载
-              </Button>
-            </>
+            <Button variant="text" theme="primary" size="small"
+              onClick={(e: React.MouseEvent) => { e.stopPropagation(); handlePreview(row); }}>
+              <Download size={14} className="mr-0.5" />下载
+            </Button>
           ) : (
             <Button variant="text" theme="success" size="small"
               onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleOpenInvoice(row); }}>
@@ -612,9 +610,10 @@ export function Invoices() {
             )}
             <DetailRow label="开票金额" value={currentRecord.invoiceAmount ? `¥${currentRecord.invoiceAmount}` : '-'} />
             {currentRecord.attachments && currentRecord.attachments.length > 0 && (
-              <DetailRow label="开票附件" value={
+              <div className="py-2 border-b border-gray-50">
+                <span className="text-gray-500 text-sm mb-2 block">开票附件</span>
                 <InvoiceAttachmentPreview files={currentRecord.attachments} />
-              } />
+              </div>
             )}
             {currentRecord.status === '已开票' && (
               <>
@@ -795,7 +794,7 @@ export function Invoices() {
                     </div>
                     <div>
                       <label className="block text-xs text-gray-500 mb-1">手机数量 <span className="text-red-500">*</span></label>
-                      <Input type="number" placeholder="请输入数量" min={1} value={addForm.phoneQuantity || ''}
+                      <Input type="number" placeholder="请输入数量" value={addForm.phoneQuantity ? String(addForm.phoneQuantity) : ''}
                         onChange={val => {
                           const qty = Number(val) || 0;
                           setAddForm(prev => ({
@@ -807,7 +806,7 @@ export function Invoices() {
                     </div>
                     <div>
                       <label className="block text-xs text-gray-500 mb-1">单价 <span className="text-red-500">*</span></label>
-                      <Input type="number" placeholder="请输入单价" min={0} value={addForm.unitPrice || ''}
+                      <Input type="number" placeholder="请输入单价" value={addForm.unitPrice ? String(addForm.unitPrice) : ''}
                         onChange={val => {
                           const price = Number(val) || 0;
                           setAddForm(prev => ({
@@ -819,7 +818,7 @@ export function Invoices() {
                     </div>
                     <div>
                       <label className="block text-xs text-gray-500 mb-1">开票金额</label>
-                      <Input type="number" placeholder="自动计算" value={addForm.invoiceAmount || ''}
+                      <Input type="number" placeholder="自动计算" value={addForm.invoiceAmount ? String(addForm.invoiceAmount) : ''}
                         readonly disabled
                         className="bg-gray-50" />
                     </div>
@@ -1025,9 +1024,9 @@ export function Invoices() {
       <Dialog
         header="电子发票预览"
         visible={previewVisible}
-        onClose={() => { setPreviewVisible(false); setPreviewRecord(null); setPreviewUrls([]); }}
+        onClose={() => { setPreviewVisible(false); setPreviewRecord(null); setPreviewUrls([]); setPreviewLightboxSrc(null); }}
         width="680px"
-        footer={<Button onClick={() => { setPreviewVisible(false); setPreviewRecord(null); setPreviewUrls([]); }}>关闭</Button>}
+        footer={<Button onClick={() => { setPreviewVisible(false); setPreviewRecord(null); setPreviewUrls([]); setPreviewLightboxSrc(null); }}>关闭</Button>}
       >
         {previewLoading ? (
           <div className="flex justify-center py-8 text-gray-400">加载中...</div>
@@ -1035,28 +1034,39 @@ export function Invoices() {
           <div className="flex justify-center py-8 text-gray-400">暂无电子发票图片</div>
         ) : (
           <div className="grid grid-cols-2 gap-4 max-h-[60vh] overflow-auto">
-            {previewUrls.map((item, index) => (
-              <div key={index} className="border border-gray-200 rounded-lg overflow-hidden">
-                <img
-                  src={item.tempFileURL}
-                  alt={item.fileName}
-                  className="w-full h-48 object-contain bg-gray-50"
-                />
-                <div className="flex items-center justify-between px-3 py-2 bg-gray-50">
-                  <span className="text-xs text-gray-500 truncate flex-1">{item.fileName}</span>
-                  <Button
-                    variant="text"
-                    theme="primary"
-                    size="small"
-                    icon={<Download size={14} />}
-                    onClick={() => handleDownloadImage(item.tempFileURL, item.fileName)}
-                  >
-                    下载
-                  </Button>
+            {previewUrls.map((item, index) => {
+              const isImg = isImageFile(item.fileName);
+              return (
+                <div key={index} className="border border-gray-200 rounded-lg overflow-hidden">
+                  {isImg ? (
+                    <div className="cursor-pointer" onClick={() => { setPreviewLightboxSrc(item.tempFileURL); setPreviewLightboxAlt(item.fileName); }}>
+                      <ImageWithBmpSupport src={item.tempFileURL} alt={item.fileName} className="w-full h-48 object-contain bg-gray-50" />
+                    </div>
+                  ) : (
+                    <div className="w-full h-48 flex flex-col items-center justify-center bg-gray-50">
+                      <Download size={32} className="text-gray-300 mb-2" />
+                      <span className="text-xs text-gray-400">非图片文件</span>
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between px-3 py-2 bg-gray-50">
+                    <span className="text-xs text-gray-500 truncate flex-1">{item.fileName}</span>
+                    <Button
+                      variant="text"
+                      theme="primary"
+                      size="small"
+                      icon={<Download size={14} />}
+                      onClick={() => handleDownloadImage(item.tempFileURL, item.fileName)}
+                    >
+                      下载
+                    </Button>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
+        )}
+        {previewLightboxSrc && (
+          <ImageLightbox src={previewLightboxSrc} alt={previewLightboxAlt} onClose={() => { setPreviewLightboxSrc(null); setPreviewLightboxAlt(''); }} />
         )}
       </Dialog>
     </div>
@@ -1176,7 +1186,7 @@ function InvoiceFormFields({ form, onChange, isEdit = false, onCompanyNameChange
               </div>
               <div>
                 <label className="block text-xs text-gray-500 mb-1">手机数量</label>
-                <Input type="number" placeholder="请输入数量" min={1} value={form.phoneQuantity || ''}
+                <Input type="number" placeholder="请输入数量" value={form.phoneQuantity ? String(form.phoneQuantity) : ''}
                   onChange={val => {
                     const qty = Number(val) || 0;
                     onChange(prev => ({ ...prev, phoneQuantity: qty, invoiceAmount: qty * (prev.unitPrice || 0) }));
@@ -1184,7 +1194,7 @@ function InvoiceFormFields({ form, onChange, isEdit = false, onCompanyNameChange
               </div>
               <div>
                 <label className="block text-xs text-gray-500 mb-1">单价</label>
-                <Input type="number" placeholder="请输入单价" min={0} value={form.unitPrice || ''}
+                <Input type="number" placeholder="请输入单价" value={form.unitPrice ? String(form.unitPrice) : ''}
                   onChange={val => {
                     const price = Number(val) || 0;
                     onChange(prev => ({ ...prev, unitPrice: price, invoiceAmount: (prev.phoneQuantity || 0) * price }));
@@ -1192,7 +1202,7 @@ function InvoiceFormFields({ form, onChange, isEdit = false, onCompanyNameChange
               </div>
               <div>
                 <label className="block text-xs text-gray-500 mb-1">开票金额</label>
-                <Input type="number" placeholder="自动计算" value={form.invoiceAmount || ''}
+                <Input type="number" placeholder="自动计算" value={form.invoiceAmount ? String(form.invoiceAmount) : ''}
                   readonly disabled />
               </div>
             </>
@@ -1262,15 +1272,17 @@ function InvoiceImagePreview({ files }: { files: InvoiceFile[] }) {
     const fetchUrls = async () => {
       try {
         const fileIDs = files.map(f => f.fileID);
+        console.log('[InvoiceImagePreview] fetching URLs for:', fileIDs);
         const result = await getCloudFileURLs(fileIDs);
+        console.log('[InvoiceImagePreview] result:', result);
         if (!cancelled) {
           setUrls(result.map((u, i) => ({
             ...u,
             fileName: files[i]?.fileName || `图片${i + 1}`,
           })));
         }
-      } catch {
-        // ignore
+      } catch (err) {
+        console.error('[InvoiceImagePreview] error:', err);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -1291,9 +1303,10 @@ function InvoiceImagePreview({ files }: { files: InvoiceFile[] }) {
             className="relative group cursor-pointer"
             onClick={() => { setLightboxSrc(item.tempFileURL); setLightboxAlt(item.fileName); }}
           >
-            <img
+            <ImageWithBmpSupport
               src={item.tempFileURL}
               alt={item.fileName}
+              fileName={item.fileName}
               className="w-20 h-20 object-cover border rounded hover:border-blue-400 transition-colors"
             />
             <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 rounded transition-colors flex items-center justify-center">
@@ -1313,8 +1326,8 @@ function DetailRow({ label, value }: { label: string; value: React.ReactNode }) 
   const display = value === undefined || value === null || value === '' || value === 0 ? '-' : value;
   return (
     <div className="flex py-1.5 border-b border-gray-50">
-      <span className="w-32 text-gray-500 flex-shrink-0">{label}</span>
-      <div className="text-gray-800">{display}</div>
+      <span className="w-28 text-gray-500 flex-shrink-0">{label}</span>
+      <div className="flex-1 min-w-0 text-gray-800">{display}</div>
     </div>
   );
 }
@@ -1325,7 +1338,72 @@ function isImageFile(fileName: string) {
   return ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(ext);
 }
 
-/** 图片灯箱组件 */
+/** 判断文件是否为 BMP 格式 */
+function isBmpFile(fileName: string) {
+  const ext = fileName.split('.').pop()?.toLowerCase() || '';
+  return ext === 'bmp';
+}
+
+/** 支持 BMP 格式的图片组件 - BMP 文件通过 Canvas 转 PNG 确保兼容性 */
+function ImageWithBmpSupport({ src, alt, className, fileName }: { src: string; alt: string; className?: string; fileName?: string }) {
+  const [convertedSrc, setConvertedSrc] = useState<string | null>(null);
+  const [error, setError] = useState(false);
+  const isBmp = fileName ? isBmpFile(fileName) : isBmpFile(alt);
+
+  useEffect(() => {
+    if (!isBmp) return;
+    let cancelled = false;
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      if (cancelled) return;
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0);
+          const pngUrl = canvas.toDataURL('image/png');
+          setConvertedSrc(pngUrl);
+        } else {
+          setConvertedSrc(src);
+        }
+      } catch {
+        // Canvas 转换失败则直接用原始 URL
+        setConvertedSrc(src);
+      }
+    };
+    img.onerror = () => {
+      if (!cancelled) setError(true);
+    };
+    img.src = src;
+    return () => { cancelled = true; };
+  }, [src, isBmp]);
+
+  if (error) {
+    return (
+      <div className={`${className} flex flex-col items-center justify-center`}>
+        <Download size={24} className="text-gray-300 mb-1" />
+        <span className="text-xs text-gray-400">图片加载失败</span>
+      </div>
+    );
+  }
+
+  // 非 BMP 文件直接用 img 标签
+  if (!isBmp) {
+    return <img src={src} alt={alt} className={className} />;
+  }
+
+  // BMP 文件：等待 Canvas 转换完成
+  if (!convertedSrc) {
+    return <div className={`${className} flex items-center justify-center bg-gray-50`}><span className="text-xs text-gray-400">转换中...</span></div>;
+  }
+
+  return <img src={convertedSrc} alt={alt} className={className} />;
+}
+
+/** 图片灯箱组件（支持 BMP） */
 function ImageLightbox({ src, alt, onClose }: { src: string; alt: string; onClose: () => void }) {
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
@@ -1337,7 +1415,7 @@ function ImageLightbox({ src, alt, onClose }: { src: string; alt: string; onClos
   return (
     <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70" onClick={onClose}>
       <div className="relative max-w-[90vw] max-h-[90vh]" onClick={e => e.stopPropagation()}>
-        <img src={src} alt={alt} className="max-w-full max-h-[85vh] object-contain rounded shadow-2xl" />
+        <ImageWithBmpSupport src={src} alt={alt} fileName={alt} className="max-w-full max-h-[85vh] object-contain rounded shadow-2xl" />
         <button
           type="button"
           className="absolute -top-3 -right-3 w-8 h-8 bg-white rounded-full flex items-center justify-center shadow-lg text-gray-600 hover:text-gray-900 cursor-pointer"
@@ -1379,15 +1457,19 @@ function InvoiceAttachmentPreview({ files }: { files: InvoiceFile[] }) {
     const fetchUrls = async () => {
       try {
         const fileIDs = files.map(f => f.fileID);
+        console.log('[InvoiceAttachmentPreview] fetching URLs for:', fileIDs);
         const result = await getCloudFileURLs(fileIDs);
+        console.log('[InvoiceAttachmentPreview] getCloudFileURLs result:', result);
         if (!cancelled) {
-          setUrls(result.map((u, i) => ({
+          const mapped = result.map((u, i) => ({
             ...u,
             fileName: files[i]?.fileName || `附件${i + 1}`,
-          })));
+          }));
+          console.log('[InvoiceAttachmentPreview] mapped urls:', mapped);
+          setUrls(mapped);
         }
-      } catch {
-        // ignore
+      } catch (err) {
+        console.error('[InvoiceAttachmentPreview] getCloudFileURLs error:', err);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -1421,7 +1503,7 @@ function InvoiceAttachmentPreview({ files }: { files: InvoiceFile[] }) {
                 className="relative group border border-gray-200 rounded-lg overflow-hidden cursor-pointer hover:border-blue-400 transition-colors"
                 onClick={() => { setLightboxSrc(item.tempFileURL); setLightboxAlt(item.fileName); }}
               >
-                <img src={item.tempFileURL} alt={item.fileName} className="w-full h-24 object-cover" />
+                <ImageWithBmpSupport src={item.tempFileURL} alt={item.fileName} fileName={item.fileName} className="w-full h-24 object-cover" />
                 <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors flex items-center justify-center">
                   <Eye size={20} className="text-white opacity-0 group-hover:opacity-100 transition-opacity" />
                 </div>

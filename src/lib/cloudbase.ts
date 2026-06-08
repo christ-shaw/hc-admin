@@ -108,6 +108,43 @@ export async function uploadToCloudStorage(cloudPath: string, file: File): Promi
   return result.fileID;
 }
 
+/** AI 智能解析收件人信息（姓名、电话、地址） */
+export async function parseConsigneeInfo(text: string): Promise<{ name: string; phone: string; address: string } | null> {
+  try {
+    const ai = app.ai();
+    const model = ai.createModel('hunyuan-exp');
+    const result = await model.generateText({
+      model: 'hunyuan-2.0-instruct-20251111',
+      messages: [
+        {
+          role: 'system',
+          content: '你是一个收件人信息解析助手。用户会输入一段包含收件人姓名、电话和地址的文本，你需要从中提取出姓名、电话和地址，并以JSON格式返回。格式：{"name":"姓名","phone":"电话","address":"地址"}。只返回JSON，不要返回其他内容。如果某个字段无法识别，设为空字符串。',
+        },
+        {
+          role: 'user',
+          content: text,
+        },
+      ],
+    });
+    const jsonStr = result.text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const parsed = JSON.parse(jsonStr);
+    if (parsed && typeof parsed === 'object') {
+      return {
+        name: String(parsed.name || ''),
+        phone: String(parsed.phone || ''),
+        address: String(parsed.address || ''),
+      };
+    }
+    return null;
+  } catch (err: any) {
+    const msg = String(err?.message || err || '');
+    if (msg.includes('not found') || msg.includes('not enabled') || msg.includes('未开通')) {
+      throw new Error('AI 模型未启用，请在 CloudBase 控制台开启 AI 模型服务：https://tcb.cloud.tencent.com/dev?envId=cloud1-8gvbotkt966e5e19#/ai');
+    }
+    throw new Error('智能识别失败: ' + msg);
+  }
+}
+
 /** 获取云存储文件的临时访问链接 */
 export async function getCloudFileURLs(fileIDs: string[]): Promise<Array<{ fileID: string; tempFileURL: string }>> {
   const result = await app.getTempFileURL({

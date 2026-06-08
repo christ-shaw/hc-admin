@@ -163,6 +163,31 @@ export function useOrders() {
     return state.records;
   }, [state.records]);
 
+  /** 按条件全量查询订单（用于导出，自动分页获取全部） */
+  const fetchAllRecords = useCallback(async (filters: OrderFilters): Promise<OrderRecord[]> => {
+    const allRecords: OrderRecord[] = [];
+    let skipCount = 0;
+    const limit = 100;
+    let hasMore = true;
+
+    while (hasMore) {
+      const requestData: Record<string, unknown> = {
+        limit,
+        cursor: String(skipCount),
+        ...filters,
+      };
+      const result = await callFunction<QueryResult>('queryOrders', { data: requestData });
+      const records = result.data || [];
+      allRecords.push(...records);
+      skipCount += records.length;
+      hasMore = result.hasMore !== undefined ? result.hasMore : (records.length >= limit);
+      // 安全上限：最多 10000 条
+      if (allRecords.length >= 10000) break;
+    }
+
+    return allRecords;
+  }, []);
+
   return {
     ...state,
     fetchRecords,
@@ -173,5 +198,6 @@ export function useOrders() {
     getPageRecords,
     setCurrentPage,
     getAllRecords,
+    fetchAllRecords,
   };
 }

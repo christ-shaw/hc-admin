@@ -1,0 +1,9 @@
+{
+  "name": "countPendingInvoices",
+  "version": "1.0.0",
+  "description": "统计待开票数量",
+  "main": "index.js",
+  "dependencies": {
+    "wx-server-sdk": "~2.6.3"
+  }
+}

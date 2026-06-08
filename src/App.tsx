@@ -12,6 +12,7 @@ import { Inventory } from './pages/Inventory';
 import { Orders } from './pages/Orders';
 import { Invoices } from './pages/Invoices';
 import { Companies } from './pages/Companies';
+import { SettingsPage } from './pages/Settings';
 import { NotFound } from './pages/NotFound';
 
 export default function App() {
@@ -31,6 +32,7 @@ export default function App() {
           <Route path="/orders" element={<AppLayout><Orders /></AppLayout>} />
           <Route path="/invoices" element={<AppLayout><Invoices /></AppLayout>} />
           <Route path="/companies" element={<AppLayout><Companies /></AppLayout>} />
+          <Route path="/settings" element={<AppLayout><SettingsPage /></AppLayout>} />
           <Route path="*" element={<NotFound />} />
         </Route>
       </Routes>

@@ -1,6 +1,25 @@
 {
   "envId": "cloud1-8gvbotkt966e5e19",
   "version": "2.0",
+  "functionRoot": "cloud_functions/sendWechatNotification/functions",
+  "functions": [
+    { "name": "getAndIncrementCounter", "handler": "index.main", "runtime": "Nodejs18.15" },
+    { "name": "manageCounter", "handler": "index.main", "runtime": "Nodejs18.15" },
+    { "name": "countPendingInvoices", "handler": "index.main", "runtime": "Nodejs18.15" },
+    { "name": "queryOrders", "handler": "index.main", "runtime": "Nodejs18.15" },
+    { "name": "saveOrders", "handler": "index.main", "runtime": "Nodejs18.15" },
+    { "name": "deleteOrder", "handler": "index.main", "runtime": "Nodejs18.15" },
+    { "name": "updateOrder", "handler": "index.main", "runtime": "Nodejs18.15" },
+    { "name": "sendWechatNotification", "handler": "index.main", "runtime": "Nodejs18.15" },
+    { "name": "queryInvoices", "handler": "index.main", "runtime": "Nodejs18.15" },
+    { "name": "saveInvoice", "handler": "index.main", "runtime": "Nodejs18.15" },
+    { "name": "deleteInvoice", "handler": "index.main", "runtime": "Nodejs18.15" },
+    { "name": "updateInvoice", "handler": "index.main", "runtime": "Nodejs18.15" },
+    { "name": "queryCompanies", "handler": "index.main", "runtime": "Nodejs18.15" },
+    { "name": "saveCompany", "handler": "index.main", "runtime": "Nodejs18.15" },
+    { "name": "deleteCompany", "handler": "index.main", "runtime": "Nodejs18.15" },
+    { "name": "updateCompany", "handler": "index.main", "runtime": "Nodejs18.15" }
+  ],
   "framework": {
     "name": "hc-admin",
     "plugins": {

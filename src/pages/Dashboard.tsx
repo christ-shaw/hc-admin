@@ -107,7 +107,7 @@ export function Dashboard() {
 
       {/* 趋势图占位 */}
       <div className="glass-card p-6">
-        <h2 className="text-lg font-semibold text-gray-800 mb-4">出入库趋势（近7天）</h2>
+        <h2 className="text-lg font-semibold text-gray-800 mb-4">租赁趋势（近7天）</h2>
         <p className="text-gray-400 text-sm">详细趋势图表请前往统计分析页面查看</p>
         <button
           onClick={() => navigate('/stats')}

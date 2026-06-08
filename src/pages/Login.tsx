@@ -36,7 +36,7 @@ export function Login() {
           <div className="w-14 h-14 bg-gradient-to-br from-primary to-primary-light rounded-xl flex items-center justify-center mx-auto mb-4">
             <Package size={28} className="text-white" />
           </div>
-          <h1 className="text-2xl font-bold text-gray-800">出入库管理系统</h1>
+          <h1 className="text-2xl font-bold text-gray-800">租赁综合管理系统</h1>
           <p className="text-gray-400 text-sm mt-2">请使用账号密码登录</p>
         </div>
 
