@@ -1,12 +1,59 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import { Table, Button, Input, Select, Tag, Dialog, MessagePlugin, Textarea } from 'tdesign-react';
-import { Search, RotateCcw, Upload, Download, Plus, Pencil, Trash2, Minus, ChevronRight, ChevronLeft, FileDown } from 'lucide-react';
-import { OrderRecord, OrderFilters, ORDER_TYPE_MAP, ORDER_SOURCE_MAP, ORDER_ATTRIBUTE_MAP, SALES_CHANNEL_MAP, ORDER_STATUS_MAP, CHANNEL_CATEGORY_MAP, ProductItem } from '../types';
+import { Search, RotateCcw, Upload, Download, Plus, Pencil, Trash2, Minus, X, ChevronRight, ChevronLeft, FileDown, Check } from 'lucide-react';
+import { OrderRecord, OrderFilters, ORDER_TYPE_MAP, ORDER_SOURCE_MAP, ORDER_ATTRIBUTE_MAP, SALES_CHANNEL_MAP, ORDER_STATUS_MAP, CHANNEL_CATEGORY_MAP, SHIPPING_FEE_MAP, ProductItem, TransferProductItem, OrderAttachment, dictToOptions, getDictLabel } from '../types';
 import { useOrders } from '../hooks/useOrders';
 import { formatDate } from '../utils/format';
 import { parseOrderExcel, exportOrderExcel } from '../utils/orderExcel';
-import { BRANDS, getProductsByBrand, getSpecsByProduct, PAYMENT_ACCOUNTS, SALESPERSONS } from '../data/productDict';
-import { parseConsigneeInfo, callFunction } from '../lib/cloudbase';
+import { BRANDS, getProductsByBrand, getSpecsByProduct, PAYMENT_ACCOUNTS, SALESPERSONS } from '../data/dict';
+import { parseConsigneeInfo, callFunction, getCurrentOperatorName, uploadToCloudStorage } from '../lib/cloudbase';
+
+/** ========== 预计算静态 options（模块级常量，避免每次渲染重建） ========== */
+const PLACEHOLDER_OPTION = { label: '请选择', value: '' };
+
+const ORDER_SOURCE_OPTIONS = [PLACEHOLDER_OPTION, ...dictToOptions(ORDER_SOURCE_MAP)];
+const ORDER_ATTRIBUTE_OPTIONS = [PLACEHOLDER_OPTION, ...dictToOptions(ORDER_ATTRIBUTE_MAP)];
+const ORDER_TYPE_OPTIONS = [PLACEHOLDER_OPTION, ...dictToOptions(ORDER_TYPE_MAP)];
+const SALES_CHANNEL_OPTIONS = [PLACEHOLDER_OPTION, ...dictToOptions(SALES_CHANNEL_MAP)];
+const CHANNEL_CATEGORY_OPTIONS = [PLACEHOLDER_OPTION, ...dictToOptions(CHANNEL_CATEGORY_MAP)];
+const SALESPERSON_OPTIONS = [PLACEHOLDER_OPTION, ...SALESPERSONS.map(v => ({ label: v, value: v }))];
+
+/** 平台渠道的 salesChannel key 集合（人人租系列 + 云途/汇租机/倬石电子/云界互联/极客矩阵/极速闪租） */
+const PLATFORM_CHANNELS = new Set(['aRrz', 'fRrz', 'lRrz', 'jRrz', 'gRrz', 'yuntu', '云途', 'huizuji', 'zhuoshi', 'yunjie', 'jikejuzhen', 'jisushanzu']);
+
+/** 根据 salesChannel key 推算渠道类别 */
+function calcChannelCategory(salesChannel: string): 'platform' | 'offline' | '' {
+  if (!salesChannel) return '';
+  return PLATFORM_CHANNELS.has(salesChannel) ? 'platform' : 'offline';
+}
+
+/** 订单类型 → 虚拟产品货品名称白名单 */
+const ORDER_TYPE_VIRTUAL_PRODUCTS: Partial<Record<string, string[]>> = {
+  newBusiness: ['平台租金', '续期租金'],
+  postRentalPayment: ['补收差价', '仅退款', '维修费', '快递费'],
+  deposit: ['收押金', '退押金'],
+};
+
+/** 订单来源 → 可选订单类型白名单 */
+const ORDER_SOURCE_ORDER_TYPE_MAP: Partial<Record<string, string[]>> = {
+  new: ['newBusiness'],
+  service: ['postRentalShip', 'postRentalReturn', 'postRentalPayment', 'deposit'],
+};
+
+/** 归还状态字典（租后发货/租后退货时使用） */
+const RETURN_STATUS_MAP = {
+  returned: '产品已退回入库',
+  inTransit: '产品运输途中',
+  notReturned: '客户未退回',
+} as const;
+const RETURN_STATUS_OPTIONS = [PLACEHOLDER_OPTION, ...dictToOptions(RETURN_STATUS_MAP)];
+
+const PAYMENT_ACCOUNT_OPTIONS = [PLACEHOLDER_OPTION, ...PAYMENT_ACCOUNTS.map(v => ({ label: v, value: v }))];
+const ORDER_STATUS_OPTIONS = dictToOptions(ORDER_STATUS_MAP);
+
+const SHIPPING_FEE_OPTIONS = [PLACEHOLDER_OPTION, ...dictToOptions(SHIPPING_FEE_MAP)];
+const BRAND_OPTIONS = [PLACEHOLDER_OPTION, ...BRANDS.map(v => ({ label: v, value: v }))];
+const FILTER_SALESPERSON_OPTIONS = [{ label: '全部', value: '' }, ...SALESPERSONS.map(v => ({ label: v, value: v }))];
 
 /** 货品条目默认值 */
 const EMPTY_PRODUCT: ProductItem = {
@@ -17,6 +64,15 @@ const EMPTY_PRODUCT: ProductItem = {
   unitPrice: 0,
   amount: 0,
   paymentAccount: '',
+};
+
+/** 转租赁2货品条目默认值 */
+const EMPTY_TRANSFER_PRODUCT: TransferProductItem = {
+  brand: '',
+  productName: '',
+  specification: '',
+  paidPeriod: 0,
+  paidRent: 0,
 };
 
 /** 新增订单表单 — 公共字段 + 货品列表 */
@@ -35,13 +91,14 @@ interface OrderFormData {
   consignee: string;
   consigneePhone: string;
   consigneeAddress: string;
+  shippingFee: string;
   status: string;
   customerRemark: string;
-  transferProductName: string;
-  transferSpecification: string;
-  paidPeriod: number;
-  paidRent: number;
+  transferProducts: TransferProductItem[];
   products: ProductItem[];
+  attachments: OrderAttachment[];
+  returnStatus: string;
+  returnTrackingNumbers: string;
 }
 
 const EMPTY_ORDER: OrderFormData = {
@@ -59,19 +116,19 @@ const EMPTY_ORDER: OrderFormData = {
   consignee: '',
   consigneePhone: '',
   consigneeAddress: '',
-  status: '--',
+  shippingFee: '',
+  status: 'unknown',
   customerRemark: '',
-  transferProductName: '',
-  transferSpecification: '',
-  paidPeriod: 0,
-  paidRent: 0,
+  transferProducts: [],
   products: [{ ...EMPTY_PRODUCT }],
+  attachments: [],
+  returnStatus: '',
+  returnTrackingNumbers: '',
 };
 
 const STATUS_TAG_THEME: Record<string, 'success' | 'warning' | 'danger' | 'default'> = {
-  '已发货': 'success',
-  '未发货': 'warning',
-  '--': 'default',
+  shipped: 'success',
+  unknown: 'default',
 };
 
 export function Orders() {
@@ -93,6 +150,17 @@ export function Orders() {
   const [deleteConfirmVisible, setDeleteConfirmVisible] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<OrderRecord | null>(null);
   const [deleting, setDeleting] = useState(false);
+
+  // 编辑订单向导状态
+  const [editStep, setEditStep] = useState(1);
+  const [editAttachFiles, setEditAttachFiles] = useState<File[]>([]);
+  const editAttachInputRef = useRef<HTMLInputElement>(null);
+
+  // 新增订单向导状态
+  const [addStep, setAddStep] = useState(1);
+  const [addAttachFiles, setAddAttachFiles] = useState<File[]>([]);
+  const addAttachInputRef = useRef<HTMLInputElement>(null);
+  const [addCloseConfirmVisible, setAddCloseConfirmVisible] = useState(false);
 
   // 导出引导弹窗状态
   const [exportVisible, setExportVisible] = useState(false);
@@ -122,10 +190,10 @@ export function Orders() {
     orders.fetchRecords(null, {});
   };
 
-  const handleDetail = (record: OrderRecord) => {
+  const handleDetail = useCallback((record: OrderRecord) => {
     setCurrentRecord(record);
     setDetailVisible(true);
-  };
+  }, []);
 
   /** 导入 Excel */
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -246,29 +314,96 @@ export function Orders() {
     }
   };
 
-  /** 新增订单 */
-  const handleAddOpen = () => {
+  /** 新增订单 — 打开向导 Step 1 */
+  const handleAddOpen = async () => {
     const today = new Date();
     const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-    setAddForm({ ...EMPTY_ORDER, date: dateStr, products: [{ ...EMPTY_PRODUCT }] });
+    const operatorName = await getCurrentOperatorName();
+    const nickname = operatorName || SALESPERSONS[0];
+    setAddForm({ ...EMPTY_ORDER, date: dateStr, salesperson: nickname, products: [{ ...EMPTY_PRODUCT }] });
+    setAddAttachFiles([]);
+    setAddStep(1);
     setAddVisible(true);
   };
 
+  /** 新增向导 — 下一步校验 */
+  const handleAddNext = () => {
+    if (addStep === 1) {
+      if (!addForm.date) { MessagePlugin.warning('请填写日期'); return; }
+      if (!addForm.customerName.trim()) { MessagePlugin.warning('请填写客户名称'); return; }
+      if (!addForm.salesperson) { MessagePlugin.warning('请选择销售人员'); return; }
+    }
+    if (addStep === 2) {
+      if (addForm.channelCategory === 'platform' && !addForm.onlineOrderNumber.trim()) { MessagePlugin.warning('平台渠道请填写网店订单号'); return; }
+      if (!addForm.orderSource) { MessagePlugin.warning('请选择订单来源'); return; }
+      if (!addForm.orderAttribute) { MessagePlugin.warning('请选择订单属性'); return; }
+      if (!addForm.salesChannel) { MessagePlugin.warning('请选择销售渠道'); return; }
+    }
+    if (addStep === 3) {
+      if (addForm.products.length === 0) { MessagePlugin.warning('请至少添加一条货品'); return; }
+      if (addForm.products.some(p => !p.brand)) { MessagePlugin.warning('请选择货品品牌'); return; }
+      if (addForm.products.some(p => p.amount > 0 && !p.paymentAccount)) { MessagePlugin.warning('金额不为0时请选择收款账户'); return; }
+    }
+    if (addStep === 4) {
+      if (!addForm.shippingFee) { MessagePlugin.warning('请选择邮寄结算方式'); return; }
+    }
+    if (addStep === 5) {
+      const needReturnStatus = addForm.orderType === 'postRentalShip' || addForm.orderType === 'postRentalReturn';
+      if (needReturnStatus && !addForm.returnStatus) { MessagePlugin.warning('请选择归还状态'); return; }
+      if (addForm.returnStatus === 'inTransit' && !addForm.returnTrackingNumbers.trim()) { MessagePlugin.warning('运输途中请填写归还物流单号'); return; }
+    }
+    setAddStep(prev => Math.min(prev + 1, 6));
+  };
+
+  /** 新增向导 — 上一步 */
+  const handleAddPrev = () => setAddStep(prev => Math.max(prev - 1, 1));
+
+  /** 判断新建表单是否有已填写的数据 */
+  const isAddFormDirty = () => {
+    if (addForm.customerName.trim() || addForm.onlineOrderNumber.trim() ||
+        addForm.orderSource || addForm.orderAttribute || addForm.orderType ||
+        addForm.salesChannel || addForm.channelCategory ||
+        addForm.consignee.trim() || addForm.consigneePhone.trim() || addForm.consigneeAddress.trim() ||
+        addForm.shippingFee || addForm.trackingNumber.trim() ||
+        addForm.customerRemark.trim() ||
+        addForm.transferProducts.some(t => t.brand || t.productName || t.specification || t.paidPeriod || t.paidRent) ||
+        addAttachFiles.length > 0) return true;
+    // 检查货品是否有数据
+    return addForm.products.some(p => p.brand || p.productName || p.specification || p.quantity || p.unitPrice || p.paymentAccount);
+  };
+
+  const handleRequestCloseAdd = () => {
+    if (isAddFormDirty()) {
+      setAddCloseConfirmVisible(true);
+    } else {
+      setAddVisible(false);
+      setAddStep(1);
+      setAddAttachFiles([]);
+    }
+  };
+
+  const handleConfirmCloseAdd = () => {
+    setAddCloseConfirmVisible(false);
+    setAddVisible(false);
+    setAddStep(1);
+    setAddForm(EMPTY_ORDER);
+    setAddAttachFiles([]);
+  };
+
+  /** 新增订单 — 预览确认后提交（Step 6） */
   const handleAddSave = async () => {
-    if (!addForm.date) {
-      MessagePlugin.warning('请填写日期');
-      return;
-    }
-    if (!addForm.customerName.trim()) {
-      MessagePlugin.warning('请填写客户名称');
-      return;
-    }
-    if (addForm.products.length === 0) {
-      MessagePlugin.warning('请至少添加一条货品');
-      return;
-    }
     setSaving(true);
     try {
+      // 上传附件到云存储
+      const attachments: OrderAttachment[] = [];
+      for (const file of addAttachFiles) {
+        const timestamp = Date.now();
+        const ext = file.name.split('.').pop() || 'bin';
+        const cloudPath = `orders_attachments/${timestamp}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
+        const fileID = await uploadToCloudStorage(cloudPath, file);
+        attachments.push({ fileID, fileName: file.name });
+      }
+
       // 获取计数器当前值并自增（原子操作）
       const counterResult = await callFunction<{ success: boolean; value: number; errMsg?: string }>('getAndIncrementCounter', {
         data: { counterName: 'orderSerialNumber' },
@@ -280,6 +415,7 @@ export function Orders() {
       }
       const serialNumber = counterResult.value;
 
+      const firstTransfer = addForm.transferProducts[0];
       const newRecords: OrderRecord[] = addForm.products.map((product, index) => ({
         _id: `manual_${Date.now()}_${index}`,
         serialNumber,
@@ -297,18 +433,26 @@ export function Orders() {
         consignee: addForm.consignee,
         consigneePhone: addForm.consigneePhone,
         consigneeAddress: addForm.consigneeAddress,
+        shippingFee: addForm.shippingFee,
         status: addForm.status,
         customerRemark: addForm.customerRemark,
-        transferProductName: addForm.transferProductName,
-        transferSpecification: addForm.transferSpecification,
-        paidPeriod: addForm.paidPeriod,
-        paidRent: addForm.paidRent,
+        transferBrand: firstTransfer?.brand || '',
+        transferProductName: firstTransfer?.productName || '',
+        transferSpecification: firstTransfer?.specification || '',
+        paidPeriod: firstTransfer?.paidPeriod || 0,
+        paidRent: firstTransfer?.paidRent || 0,
+        transferItems: addForm.transferProducts.length > 0 ? JSON.stringify(addForm.transferProducts) : '',
+        attachments,
+        returnStatus: addForm.returnStatus || '',
+        returnTrackingNumbers: addForm.returnTrackingNumbers || '',
       }));
       const result = await orders.importOrders(newRecords);
       if (result.success) {
         MessagePlugin.success(`新增订单成功，共 ${newRecords.length} 条`);
         setAddVisible(false);
+        setAddStep(1);
         setAddForm(EMPTY_ORDER);
+        setAddAttachFiles([]);
       } else {
         MessagePlugin.error('新增失败: ' + (result.errMsg || '未知错误'));
       }
@@ -320,8 +464,27 @@ export function Orders() {
   };
 
   /** 编辑订单 */
-  const handleEditOpen = (record: OrderRecord) => {
+  const handleEditOpen = useCallback((record: OrderRecord) => {
     setEditId(record._id);
+    setEditStep(1);
+    setEditAttachFiles([]);
+    // 解析转租赁2多组数据：优先 transferItems JSON，回退到旧单字段
+    let transferProducts: TransferProductItem[] = [];
+    if (record.transferItems) {
+      try {
+        transferProducts = JSON.parse(record.transferItems);
+      } catch { /* ignore parse error */ }
+    }
+    if (transferProducts.length === 0 && (record.transferBrand || record.transferProductName)) {
+      transferProducts = [{
+        brand: record.transferBrand || '',
+        productName: record.transferProductName || '',
+        specification: record.transferSpecification || '',
+        paidPeriod: record.paidPeriod || 0,
+        paidRent: record.paidRent || 0,
+      }];
+    }
+
     setEditForm({
       serialNumber: record.serialNumber,
       date: record.date,
@@ -337,12 +500,10 @@ export function Orders() {
       consignee: record.consignee,
       consigneePhone: record.consigneePhone || '',
       consigneeAddress: record.consigneeAddress || '',
+      shippingFee: record.shippingFee || '',
       status: record.status,
       customerRemark: record.customerRemark,
-      transferProductName: record.transferProductName,
-      transferSpecification: record.transferSpecification,
-      paidPeriod: record.paidPeriod,
-      paidRent: record.paidRent,
+      transferProducts,
       products: [{
         brand: record.brand,
         productName: record.productName,
@@ -352,23 +513,61 @@ export function Orders() {
         amount: record.amount,
         paymentAccount: record.paymentAccount,
       }],
+      attachments: record.attachments || [],
+      returnStatus: record.returnStatus || '',
+      returnTrackingNumbers: record.returnTrackingNumbers || '',
     });
     setEditVisible(true);
+  }, []);
+
+  /** 编辑向导 — 下一步校验 */
+  const handleEditNext = () => {
+    if (editStep === 1) {
+      if (!editForm.date) { MessagePlugin.warning('请填写日期'); return; }
+      if (!editForm.customerName.trim()) { MessagePlugin.warning('请填写客户名称'); return; }
+      if (!editForm.salesperson) { MessagePlugin.warning('请选择销售人员'); return; }
+    }
+    if (editStep === 2) {
+      if (editForm.channelCategory === 'platform' && !editForm.onlineOrderNumber.trim()) { MessagePlugin.warning('平台渠道请填写网店订单号'); return; }
+      if (!editForm.orderSource) { MessagePlugin.warning('请选择订单来源'); return; }
+      if (!editForm.orderAttribute) { MessagePlugin.warning('请选择订单属性'); return; }
+      if (!editForm.salesChannel) { MessagePlugin.warning('请选择销售渠道'); return; }
+    }
+    if (editStep === 3) {
+      if (editForm.products.length === 0) { MessagePlugin.warning('请至少添加一条货品'); return; }
+      if (editForm.products.some(p => !p.brand)) { MessagePlugin.warning('请选择货品品牌'); return; }
+      if (editForm.products.some(p => p.amount > 0 && !p.paymentAccount)) { MessagePlugin.warning('金额不为0时请选择收款账户'); return; }
+    }
+    if (editStep === 4) {
+      if (!editForm.shippingFee) { MessagePlugin.warning('请选择邮寄结算方式'); return; }
+    }
+    if (editStep === 5) {
+      const needReturnStatus = editForm.orderType === 'postRentalShip' || editForm.orderType === 'postRentalReturn';
+      if (needReturnStatus && !editForm.returnStatus) { MessagePlugin.warning('请选择归还状态'); return; }
+      if (editForm.returnStatus === 'inTransit' && !editForm.returnTrackingNumbers.trim()) { MessagePlugin.warning('运输途中请填写归还物流单号'); return; }
+    }
+    setEditStep(prev => Math.min(prev + 1, 6));
   };
 
+  /** 编辑向导 — 上一步 */
+  const handleEditPrev = () => setEditStep(prev => Math.max(prev - 1, 1));
+
   const handleEditSave = async () => {
-    if (!editForm.date) {
-      MessagePlugin.warning('请填写日期');
-      return;
-    }
-    if (!editForm.customerName.trim()) {
-      MessagePlugin.warning('请填写客户名称');
-      return;
-    }
     setSaving(true);
     try {
-      const product = editForm.products[0] || EMPTY_PRODUCT;
-      const flatData: Omit<OrderRecord, '_id' | 'createTime'> = {
+      // 上传新增附件到云存储
+      const newAttachments: OrderAttachment[] = [];
+      for (const file of editAttachFiles) {
+        const timestamp = Date.now();
+        const ext = file.name.split('.').pop() || 'bin';
+        const cloudPath = `orders_attachments/${timestamp}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
+        const fileID = await uploadToCloudStorage(cloudPath, file);
+        newAttachments.push({ fileID, fileName: file.name });
+      }
+      const allAttachments = [...editForm.attachments, ...newAttachments];
+
+      const firstTransfer = editForm.transferProducts[0];
+      const buildFlatData = (product: ProductItem): Omit<OrderRecord, '_id' | 'createTime'> => ({
         serialNumber: editForm.serialNumber,
         date: editForm.date,
         orderSource: editForm.orderSource,
@@ -384,17 +583,40 @@ export function Orders() {
         consignee: editForm.consignee,
         consigneePhone: editForm.consigneePhone,
         consigneeAddress: editForm.consigneeAddress,
+        shippingFee: editForm.shippingFee,
         status: editForm.status,
         customerRemark: editForm.customerRemark,
-        transferProductName: editForm.transferProductName,
-        transferSpecification: editForm.transferSpecification,
-        paidPeriod: editForm.paidPeriod,
-        paidRent: editForm.paidRent,
-      };
+        transferBrand: firstTransfer?.brand || '',
+        transferProductName: firstTransfer?.productName || '',
+        transferSpecification: firstTransfer?.specification || '',
+        paidPeriod: firstTransfer?.paidPeriod || 0,
+        paidRent: firstTransfer?.paidRent || 0,
+        transferItems: editForm.transferProducts.length > 0 ? JSON.stringify(editForm.transferProducts) : '',
+        attachments: allAttachments,
+        returnStatus: editForm.returnStatus || '',
+        returnTrackingNumbers: editForm.returnTrackingNumbers || '',
+      });
+
+      const flatData = buildFlatData(editForm.products[0] || EMPTY_PRODUCT);
       const success = await orders.updateOrder(editId, flatData);
       if (success) {
-        MessagePlugin.success('修改订单成功');
+        const extraProducts = editForm.products.slice(1);
+        if (extraProducts.length > 0) {
+          const timestamp = Date.now();
+          const extraRecords: OrderRecord[] = extraProducts.map((product, index) => ({
+            _id: `manual_${timestamp}_${index}`,
+            ...buildFlatData(product),
+          }));
+          const result = await orders.importOrders(extraRecords);
+          if (!result.success) {
+            MessagePlugin.error('主订单已修改，但新增货品保存失败: ' + (result.errMsg || '未知错误'));
+            return;
+          }
+        }
+        MessagePlugin.success(extraProducts.length > 0 ? `修改订单成功，并新增 ${extraProducts.length} 条货品记录` : '修改订单成功');
         setEditVisible(false);
+        setEditStep(1);
+        setEditAttachFiles([]);
       } else {
         MessagePlugin.error('修改失败');
       }
@@ -406,10 +628,10 @@ export function Orders() {
   };
 
   /** 删除订单 */
-  const handleDeleteConfirm = (record: OrderRecord) => {
+  const handleDeleteConfirm = useCallback((record: OrderRecord) => {
     setDeleteTarget(record);
     setDeleteConfirmVisible(true);
-  };
+  }, []);
 
   const handleDeleteExec = async () => {
     if (!deleteTarget) return;
@@ -430,14 +652,14 @@ export function Orders() {
     }
   };
 
-  const columns = [
+  const columns = useMemo(() => [
     { colKey: 'serialNumber', title: '序号', width: 60 },
     { colKey: 'date', title: '日期', width: 100, cell: ({ row }: { row: OrderRecord }) => formatDate(row.date, false) },
-    { colKey: 'orderType', title: '订单类型', width: 90, cell: ({ row }: { row: OrderRecord }) => row.orderType || '-' },
-    { colKey: 'salesChannel', title: '销售渠道', width: 90, cell: ({ row }: { row: OrderRecord }) => row.salesChannel || '-' },
+    { colKey: 'orderType', title: '订单类型', width: 90, cell: ({ row }: { row: OrderRecord }) => getDictLabel(ORDER_TYPE_MAP, row.orderType) || '-' },
+    { colKey: 'salesChannel', title: '销售渠道', width: 90, cell: ({ row }: { row: OrderRecord }) => getDictLabel(SALES_CHANNEL_MAP, row.salesChannel) || '-' },
     { colKey: 'salesperson', title: '人员', width: 60, cell: ({ row }: { row: OrderRecord }) => row.salesperson || '-' },
     { colKey: 'customerName', title: '客户名称', width: 100, ellipsis: true },
-    { colKey: 'orderAttribute', title: '订单属性', width: 80, cell: ({ row }: { row: OrderRecord }) => row.orderAttribute || '-' },
+    { colKey: 'orderAttribute', title: '订单属性', width: 80, cell: ({ row }: { row: OrderRecord }) => getDictLabel(ORDER_ATTRIBUTE_MAP, row.orderAttribute) || '-' },
     { colKey: 'trackingNumber', title: '快递单号', width: 130, ellipsis: true, cell: ({ row }: { row: OrderRecord }) => row.trackingNumber || '-' },
     {
       colKey: 'productInfo', title: '货品名称/规格', width: 160,
@@ -453,7 +675,7 @@ export function Orders() {
       colKey: 'status', title: '订单状态', width: 80,
       cell: ({ row }: { row: OrderRecord }) => {
         const theme = STATUS_TAG_THEME[row.status] || 'default';
-        return <Tag theme={theme} variant="light">{row.status || '--'}</Tag>;
+        return <Tag theme={theme} variant="light">{getDictLabel(ORDER_STATUS_MAP, row.status) || '--'}</Tag>;
       },
     },
     {
@@ -475,7 +697,7 @@ export function Orders() {
         </div>
       ),
     },
-  ];
+  ], [handleDetail, handleEditOpen, handleDeleteConfirm]);
 
   const displayRecords = orders.getPageRecords(orders.currentPage);
 
@@ -517,7 +739,7 @@ export function Orders() {
             <label className="block text-xs text-gray-500 mb-1">人员</label>
             <Select placeholder="请选择人员" value={filters.salesperson || ''}
               onChange={(val) => setFilters(prev => ({ ...prev, salesperson: val as string }))}
-              options={[{ label: '全部', value: '' }, ...SALESPERSONS.map(v => ({ label: v, value: v }))]} />
+              options={FILTER_SALESPERSON_OPTIONS} />
           </div>
           <div className="w-40">
             <label className="block text-xs text-gray-500 mb-1">日期</label>
@@ -542,6 +764,11 @@ export function Orders() {
           tableLayout="fixed"
           hover
           stripe
+          rowClassName={({ row }: { row: OrderRecord }) => {
+            const isUnreceived = row.paymentAccount === '未收款';
+            const isUnreturned = row.returnStatus === 'notReturned' || row.returnStatus === 'inTransit';
+            return (isUnreceived || isUnreturned) ? 'order-row-unreceived' : '';
+          }}
         />
         {/* 分页 */}
         <div className="flex justify-center items-center gap-2 py-4 border-t border-gray-100">
@@ -583,17 +810,52 @@ export function Orders() {
             <DetailRow label="收货人名称" value={currentRecord.consignee} />
             <DetailRow label="收货人电话" value={currentRecord.consigneePhone} />
             <DetailRow label="收货人地址" value={currentRecord.consigneeAddress} />
+            <DetailRow label="邮寄结算方式" value={getDictLabel(SHIPPING_FEE_MAP, currentRecord.shippingFee)} />
             <DetailRow label="物流单号" value={currentRecord.trackingNumber} />
             <DetailRow label="订单状态" value={
               <Tag theme={STATUS_TAG_THEME[currentRecord.status] || 'default'} variant="light">
-                {currentRecord.status || '--'}
+                {getDictLabel(ORDER_STATUS_MAP, currentRecord.status) || '--'}
               </Tag>
             } />
             <DetailRow label="客服备注" value={currentRecord.customerRemark} />
-            <DetailRow label="转租赁2货品名称" value={currentRecord.transferProductName} />
-            <DetailRow label="转租赁2规格" value={currentRecord.transferSpecification} />
-            <DetailRow label="已交租期" value={currentRecord.paidPeriod || '-'} />
-            <DetailRow label="已交租金" value={currentRecord.paidRent ? `¥${currentRecord.paidRent}` : '-'} />
+            {/* 归还状态（租后发货/租后退货） */}
+            {(currentRecord.orderType === 'postRentalShip' || currentRecord.orderType === 'postRentalReturn') && currentRecord.returnStatus && (
+              <>
+                <DetailRow label="归还状态" value={getDictLabel(RETURN_STATUS_MAP, currentRecord.returnStatus)} />
+                {currentRecord.returnStatus === 'inTransit' && (
+                  <DetailRow label="归还物流单号" value={currentRecord.returnTrackingNumbers || '-'} />
+                )}
+              </>
+            )}
+            {/* 转租赁2多组展示 */}
+            {(() => {
+              let items: TransferProductItem[] = [];
+              if (currentRecord.transferItems) {
+                try { items = JSON.parse(currentRecord.transferItems); } catch { /* ignore */ }
+              }
+              if (items.length === 0 && (currentRecord.transferBrand || currentRecord.transferProductName)) {
+                items = [{
+                  brand: currentRecord.transferBrand || '',
+                  productName: currentRecord.transferProductName || '',
+                  specification: currentRecord.transferSpecification || '',
+                  paidPeriod: currentRecord.paidPeriod || 0,
+                  paidRent: currentRecord.paidRent || 0,
+                }];
+              }
+              if (items.length > 0) {
+                return items.map((t, i) => (
+                  <div key={i} className="border-l-2 border-blue-300 pl-3 my-1">
+                    {items.length > 1 && <div className="text-xs text-blue-500 font-medium mb-1">转租赁2 - 第{i + 1}组</div>}
+                    <DetailRow label="转租赁2品牌" value={t.brand} />
+                    <DetailRow label="转租赁2货品名称" value={t.productName} />
+                    <DetailRow label="转租赁2规格" value={t.specification} />
+                    <DetailRow label="已交租期" value={t.paidPeriod || '-'} />
+                    <DetailRow label="已交租金" value={t.paidRent ? `¥${t.paidRent}` : '-'} />
+                  </div>
+                ));
+              }
+              return null;
+            })()}
           </div>
         )}
       </Dialog>
@@ -636,36 +898,73 @@ export function Orders() {
         </div>
       </Dialog>
 
-      {/* 新增订单弹窗 */}
+      {/* 新增订单弹窗 — 6 步向导 */}
       <Dialog
         header="新增订单"
         visible={addVisible}
-        onClose={() => setAddVisible(false)}
-        width="720px"
+        onClose={handleRequestCloseAdd}
+        width="760px"
         footer={
-          <div className="flex justify-end gap-2">
-            <Button onClick={() => setAddVisible(false)}>取消</Button>
-            <Button theme="primary" loading={saving} onClick={handleAddSave}>保存</Button>
+          <div className="flex justify-between">
+            <div>
+              {addStep > 1 && (
+                <Button variant="outline" icon={<ChevronLeft size={16} />} onClick={handleAddPrev}>上一步</Button>
+              )}
+            </div>
+            <div className="flex gap-2">
+              <Button onClick={handleRequestCloseAdd}>取消</Button>
+              {addStep < 6 ? (
+                <Button theme="primary" icon={<ChevronRight size={16} />} onClick={handleAddNext}>下一步</Button>
+              ) : (
+                <Button theme="primary" loading={saving} icon={<Check size={16} />} onClick={handleAddSave}>确认提交</Button>
+              )}
+            </div>
           </div>
         }
       >
-        <OrderFormFields form={addForm} onChange={setAddForm} />
+        <AddOrderWizard
+          step={addStep}
+          form={addForm}
+          attachFiles={addAttachFiles}
+          attachInputRef={addAttachInputRef}
+          onChange={setAddForm}
+          onAttachFilesChange={setAddAttachFiles}
+        />
       </Dialog>
 
-      {/* 编辑订单弹窗 */}
+      {/* 编辑订单弹窗 — 6 步向导 */}
       <Dialog
         header="编辑订单"
         visible={editVisible}
-        onClose={() => setEditVisible(false)}
-        width="720px"
+        onClose={() => { setEditVisible(false); setEditStep(1); setEditAttachFiles([]); }}
+        width="760px"
         footer={
-          <div className="flex justify-end gap-2">
-            <Button onClick={() => setEditVisible(false)}>取消</Button>
-            <Button theme="primary" loading={saving} onClick={handleEditSave}>保存</Button>
+          <div className="flex justify-between">
+            <div>
+              {editStep > 1 && (
+                <Button variant="outline" icon={<ChevronLeft size={16} />} onClick={handleEditPrev}>上一步</Button>
+              )}
+            </div>
+            <div className="flex gap-2">
+              <Button onClick={() => { setEditVisible(false); setEditStep(1); setEditAttachFiles([]); }}>取消</Button>
+              {editStep < 6 ? (
+                <Button theme="primary" icon={<ChevronRight size={16} />} onClick={handleEditNext}>下一步</Button>
+              ) : (
+                <Button theme="primary" loading={saving} icon={<Check size={16} />} onClick={handleEditSave}>保存修改</Button>
+              )}
+            </div>
           </div>
         }
       >
-        <OrderFormFields form={editForm} onChange={setEditForm} singleProduct />
+        <AddOrderWizard
+          mode="edit"
+          step={editStep}
+          form={editForm}
+          attachFiles={editAttachFiles}
+          attachInputRef={editAttachInputRef}
+          onChange={setEditForm}
+          onAttachFilesChange={setEditAttachFiles}
+        />
       </Dialog>
 
       {/* 删除确认弹窗 */}
@@ -686,6 +985,22 @@ export function Orders() {
         </p>
       </Dialog>
 
+      {/* 关闭新增订单确认弹窗 */}
+      <Dialog
+        header="提示"
+        visible={addCloseConfirmVisible}
+        onClose={() => setAddCloseConfirmVisible(false)}
+        width="420px"
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button onClick={() => setAddCloseConfirmVisible(false)}>继续填写</Button>
+            <Button theme="danger" onClick={handleConfirmCloseAdd}>确认关闭</Button>
+          </div>
+        }
+      >
+        <p className="text-gray-600">确定要关闭吗？已填写的信息将不会保存。</p>
+      </Dialog>
+
       {/* 导出引导弹窗 */}
       <Dialog
         header="导出订单"
@@ -699,9 +1014,9 @@ export function Orders() {
           <div className="flex items-center justify-center gap-0 mb-2">
             {[1, 2, 3].map(step => (
               <div key={step} className="flex items-center">
-                <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium transition-colors ${
+                <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${
                   step < exportStep ? 'bg-blue-500 text-white' :
-                  step === exportStep ? 'bg-blue-500 text-white ring-4 ring-blue-100' :
+                  step === exportStep ? 'bg-blue-500 text-white' :
                   'bg-gray-200 text-gray-500'
                 }`}>
                   {step < exportStep ? '✓' : step}
@@ -764,7 +1079,7 @@ export function Orders() {
                   const selected = exportChannels.includes(channel);
                   return (
                     <button key={channel} type="button"
-                      className={`px-3 py-2 rounded-lg border text-sm transition-colors ${
+                      className={`px-3 py-2 rounded-lg border text-sm ${
                         selected ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-200 bg-white text-gray-700 hover:border-gray-300'
                       }`}
                       onClick={() => {
@@ -772,7 +1087,7 @@ export function Orders() {
                           selected ? prev.filter(c => c !== channel) : [...prev, channel]
                         );
                       }}>
-                      {channel}
+                      {getDictLabel(SALES_CHANNEL_MAP, channel)}
                     </button>
                   );
                 })}
@@ -789,7 +1104,7 @@ export function Orders() {
                   const selected = exportSalespersons.includes(person);
                   return (
                     <button key={person} type="button"
-                      className={`px-3 py-2 rounded-lg border text-sm transition-colors ${
+                      className={`px-3 py-2 rounded-lg border text-sm ${
                         selected ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-200 bg-white text-gray-700 hover:border-gray-300'
                       }`}
                       onClick={() => {
@@ -842,285 +1157,591 @@ export function Orders() {
   );
 }
 
-/** 订单表单字段（新增/编辑共用） */
-function OrderFormFields({ form, onChange, singleProduct }: {
+/** 新增订单 6 步向导 */
+function AddOrderWizard({
+  step, form, attachFiles, attachInputRef, onChange, onAttachFilesChange, mode = 'add',
+}: {
+  step: number;
   form: OrderFormData;
+  attachFiles: File[];
+  attachInputRef: React.RefObject<HTMLInputElement>;
   onChange: React.Dispatch<React.SetStateAction<OrderFormData>>;
-  singleProduct?: boolean; // 编辑模式只有一条货品，不显示增删按钮
+  onAttachFilesChange: React.Dispatch<React.SetStateAction<File[]>>;
+  mode?: 'add' | 'edit';
 }) {
   const [pasteText, setPasteText] = useState('');
   const [parsing, setParsing] = useState(false);
-
-  /** 粘贴识别收件人信息 */
-  const handleSmartParse = async () => {
-    if (!pasteText.trim()) {
-      MessagePlugin.warning('请先粘贴收件人信息');
-      return;
-    }
-    setParsing(true);
-    try {
-      const result = await parseConsigneeInfo(pasteText.trim());
-      if (result) {
-        onChange(prev => ({
-          ...prev,
-          consignee: result.name || prev.consignee,
-          consigneePhone: result.phone || prev.consigneePhone,
-          consigneeAddress: result.address || prev.consigneeAddress,
-        }));
-        setPasteText('');
-        MessagePlugin.success('识别成功');
-      } else {
-        MessagePlugin.warning('未能识别出收件人信息，请手动填写');
-      }
-    } catch (err: any) {
-      MessagePlugin.error(String(err?.message || err));
-    } finally {
-      setParsing(false);
-    }
-  };
-
-  /** 更新某条货品 */
-  const updateProduct = (index: number, patch: Partial<ProductItem>) => {
+  const updateField = useCallback(<K extends keyof OrderFormData>(key: K, val: OrderFormData[K]) => {
+    onChange(prev => ({ ...prev, [key]: val }));
+  }, [onChange]);
+  const updateProduct = useCallback((index: number, patch: Partial<ProductItem>) => {
     onChange(prev => {
       const products = [...prev.products];
       products[index] = { ...products[index], ...patch };
       return { ...prev, products };
     });
-  };
+  }, [onChange]);
+  const addProduct = useCallback(() => onChange(prev => ({ ...prev, products: [...prev.products, { ...EMPTY_PRODUCT }] })), [onChange]);
+  const removeProduct = useCallback((index: number) => {
+    onChange(prev => {
+      if (prev.products.length <= 1) return prev;
+      return { ...prev, products: prev.products.filter((_, i) => i !== index) };
+    });
+  }, [onChange]);
 
-  /** 添加一条货品 */
-  const addProduct = () => {
-    onChange(prev => ({ ...prev, products: [...prev.products, { ...EMPTY_PRODUCT }] }));
-  };
+  // 转租赁2货品 CRUD
+  const updateTransferProduct = useCallback((index: number, patch: Partial<TransferProductItem>) => {
+    onChange(prev => {
+      const transferProducts = [...prev.transferProducts];
+      transferProducts[index] = { ...transferProducts[index], ...patch };
+      return { ...prev, transferProducts };
+    });
+  }, [onChange]);
+  const addTransferProduct = useCallback(() => {
+    onChange(prev => ({ ...prev, transferProducts: [...prev.transferProducts, { ...EMPTY_TRANSFER_PRODUCT }] }));
+  }, [onChange]);
+  const removeTransferProduct = useCallback((index: number) => {
+    onChange(prev => {
+      return { ...prev, transferProducts: prev.transferProducts.filter((_, i) => i !== index) };
+    });
+  }, [onChange]);
 
-  /** 删除某条货品 */
-  const removeProduct = (index: number) => {
-    if (form.products.length <= 1) return;
-    onChange(prev => ({ ...prev, products: prev.products.filter((_, i) => i !== index) }));
-  };
+  // 产品级联 options（支持订单类型→虚拟产品过滤）
+  const productOptionsMap = useMemo(() => {
+    const cache: Record<string, { label: string; value: string }[]> = {};
+    for (const p of form.products) {
+      if (p.brand && !cache[p.brand]) {
+        let products = getProductsByBrand(p.brand);
+        // 虚拟产品/无 品牌下根据订单类型过滤
+        if ((p.brand === '虚拟产品' || p.brand === '无') && form.orderType && ORDER_TYPE_VIRTUAL_PRODUCTS[form.orderType]) {
+          const allowed = new Set(ORDER_TYPE_VIRTUAL_PRODUCTS[form.orderType]!);
+          products = products.filter(name => allowed.has(name));
+        }
+        cache[p.brand] = [PLACEHOLDER_OPTION, ...products.map(v => ({ label: v, value: v }))];
+      }
+    }
+    return cache;
+  }, [form.products.map(p => p.brand).join(','), form.orderType]);
+  const specOptionsMap = useMemo(() => {
+    const cache: Record<string, { label: string; value: string }[]> = {};
+    for (const p of form.products) {
+      const key = `${p.brand}|${p.productName}`;
+      if (p.brand && p.productName && !cache[key]) {
+        cache[key] = [PLACEHOLDER_OPTION, ...getSpecsByProduct(p.brand, p.productName).map(v => ({ label: v, value: v }))];
+      }
+    }
+    return cache;
+  }, [form.products.map(p => `${p.brand}|${p.productName}`).join(',')]);
+
+  // 转租赁级联 options（按索引缓存各组）
+  const transferProductOptionsMap = useMemo(() => {
+    const cache: Record<string, { label: string; value: string }[]> = {};
+    for (const t of form.transferProducts) {
+      if (t.brand && !cache[t.brand]) {
+        cache[t.brand] = [PLACEHOLDER_OPTION, ...getProductsByBrand(t.brand).map(v => ({ label: v, value: v }))];
+      }
+    }
+    return cache;
+  }, [form.transferProducts.map(t => t.brand).join(',')]);
+  const transferSpecOptionsMap = useMemo(() => {
+    const cache: Record<string, { label: string; value: string }[]> = {};
+    for (const t of form.transferProducts) {
+      const key = `${t.brand}|${t.productName}`;
+      if (t.brand && t.productName && !cache[key]) {
+        cache[key] = [PLACEHOLDER_OPTION, ...getSpecsByProduct(t.brand, t.productName).map(v => ({ label: v, value: v }))];
+      }
+    }
+    return cache;
+  }, [form.transferProducts.map(t => `${t.brand}|${t.productName}`).join(',')]);
+
+  // 订单类型选项（根据订单来源过滤）
+  const filteredOrderTypeOptions = useMemo(() => {
+    if (!form.orderSource || !ORDER_SOURCE_ORDER_TYPE_MAP[form.orderSource]) {
+      return ORDER_TYPE_OPTIONS;
+    }
+    const allowed = new Set(ORDER_SOURCE_ORDER_TYPE_MAP[form.orderSource]!);
+    return ORDER_TYPE_OPTIONS.filter(o => !o.value || allowed.has(o.value));
+  }, [form.orderSource]);
+
+  // 是否有货品名称为「部分转租赁2」或「全部转租赁2」
+  const hasTransferProduct = useMemo(() => {
+    return form.products.some(p => p.productName === '部分转租赁2' || p.productName === '全部转租赁2');
+  }, [form.products.map(p => p.productName).join(',')]);
+
+  // 是否显示归还状态（订单类型为租后发货或租后退货时）
+  const showReturnStatus = useMemo(() => {
+    return form.orderType === 'postRentalShip' || form.orderType === 'postRentalReturn';
+  }, [form.orderType]);
+
+  // 当 hasTransferProduct 变为 true 且 transferProducts 为空时，自动添加一组默认条目
+  useEffect(() => {
+    if (hasTransferProduct && form.transferProducts.length === 0) {
+      onChange(prev => ({ ...prev, transferProducts: [{ ...EMPTY_TRANSFER_PRODUCT }] }));
+    }
+  }, [hasTransferProduct]);
+
+  const handleSmartParse = useCallback(async () => {
+    if (!pasteText.trim()) { MessagePlugin.warning('请先粘贴收件人信息'); return; }
+    setParsing(true);
+    try {
+      const result = await parseConsigneeInfo(pasteText.trim());
+      if (result) {
+        onChange(prev => ({ ...prev, consignee: result.name || prev.consignee, consigneePhone: result.phone || prev.consigneePhone, consigneeAddress: result.address || prev.consigneeAddress }));
+        setPasteText('');
+        MessagePlugin.success('识别成功');
+      } else { MessagePlugin.warning('未能识别出收件人信息，请手动填写'); }
+    } catch (err: any) { MessagePlugin.error(String(err?.message || err)); }
+    finally { setParsing(false); }
+  }, [pasteText, onChange]);
+
+  const stepLabels = ['基础信息', '订单属性', '货品信息', '收件人信息', '备注 & 附件', '确认预览'];
 
   return (
-    <div className="space-y-4 max-h-[70vh] overflow-auto px-1">
-      {/* 基础信息 */}
-      <div>
-        <h4 className="text-sm font-medium text-gray-600 mb-2">基础信息</h4>
-        <div className="grid grid-cols-3 gap-3">
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">网店订单号</label>
-            <Input placeholder="网店订单号" value={form.onlineOrderNumber}
-              onChange={val => onChange(prev => ({ ...prev, onlineOrderNumber: val as string }))} />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">日期 <span className="text-red-500">*</span></label>
-            <input type="date" className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500"
-              value={form.date} onChange={e => onChange(prev => ({ ...prev, date: e.target.value }))} />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">客户名称 <span className="text-red-500">*</span></label>
-            <Input placeholder="客户名称" value={form.customerName}
-              onChange={val => onChange(prev => ({ ...prev, customerName: val as string }))} />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">人员</label>
-            <Select placeholder="请选择" value={form.salesperson || ''}
-              onChange={val => onChange(prev => ({ ...prev, salesperson: val as string }))}
-              options={[{ label: '请选择', value: '' }, ...SALESPERSONS.map(v => ({ label: v, value: v }))]} />
-          </div>
-        </div>
-      </div>
-
-      {/* 订单属性 */}
-      <div>
-        <h4 className="text-sm font-medium text-gray-600 mb-2">订单属性</h4>
-        <div className="grid grid-cols-3 gap-3">
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">订单来源</label>
-            <Select placeholder="请选择" value={form.orderSource || ''}
-              onChange={val => onChange(prev => ({ ...prev, orderSource: val as string }))}
-              options={[{ label: '请选择', value: '' }, ...Object.keys(ORDER_SOURCE_MAP).map(v => ({ label: v, value: v }))]} />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">订单属性</label>
-            <Select placeholder="请选择" value={form.orderAttribute || ''}
-              onChange={val => onChange(prev => ({ ...prev, orderAttribute: val as string }))}
-              options={[{ label: '请选择', value: '' }, ...Object.keys(ORDER_ATTRIBUTE_MAP).map(v => ({ label: v, value: v }))]} />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">订单类型</label>
-            <Select placeholder="请选择" value={form.orderType || ''}
-              onChange={val => onChange(prev => ({ ...prev, orderType: val as string }))}
-              options={[{ label: '请选择', value: '' }, ...Object.keys(ORDER_TYPE_MAP).map(v => ({ label: v, value: v }))]} />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">销售渠道</label>
-            <Select placeholder="请选择" value={form.salesChannel || ''}
-              onChange={val => onChange(prev => ({ ...prev, salesChannel: val as string }))}
-              options={[{ label: '请选择', value: '' }, ...Object.keys(SALES_CHANNEL_MAP).map(v => ({ label: v, value: v }))]} />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">渠道类别</label>
-            <Select placeholder="请选择" value={form.channelCategory || ''}
-              onChange={val => onChange(prev => ({ ...prev, channelCategory: val as string }))}
-              options={[{ label: '请选择', value: '' }, ...Object.keys(CHANNEL_CATEGORY_MAP).map(v => ({ label: v, value: v }))]} />
-          </div>
-        </div>
-      </div>
-
-      {/* 货品信息 */}
-      <div>
-        <div className="flex items-center justify-between mb-2">
-          <h4 className="text-sm font-medium text-gray-600">货品信息</h4>
-          {!singleProduct && (
-            <Button size="small" variant="outline" icon={<Plus size={14} />} onClick={addProduct}>
-              添加货品
-            </Button>
-          )}
-        </div>
-        {form.products.map((product, idx) => (
-          <div key={idx} className={`${idx > 0 ? 'mt-3 pt-3 border-t border-gray-200' : ''}`}>
-            {!singleProduct && form.products.length > 1 && (
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs text-gray-400">货品 {idx + 1}</span>
-                <Button size="small" variant="text" theme="danger" icon={<Minus size={14} />}
-                  onClick={() => removeProduct(idx)}>
-                  删除
-                </Button>
+    <div className="space-y-4">
+      {/* 步骤指示器 */}
+      <div className="flex items-center justify-center gap-0 mb-2">
+        {stepLabels.map((label, i) => (
+          <div key={i} className="flex items-center">
+            <div className="flex flex-col items-center">
+              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${
+                step > i + 1 ? 'bg-blue-500 text-white' : step === i + 1 ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-500'
+              }`}>
+                {step > i + 1 ? <Check size={16} /> : i + 1}
               </div>
-            )}
-            <div className="grid grid-cols-3 gap-3">
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">品牌</label>
-                <Select placeholder="请选择品牌" value={product.brand || ''}
-                  onChange={val => updateProduct(idx, { brand: val as string, productName: '', specification: '' })}
-                  options={[{ label: '请选择', value: '' }, ...BRANDS.map(v => ({ label: v, value: v }))]}
-                  filterable />
-              </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">货品名称</label>
-                <Select placeholder="请先选择品牌" value={product.productName || ''}
-                  onChange={val => updateProduct(idx, { productName: val as string, specification: '' })}
-                  options={[{ label: '请选择', value: '' }, ...getProductsByBrand(product.brand).map(v => ({ label: v, value: v }))]}
-                  filterable />
-              </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">规格</label>
-                <Select placeholder="请先选择货品" value={product.specification || ''}
-                  onChange={val => updateProduct(idx, { specification: val as string })}
-                  options={[{ label: '请选择', value: '' }, ...getSpecsByProduct(product.brand, product.productName).map(v => ({ label: v, value: v }))]} />
-              </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">数量</label>
-                <Input type="number" placeholder="数量" value={product.quantity ? String(product.quantity) : ''}
-                  onChange={val => {
-                    const q = Number(val);
-                    updateProduct(idx, { quantity: q, amount: q * product.unitPrice });
-                  }} />
-              </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">单价</label>
-                <Input type="number" placeholder="单价" value={product.unitPrice ? String(product.unitPrice) : ''}
-                  onChange={val => {
-                    const p = Number(val);
-                    updateProduct(idx, { unitPrice: p, amount: product.quantity * p });
-                  }} />
-              </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">金额</label>
-                <Input type="number" placeholder="数量×单价自动计算" value={product.amount ? String(product.amount) : ''} readonly />
-              </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">收款账户</label>
-                <Select placeholder="请选择" value={product.paymentAccount || ''}
-                  onChange={val => updateProduct(idx, { paymentAccount: val as string })}
-                  options={[{ label: '请选择', value: '' }, ...PAYMENT_ACCOUNTS.map(v => ({ label: v, value: v }))]} />
-              </div>
+              <span className={`text-xs mt-1 ${step >= i + 1 ? 'text-blue-600 font-medium' : 'text-gray-400'}`}>{label}</span>
             </div>
+            {i < stepLabels.length - 1 && (
+              <div className={`w-10 h-0.5 mx-1 mb-4 ${step > i + 1 ? 'bg-blue-500' : 'bg-gray-200'}`} />
+            )}
           </div>
         ))}
       </div>
 
-      {/* 收件人信息 */}
-      <div>
-        <h4 className="text-sm font-medium text-gray-600 mb-2">收件人信息</h4>
-        <div className="mb-3 p-3 bg-blue-50/50 rounded-lg border border-blue-100">
-          <div className="flex items-center gap-2 mb-2">
-            <span className="text-xs text-blue-600 font-medium">🧠 粘贴识别</span>
-            <span className="text-xs text-gray-400">粘贴包含姓名、电话、地址的文本，AI 自动识别填入</span>
-          </div>
-          <div className="flex gap-2">
-            <Textarea
-              placeholder="例：张三 13800138000 北京市朝阳区建国路88号"
-              value={pasteText}
-              onChange={val => setPasteText(val as string)}
-              autosize={{ minRows: 1, maxRows: 3 }}
-              className="flex-1"
-            />
-            <Button theme="primary" size="small" loading={parsing} onClick={handleSmartParse}>
-              识别
-            </Button>
-          </div>
-        </div>
-        <div className="grid grid-cols-3 gap-3">
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">收货人名称</label>
-            <Input placeholder="收货人名称" value={form.consignee}
-              onChange={val => onChange(prev => ({ ...prev, consignee: val as string }))} />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">收货人电话</label>
-            <Input placeholder="收货人电话" value={form.consigneePhone}
-              onChange={val => onChange(prev => ({ ...prev, consigneePhone: val as string }))} />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">收货人地址</label>
-            <Input placeholder="收货人地址" value={form.consigneeAddress}
-              onChange={val => onChange(prev => ({ ...prev, consigneeAddress: val as string }))} />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">订单状态</label>
-            <Select placeholder="请选择" value={form.status || ''}
-              onChange={val => onChange(prev => ({ ...prev, status: val as string }))}
-              options={Object.keys(ORDER_STATUS_MAP).map(v => ({ label: v, value: v }))} />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">物流单号</label>
-            <Input placeholder="物流单号" value={form.trackingNumber}
-              onChange={val => onChange(prev => ({ ...prev, trackingNumber: val as string }))} />
+      {/* ========== Step 1：基础信息 ========== */}
+      {step === 1 && (
+        <div className="py-4">
+          <h4 className="text-sm font-medium text-gray-600 mb-4">填写基础信息</h4>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">日期 <span className="text-red-500">*</span></label>
+              <input type="date" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500"
+                value={form.date} onChange={e => updateField('date', e.target.value)} />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">客户名称 <span className="text-red-500">*</span></label>
+              <input type="text" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500" placeholder="请输入客户名称"
+                value={form.customerName} onChange={e => updateField('customerName', e.target.value)} />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">销售人员 <span className="text-red-500">*</span></label>
+              <Select placeholder="请选择" value={form.salesperson || ''} onChange={val => updateField('salesperson', val as string)} options={SALESPERSON_OPTIONS} />
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
-      {/* 转租赁 & 备注 */}
-      <div>
-        <h4 className="text-sm font-medium text-gray-600 mb-2">转租赁 & 备注</h4>
-        <div className="grid grid-cols-3 gap-3">
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">转租赁2货品名称</label>
-            <Input placeholder="转租赁2货品名称" value={form.transferProductName}
-              onChange={val => onChange(prev => ({ ...prev, transferProductName: val as string }))} />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">转租赁2规格</label>
-            <Input placeholder="转租赁2规格" value={form.transferSpecification}
-              onChange={val => onChange(prev => ({ ...prev, transferSpecification: val as string }))} />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">已交租期</label>
-            <Input type="number" placeholder="已交租期" value={form.paidPeriod ? String(form.paidPeriod) : ''}
-              onChange={val => onChange(prev => ({ ...prev, paidPeriod: Number(val) }))} />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">已交租金</label>
-            <Input type="number" placeholder="已交租金" value={form.paidRent ? String(form.paidRent) : ''}
-              onChange={val => onChange(prev => ({ ...prev, paidRent: Number(val) }))} />
-          </div>
-          <div className="col-span-3">
-            <label className="block text-xs text-gray-500 mb-1">客服备注</label>
-            <Textarea placeholder="客服备注" value={form.customerRemark}
-              onChange={val => onChange(prev => ({ ...prev, customerRemark: val as string }))} />
+      {/* ========== Step 2：订单属性 ========== */}
+      {step === 2 && (
+        <div className="py-4">
+          <h4 className="text-sm font-medium text-gray-600 mb-4">填写订单属性</h4>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">网店订单号{form.channelCategory === 'platform' && <span className="text-red-500"> *</span>}</label>
+              <input type="text" className={`w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500 ${form.channelCategory !== 'platform' ? 'bg-gray-100 cursor-not-allowed' : ''}`} placeholder={form.channelCategory === 'platform' ? '请填写网店订单号' : '线下渠道无需填写'}
+                value={form.onlineOrderNumber} onChange={e => updateField('onlineOrderNumber', e.target.value)} disabled={form.channelCategory !== 'platform'} />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">订单来源 <span className="text-red-500">*</span></label>
+              <Select placeholder="请选择" value={form.orderSource || ''} onChange={val => {
+                const newSource = val as string;
+                onChange(prev => {
+                  const updated = { ...prev, orderSource: newSource };
+                  // 切换订单来源时，若当前订单类型不在新来源允许范围内，清空
+                  if (newSource && ORDER_SOURCE_ORDER_TYPE_MAP[newSource]) {
+                    const allowed = new Set(ORDER_SOURCE_ORDER_TYPE_MAP[newSource]!);
+                    if (prev.orderType && !allowed.has(prev.orderType)) {
+                      updated.orderType = '';
+                    }
+                  }
+                  return updated;
+                });
+              }} options={ORDER_SOURCE_OPTIONS} />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">订单属性 <span className="text-red-500">*</span></label>
+              <Select placeholder="请选择" value={form.orderAttribute || ''} onChange={val => updateField('orderAttribute', val as string)} options={ORDER_ATTRIBUTE_OPTIONS} />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">订单类型</label>
+              <Select placeholder="请选择" value={form.orderType || ''} onChange={val => {
+                const newType = val as string;
+                onChange(prev => {
+                  const updated = { ...prev, orderType: newType };
+                  // 如果当前有虚拟产品/无品牌的货品，且货品名称不在新订单类型白名单内，清空选择
+                  if (newType && ORDER_TYPE_VIRTUAL_PRODUCTS[newType]) {
+                    const allowed = new Set(ORDER_TYPE_VIRTUAL_PRODUCTS[newType]!);
+                    updated.products = prev.products.map(p => {
+                      if ((p.brand === '虚拟产品' || p.brand === '无') && p.productName && !allowed.has(p.productName)) {
+                        return { ...p, productName: '', specification: '' };
+                      }
+                      return p;
+                    });
+                  }
+                  return updated;
+                });
+              }} options={filteredOrderTypeOptions} />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">销售渠道 <span className="text-red-500">*</span></label>
+              <Select placeholder="请选择" value={form.salesChannel || ''} onChange={val => {
+                const channel = val as string;
+                const category = calcChannelCategory(channel);
+                const updates: Partial<OrderFormData> = { salesChannel: channel, channelCategory: category };
+                if (category === 'offline') updates.onlineOrderNumber = '';
+                onChange(prev => ({ ...prev, ...updates }));
+              }} options={SALES_CHANNEL_OPTIONS} />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">渠道类别</label>
+              <Input value={form.channelCategory ? (CHANNEL_CATEGORY_MAP as Record<string, string>)[form.channelCategory] || form.channelCategory : ''} readOnly className="bg-gray-50" />
+            </div>
           </div>
         </div>
-      </div>
+      )}
+
+      {/* ========== Step 3：货品信息 ========== */}
+      {step === 3 && (
+        <div className="py-4 max-h-[55vh] overflow-auto px-1">
+          <div className="flex items-center justify-between mb-2">
+            <h4 className="text-sm font-medium text-gray-600">填写货品信息</h4>
+            <Button size="small" variant="outline" icon={<Plus size={14} />} onClick={addProduct}>添加货品</Button>
+          </div>
+          {form.products.map((product, idx) => (
+            <div key={idx} className={`${idx > 0 ? 'mt-3 pt-3 border-t border-gray-200' : ''} mb-3`}>
+              {form.products.length > 1 && (
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs text-gray-400">货品 {idx + 1}</span>
+                  <Button size="small" variant="text" theme="danger" icon={<Minus size={14} />} onClick={() => removeProduct(idx)}>删除</Button>
+                </div>
+              )}
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">品牌 <span className="text-red-500">*</span></label>
+                  <Select placeholder="请选择品牌" value={product.brand || ''}
+                    onChange={val => updateProduct(idx, { brand: val as string, productName: '', specification: '' })}
+                    options={BRAND_OPTIONS} filterable />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">货品名称</label>
+                  <Select placeholder="请先选择品牌" value={product.productName || ''}
+                    onChange={val => updateProduct(idx, { productName: val as string, specification: '' })}
+                    options={productOptionsMap[product.brand] || [PLACEHOLDER_OPTION]} filterable />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">规格</label>
+                  <Select placeholder="请先选择货品" value={product.specification || ''}
+                    onChange={val => updateProduct(idx, { specification: val as string })}
+                    options={specOptionsMap[`${product.brand}|${product.productName}`] || [PLACEHOLDER_OPTION]} />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">数量</label>
+                  <input type="number" min="0" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500" placeholder="数量"
+                    value={product.quantity || ''} onChange={e => { const q = Math.max(0, Number(e.target.value)); updateProduct(idx, { quantity: q, amount: q * product.unitPrice }); }} />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">单价</label>
+                  <input type="number" min="0" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500" placeholder="单价"
+                    value={product.unitPrice || ''} onChange={e => { const p = Math.max(0, Number(e.target.value)); updateProduct(idx, { unitPrice: p, amount: product.quantity * p }); }} />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">金额</label>
+                  <input type="number" min="0" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500 bg-gray-50" placeholder="自动计算"
+                    value={product.amount || ''} readOnly />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">收款账户{product.amount > 0 && <span className="text-red-500"> *</span>}</label>
+                  <Select placeholder="请选择" value={product.paymentAccount || ''}
+                    onChange={val => updateProduct(idx, { paymentAccount: val as string })} options={PAYMENT_ACCOUNT_OPTIONS} />
+                </div>
+              </div>
+            </div>
+          ))}
+
+          {/* 条件显示的转租赁字段 */}
+          {hasTransferProduct && (
+            <div className="mt-4 pt-4 border-t-2 border-blue-200">
+              <div className="flex items-center justify-between mb-3">
+                <h4 className="text-sm font-medium text-blue-600">📦 转租赁2 信息</h4>
+                <Button size="small" variant="outline" icon={<Plus size={14} />} onClick={addTransferProduct}>添加一组</Button>
+              </div>
+              {form.transferProducts.map((tp, tIdx) => (
+                <div key={tIdx} className={`${tIdx > 0 ? 'mt-3 pt-3 border-t border-blue-100' : ''} mb-3`}>
+                  {form.transferProducts.length > 1 && (
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs text-blue-400">第 {tIdx + 1} 组</span>
+                      <Button size="small" variant="text" theme="danger" icon={<Minus size={14} />} onClick={() => removeTransferProduct(tIdx)}>删除</Button>
+                    </div>
+                  )}
+                  <div className="grid grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-xs text-gray-500 mb-1">品牌 <span className="text-red-500">*</span></label>
+                      <Select placeholder="请选择品牌" value={tp.brand || ''}
+                        onChange={val => updateTransferProduct(tIdx, { brand: val as string, productName: '', specification: '' })}
+                        options={BRAND_OPTIONS} filterable />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-gray-500 mb-1">货品名称</label>
+                      <Select placeholder="请先选择品牌" value={tp.productName || ''}
+                        onChange={val => updateTransferProduct(tIdx, { productName: val as string, specification: '' })}
+                        options={transferProductOptionsMap[tp.brand] || [PLACEHOLDER_OPTION]} filterable />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-gray-500 mb-1">规格</label>
+                      <Select placeholder="请先选择货品" value={tp.specification || ''}
+                        onChange={val => updateTransferProduct(tIdx, { specification: val as string })}
+                        options={transferSpecOptionsMap[`${tp.brand}|${tp.productName}`] || [PLACEHOLDER_OPTION]} />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-gray-500 mb-1">已交租期</label>
+                      <input type="number" min="0" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500" placeholder="已交租期"
+                        value={tp.paidPeriod || ''} onChange={e => updateTransferProduct(tIdx, { paidPeriod: Math.max(0, Number(e.target.value)) })} />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-gray-500 mb-1">已交租金</label>
+                      <input type="number" min="0" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500" placeholder="已交租金"
+                        value={tp.paidRent || ''} onChange={e => updateTransferProduct(tIdx, { paidRent: Math.max(0, Number(e.target.value)) })} />
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ========== Step 4：收件人信息 ========== */}
+      {step === 4 && (
+        <div className="py-4">
+          <h4 className="text-sm font-medium text-gray-600 mb-4">收件人信息</h4>
+          <div className="mb-3 p-3 bg-blue-50/50 rounded-lg border border-blue-100">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="text-xs text-blue-600 font-medium">🧠 粘贴识别</span>
+              <span className="text-xs text-gray-400">粘贴包含姓名、电话、地址的文本，AI 自动识别填入</span>
+            </div>
+            <div className="flex gap-2">
+              <Textarea placeholder="例：张三 13800138000 北京市朝阳区建国路88号" value={pasteText}
+                onChange={val => setPasteText(val as string)} autosize={{ minRows: 1, maxRows: 3 }} className="flex-1" />
+              <Button theme="primary" size="small" loading={parsing} onClick={handleSmartParse}>识别</Button>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">收货人名称</label>
+              <input type="text" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500" placeholder="收货人名称"
+                value={form.consignee} onChange={e => updateField('consignee', e.target.value)} />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">收货人电话</label>
+              <input type="text" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500" placeholder="收货人电话"
+                value={form.consigneePhone} onChange={e => updateField('consigneePhone', e.target.value)} />
+            </div>
+            <div className="col-span-2">
+              <label className="block text-xs text-gray-500 mb-1">收货人地址</label>
+              <input type="text" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500" placeholder="收货人地址"
+                value={form.consigneeAddress} onChange={e => updateField('consigneeAddress', e.target.value)} />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">邮寄结算方式 <span className="text-red-500">*</span></label>
+              <Select placeholder="请选择" value={form.shippingFee || ''} onChange={val => updateField('shippingFee', val as string)} options={SHIPPING_FEE_OPTIONS} />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">物流单号</label>
+              <input type="text" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500" placeholder="物流单号"
+                value={form.trackingNumber} onChange={e => updateField('trackingNumber', e.target.value)} />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">订单状态</label>
+              <Select placeholder="请选择" value={form.status || ''} onChange={val => updateField('status', val as string)} options={ORDER_STATUS_OPTIONS} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========== Step 5：备注 & 附件 ========== */}
+      {step === 5 && (
+        <div className="py-4">
+          <div className="mb-4">
+            <h4 className="text-sm font-medium text-gray-600 mb-4">备注信息</h4>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">客服备注</label>
+              <Textarea placeholder="客服备注" value={form.customerRemark}
+                onChange={val => updateField('customerRemark', val as string)} autosize={{ minRows: 2, maxRows: 5 }} />
+            </div>
+          </div>
+
+          {/* 归还状态：租后发货/租后退货时显示 */}
+          {showReturnStatus && (
+            <div className="mb-4 p-3 bg-orange-50/50 rounded-lg border border-orange-200">
+              <h4 className="text-sm font-medium text-orange-600 mb-3">📦 归还状态</h4>
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">归还状态 <span className="text-red-500">*</span></label>
+                  <Select placeholder="请选择归还状态" value={form.returnStatus || ''}
+                    onChange={val => updateField('returnStatus', val as string)}
+                    options={RETURN_STATUS_OPTIONS} />
+                </div>
+                {form.returnStatus === 'inTransit' && (
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">归还物流单号 <span className="text-red-500">*</span></label>
+                    <input type="text" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500"
+                      placeholder="多个单号请用逗号或空格分隔，如：SF1234567890, YT9876543210"
+                      value={form.returnTrackingNumbers}
+                      onChange={e => updateField('returnTrackingNumbers', e.target.value)} />
+                    <p className="text-xs text-gray-400 mt-1">多个单号请用逗号或空格分隔</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {mode === 'edit' && form.attachments && form.attachments.length > 0 && (
+            <div className="mb-4">
+              <h4 className="text-sm font-medium text-gray-600 mb-3">已有附件</h4>
+              <div className="space-y-2">
+                {form.attachments.map((att, index) => (
+                  <div key={index} className="flex items-center justify-between px-3 py-2 bg-blue-50 rounded-lg">
+                    <div className="flex items-center gap-2 flex-1 min-w-0">
+                      <FileDown size={14} className="text-blue-400 flex-shrink-0" />
+                      <span className="text-sm text-gray-700 truncate">{att.fileName}</span>
+                    </div>
+                    <button type="button" className="w-6 h-6 flex items-center justify-center text-gray-400 hover:text-red-500 cursor-pointer flex-shrink-0"
+                      onClick={() => onChange(prev => ({ ...prev, attachments: prev.attachments.filter((_, i) => i !== index) }))}>
+                      <X size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          <div>
+            <h4 className="text-sm font-medium text-gray-600 mb-3">附件上传</h4>
+            <div className="mb-3">
+              <input ref={attachInputRef} type="file" multiple className="hidden"
+                onChange={(e) => {
+                  const files = e.target.files;
+                  if (files) onAttachFilesChange(prev => [...prev, ...Array.from(files)]);
+                  if (attachInputRef.current) attachInputRef.current.value = '';
+                }} />
+              <Button variant="outline" icon={<Upload size={16} />} onClick={() => attachInputRef.current?.click()}>
+                选择附件
+              </Button>
+              <span className="text-xs text-gray-400 ml-2">支持图片、PDF、Word、Excel等文件</span>
+            </div>
+            {attachFiles.length > 0 && (
+              <div className="space-y-2">
+                {attachFiles.map((file, index) => (
+                  <div key={index} className="flex items-center justify-between px-3 py-2 bg-gray-50 rounded-lg">
+                    <div className="flex items-center gap-2 flex-1 min-w-0">
+                      <Upload size={14} className="text-gray-400 flex-shrink-0" />
+                      <span className="text-sm text-gray-700 truncate">{file.name}</span>
+                      <span className="text-xs text-gray-400 flex-shrink-0">({(file.size / 1024).toFixed(1)}KB)</span>
+                    </div>
+                    <button type="button" className="w-6 h-6 flex items-center justify-center text-gray-400 hover:text-red-500 cursor-pointer flex-shrink-0"
+                      onClick={() => onAttachFilesChange(prev => prev.filter((_, i) => i !== index))}>
+                      <X size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ========== Step 6：确认预览 ========== */}
+      {step === 6 && (
+        <div>
+          <h4 className="text-sm font-medium text-gray-600 mb-3">请确认以下信息无误后提交</h4>
+          <div className="bg-gray-50 rounded-lg p-4 space-y-2 text-sm max-h-[50vh] overflow-auto">
+            <PreviewSection title="基础信息">
+              <PreviewItem label="日期" value={form.date} />
+              <PreviewItem label="客户名称" value={form.customerName} />
+              <PreviewItem label="销售人员" value={form.salesperson} />
+            </PreviewSection>
+            <PreviewSection title="订单属性">
+              <PreviewItem label="网店订单号" value={form.onlineOrderNumber} />
+              <PreviewItem label="订单来源" value={getDictLabel(ORDER_SOURCE_MAP, form.orderSource)} />
+              <PreviewItem label="订单属性" value={getDictLabel(ORDER_ATTRIBUTE_MAP, form.orderAttribute)} />
+              <PreviewItem label="订单类型" value={getDictLabel(ORDER_TYPE_MAP, form.orderType)} />
+              <PreviewItem label="销售渠道" value={getDictLabel(SALES_CHANNEL_MAP, form.salesChannel)} />
+              <PreviewItem label="渠道类别" value={getDictLabel(CHANNEL_CATEGORY_MAP, form.channelCategory)} />
+            </PreviewSection>
+            <PreviewSection title="货品信息">
+              {form.products.map((p, i) => (
+                <div key={i} className="text-xs text-gray-600 ml-2 border-l-2 border-blue-200 pl-2 mb-1">
+                  货品{i + 1}：{p.brand || '-'} / {p.productName || '-'} / {p.specification || '-'}，
+                  数量 {p.quantity || 0}，单价 ¥{p.unitPrice || 0}，金额 ¥{p.amount || 0}，收款账户 {p.paymentAccount || '-'}
+                </div>
+              ))}
+            </PreviewSection>
+            {hasTransferProduct && form.transferProducts.length > 0 && (
+              <PreviewSection title="转租赁2 信息">
+                {form.transferProducts.map((t, i) => (
+                  <div key={i} className="text-xs text-gray-600 ml-2 border-l-2 border-blue-200 pl-2 mb-1">
+                    {form.transferProducts.length > 1 && <span className="text-blue-500 font-medium">第{i + 1}组：</span>}
+                    {t.brand || '-'} / {t.productName || '-'} / {t.specification || '-'}，
+                    已交租期 {t.paidPeriod || 0}，已交租金 ¥{t.paidRent || 0}
+                  </div>
+                ))}
+              </PreviewSection>
+            )}
+            <PreviewSection title="收件人信息">
+              <PreviewItem label="收货人名称" value={form.consignee} />
+              <PreviewItem label="收货人电话" value={form.consigneePhone} />
+              <PreviewItem label="收货人地址" value={form.consigneeAddress} />
+              <PreviewItem label="邮寄结算方式" value={getDictLabel(SHIPPING_FEE_MAP, form.shippingFee)} />
+              <PreviewItem label="物流单号" value={form.trackingNumber} />
+              <PreviewItem label="订单状态" value={getDictLabel(ORDER_STATUS_MAP, form.status)} />
+            </PreviewSection>
+            {showReturnStatus && form.returnStatus && (
+              <PreviewSection title="归还状态">
+                <PreviewItem label="归还状态" value={getDictLabel(RETURN_STATUS_MAP, form.returnStatus)} />
+                {form.returnStatus === 'inTransit' && (
+                  <PreviewItem label="归还物流单号" value={form.returnTrackingNumbers || '-'} />
+                )}
+              </PreviewSection>
+            )}
+            <PreviewSection title="备注 & 附件">
+              <PreviewItem label="客服备注" value={form.customerRemark} />
+              <PreviewItem label="附件" value={
+                mode === 'edit'
+                  ? [...form.attachments.map(a => a.fileName), ...attachFiles.map(f => f.name)].join(', ') || '无'
+                  : attachFiles.length > 0 ? attachFiles.map(f => f.name).join(', ') : '无'
+              } />
+            </PreviewSection>
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+}
+
+function PreviewSection({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="mb-3">
+      <h5 className="text-xs font-medium text-gray-500 mb-1 uppercase tracking-wide">{title}</h5>
+      <div className="space-y-1">{children}</div>
+    </div>
+  );
+}
+
+function PreviewItem({ label, value }: { label: string; value: React.ReactNode }) {
+  const display = value === undefined || value === null || value === '' ? '-' : value;
+  return (
+    <div className="flex gap-2">
+      <span className="text-gray-400 w-20 flex-shrink-0 text-right">{label}</span>
+      <span className="text-gray-700">{display}</span>
     </div>
   );
 }

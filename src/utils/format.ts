@@ -1,3 +1,5 @@
+import { CHANNEL_TYPE_MAP } from '../data/dict';
+
 /** 格式化日期 */
 export function formatDate(dateStr: string | Date | { $date: string } | null, withTime = true): string {
   if (!dateStr) return '-';
@@ -56,15 +58,6 @@ export function getTotalQuantity(record: { phoneModels?: { quantity?: number }[]
   }
   return 0;
 }
-
-/** 渠道类型映射 */
-const CHANNEL_TYPE_MAP: Record<string, string> = {
-  return: '归还',
-  afterSale: '售后',
-  recycle: '回收',
-  purchase: '采购',
-  normal: '正常',
-};
 
 /** 获取渠道类型文本 */
 export function getChannelTypeText(channelType: string | undefined): string {

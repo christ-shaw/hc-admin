@@ -1,23 +1,35 @@
 import { useEffect, useState, useRef } from 'react';
 import { Table, Button, Input, Select, Tag, Dialog, MessagePlugin } from 'tdesign-react';
 import { Search, RotateCcw, Plus, Eye, Download, Upload, X, ChevronRight, ChevronLeft, Check } from 'lucide-react';
-import { InvoiceRecord, InvoiceFilters, INVOICE_STATUS_MAP, CompanyTemplate, InvoiceFile } from '../types';
+import { InvoiceRecord, InvoiceFilters, INVOICE_STATUS_MAP, CompanyTemplate, InvoiceFile, dictToOptions, getDictLabel } from '../types';
 import { useInvoices } from '../hooks/useInvoices';
 import { callFunction, getCurrentOperatorName, uploadToCloudStorage, getCloudFileURLs } from '../lib/cloudbase';
 import { formatDate } from '../utils/format';
-import { SHOP_NAMES, INVOICE_CATEGORIES } from '../data/productDict';
+import { SHOP_NAMES, INVOICE_CATEGORIES } from '../data/dict';
 
 const STATUS_TAG_THEME: Record<string, 'success' | 'warning' | 'danger' | 'default'> = {
+  paid: 'success',
+  unpaid: 'warning',
   '已开票': 'success',
   '未开票': 'warning',
 };
+
+function isInvoicePaid(status: string | undefined): boolean {
+  return status === 'paid' || status === '已开票';
+}
+
+function normalizeInvoiceStatus(status: string | undefined): InvoiceRecord['status'] {
+  if (status === '已开票') return 'paid';
+  if (status === '未开票') return 'unpaid';
+  return (status || 'unpaid') as InvoiceRecord['status'];
+}
 
 const EMPTY_INVOICE: Omit<InvoiceRecord, '_id' | 'createTime'> = {
   applyDate: '',
   companyName: '',
   applicant: '',
   shopName: '',
-  status: '未开票',
+  status: 'unpaid',
   taxId: '',
   registeredAddress: '',
   contactPhone: '',
@@ -65,6 +77,11 @@ export function Invoices() {
   // 新增发票 - 附件上传相关状态
   const [addAttachFiles, setAddAttachFiles] = useState<File[]>([]);
   const addAttachInputRef = useRef<HTMLInputElement>(null);
+
+  // 编辑发票 - 附件上传相关状态
+  const [editAttachFiles, setEditAttachFiles] = useState<File[]>([]);
+  const [editExistingAttachments, setEditExistingAttachments] = useState<InvoiceFile[]>([]);
+  const editAttachInputRef = useRef<HTMLInputElement>(null);
 
   // 预览相关状态
   const [previewVisible, setPreviewVisible] = useState(false);
@@ -300,12 +317,14 @@ export function Invoices() {
   /** 编辑 */
   const handleEditOpen = (record: InvoiceRecord) => {
     setEditId(record._id);
+    setEditExistingAttachments(record.attachments || []);
+    setEditAttachFiles([]);
     setEditForm({
       applyDate: record.applyDate,
       companyName: record.companyName,
       applicant: record.applicant,
       shopName: record.shopName,
-      status: record.status,
+      status: normalizeInvoiceStatus(record.status),
       taxId: record.taxId,
       registeredAddress: record.registeredAddress,
       contactPhone: record.contactPhone,
@@ -331,7 +350,17 @@ export function Invoices() {
     }
     setSaving(true);
     try {
-      const success = await invoices.updateInvoice(editId, editForm);
+      // 上传新增附件
+      const newAttachments: InvoiceFile[] = [];
+      for (const file of editAttachFiles) {
+        const timestamp = Date.now();
+        const ext = file.name.split('.').pop() || 'bin';
+        const cloudPath = `invoices/attachments/${timestamp}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
+        const fileID = await uploadToCloudStorage(cloudPath, file);
+        newAttachments.push({ fileID, fileName: file.name });
+      }
+      const allAttachments = [...editExistingAttachments, ...newAttachments];
+      const success = await invoices.updateInvoice(editId, { ...editForm, attachments: allAttachments });
       if (success) {
         MessagePlugin.success('修改发票成功');
         setEditVisible(false);
@@ -413,7 +442,7 @@ export function Invoices() {
       const now = new Date();
       const completedTime = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
       const success = await invoices.updateInvoice(uploadTarget._id, {
-        status: '已开票',
+        status: 'paid',
         invoiceFiles,
         completedTime,
       });
@@ -478,7 +507,7 @@ export function Invoices() {
       colKey: 'status', title: '开票状态', width: 90,
       cell: ({ row }: { row: InvoiceRecord }) => {
         const theme = STATUS_TAG_THEME[row.status] || 'default';
-        return <Tag theme={theme} variant="light">{row.status}</Tag>;
+        return <Tag theme={theme} variant="light">{getDictLabel(INVOICE_STATUS_MAP, row.status)}</Tag>;
       },
     },
     {
@@ -497,7 +526,7 @@ export function Invoices() {
             onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleDeleteConfirm(row); }}>
             删除
           </Button>
-          {row.status === '已开票' ? (
+          {isInvoicePaid(row.status) ? (
             <Button variant="text" theme="primary" size="small"
               onClick={(e: React.MouseEvent) => { e.stopPropagation(); handlePreview(row); }}>
               <Download size={14} className="mr-0.5" />下载
@@ -544,7 +573,7 @@ export function Invoices() {
             <label className="block text-xs text-gray-500 mb-1">开票状态</label>
             <Select placeholder="全部" value={filters.status || undefined}
               onChange={(val) => setFilters(prev => ({ ...prev, status: val as string }))}
-              options={[{ label: '全部', value: '' }, ...Object.keys(INVOICE_STATUS_MAP).map(v => ({ label: v, value: v }))]}
+              options={[{ label: '全部', value: '' }, ...dictToOptions(INVOICE_STATUS_MAP)]}
               popupProps={{ attach: 'body' }} />
           </div>
           <div className="flex items-end gap-2">
@@ -591,7 +620,7 @@ export function Invoices() {
             <DetailRow label="开票申请人" value={currentRecord.applicant} />
             <DetailRow label="开票状态" value={
               <Tag theme={STATUS_TAG_THEME[currentRecord.status] || 'default'} variant="light">
-                {currentRecord.status}
+                {getDictLabel(INVOICE_STATUS_MAP, currentRecord.status)}
               </Tag>
             } />
             <DetailRow label="纳税人识别号" value={currentRecord.taxId} />
@@ -615,7 +644,7 @@ export function Invoices() {
                 <InvoiceAttachmentPreview files={currentRecord.attachments} />
               </div>
             )}
-            {currentRecord.status === '已开票' && (
+            {isInvoicePaid(currentRecord.status) && (
               <>
                 <div className="border-t border-gray-100 pt-3 mt-3">
                   <h4 className="font-medium text-gray-700 mb-2">开票完成信息</h4>
@@ -667,7 +696,7 @@ export function Invoices() {
             ].map((item, idx) => (
               <div key={item.step} className="flex items-center">
                 <div className="flex flex-col items-center">
-                  <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium transition-colors ${
+                  <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${
                     addStep > item.step
                       ? 'bg-blue-500 text-white'
                       : addStep === item.step
@@ -713,7 +742,7 @@ export function Invoices() {
                     <Input placeholder="输入单位名称搜索" value={addForm.companyName}
                       onChange={val => handleCompanyNameChange(val as string)} />
                     {showSuggestions && companySuggestions && companySuggestions.length > 0 && (
-                      <div ref={suggestionsRef} className="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-auto">
+                      <div ref={suggestionsRef} className="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-sm max-h-48 overflow-auto">
                         {companySuggestions.map(company => (
                           <button key={company._id} type="button"
                             className="w-full px-3 py-2 text-left text-sm hover:bg-blue-50 border-b border-gray-100 last:border-0 cursor-pointer"
@@ -918,16 +947,25 @@ export function Invoices() {
       <Dialog
         header="编辑发票"
         visible={editVisible}
-        onClose={() => setEditVisible(false)}
+        onClose={() => { setEditVisible(false); setEditAttachFiles([]); setEditExistingAttachments([]); }}
         width="680px"
         footer={
           <div className="flex justify-end gap-2">
-            <Button onClick={() => setEditVisible(false)}>取消</Button>
+            <Button onClick={() => { setEditVisible(false); setEditAttachFiles([]); setEditExistingAttachments([]); }}>取消</Button>
             <Button theme="primary" loading={saving} onClick={handleEditSave}>保存</Button>
           </div>
         }
       >
-        <InvoiceFormFields form={editForm} onChange={setEditForm} isEdit />
+        <InvoiceFormFields
+          form={editForm}
+          onChange={setEditForm}
+          isEdit
+          editExistingAttachments={editExistingAttachments}
+          onRemoveExistingAttachment={(index) => setEditExistingAttachments(prev => prev.filter((_, i) => i !== index))}
+          editAttachFiles={editAttachFiles}
+          onEditAttachFilesChange={setEditAttachFiles}
+          editAttachInputRef={editAttachInputRef}
+        />
       </Dialog>
 
       {/* 删除确认弹窗 */}
@@ -1007,7 +1045,7 @@ export function Invoices() {
                   />
                   <button
                     type="button"
-                    className="absolute top-1 right-1 w-6 h-6 bg-black/50 rounded-full flex items-center justify-center text-white opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
+                    className="absolute top-1 right-1 w-6 h-6 bg-black/50 rounded-full flex items-center justify-center text-white opacity-0 group-hover:opacity-100 cursor-pointer"
                     onClick={() => handleRemoveFile(index)}
                   >
                     <X size={14} />
@@ -1074,7 +1112,7 @@ export function Invoices() {
 }
 
 /** 发票表单字段（新增/编辑共用） */
-function InvoiceFormFields({ form, onChange, isEdit = false, onCompanyNameChange, companySuggestions, showSuggestions, onSelectCompany, suggestionsRef }: {
+function InvoiceFormFields({ form, onChange, isEdit = false, onCompanyNameChange, companySuggestions, showSuggestions, onSelectCompany, suggestionsRef, editExistingAttachments, onRemoveExistingAttachment, editAttachFiles, onEditAttachFilesChange, editAttachInputRef }: {
   form: Omit<InvoiceRecord, '_id' | 'createTime'>;
   onChange: React.Dispatch<React.SetStateAction<Omit<InvoiceRecord, '_id' | 'createTime'>>>;
   isEdit?: boolean;
@@ -1083,6 +1121,11 @@ function InvoiceFormFields({ form, onChange, isEdit = false, onCompanyNameChange
   showSuggestions?: boolean;
   onSelectCompany?: (company: CompanyTemplate) => void;
   suggestionsRef?: React.RefObject<HTMLDivElement>;
+  editExistingAttachments?: InvoiceFile[];
+  onRemoveExistingAttachment?: (index: number) => void;
+  editAttachFiles?: File[];
+  onEditAttachFilesChange?: React.Dispatch<React.SetStateAction<File[]>>;
+  editAttachInputRef?: React.RefObject<HTMLInputElement>;
 }) {
   return (
     <div className="space-y-4 max-h-[70vh] overflow-auto px-1">
@@ -1101,7 +1144,7 @@ function InvoiceFormFields({ form, onChange, isEdit = false, onCompanyNameChange
                 }
               }} />
             {showSuggestions && companySuggestions && companySuggestions.length > 0 && (
-              <div ref={suggestionsRef} className="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-auto">
+              <div ref={suggestionsRef} className="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-sm max-h-48 overflow-auto">
                 {companySuggestions.map(company => (
                   <button key={company._id} type="button"
                     className="w-full px-3 py-2 text-left text-sm hover:bg-blue-50 border-b border-gray-100 last:border-0 cursor-pointer"
@@ -1237,10 +1280,10 @@ function InvoiceFormFields({ form, onChange, isEdit = false, onCompanyNameChange
               <label className="block text-xs text-gray-500 mb-1">状态</label>
               <Select placeholder="请选择" value={form.status || undefined}
                 onChange={val => onChange(prev => ({ ...prev, status: val as InvoiceRecord['status'] }))}
-                options={Object.keys(INVOICE_STATUS_MAP).map(v => ({ label: v, value: v }))}
+                options={dictToOptions(INVOICE_STATUS_MAP)}
                 popupProps={{ attach: 'body' }} />
             </div>
-            {form.status === '已开票' && (
+            {form.status === 'paid' && (
               <div>
                 <label className="block text-xs text-gray-500 mb-1">开票完成时间</label>
                 <input type="datetime-local" className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500"
@@ -1248,10 +1291,65 @@ function InvoiceFormFields({ form, onChange, isEdit = false, onCompanyNameChange
               </div>
             )}
           </div>
-          {form.status === '已开票' && form.invoiceFiles && form.invoiceFiles.length > 0 && (
+          {form.status === 'paid' && form.invoiceFiles && form.invoiceFiles.length > 0 && (
             <div className="mt-3">
               <label className="block text-xs text-gray-500 mb-1">已上传电子发票（{form.invoiceFiles.length}张）</label>
               <InvoiceImagePreview files={form.invoiceFiles} />
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 编辑时支持修改附件 */}
+      {isEdit && editExistingAttachments !== undefined && (
+        <div>
+          <h4 className="text-sm font-medium text-gray-600 mb-3">开票附件</h4>
+          {/* 已有附件 */}
+          {editExistingAttachments.length > 0 && (
+            <div className="mb-3 space-y-2">
+              <label className="block text-xs text-gray-500 mb-1">已有附件（点击可删除）</label>
+              {editExistingAttachments.map((att, index) => (
+                <div key={index} className="flex items-center justify-between px-3 py-2 bg-blue-50 rounded-lg">
+                  <div className="flex items-center gap-2 flex-1 min-w-0">
+                    <Upload size={14} className="text-blue-400 flex-shrink-0" />
+                    <span className="text-sm text-gray-700 truncate">{att.fileName}</span>
+                  </div>
+                  <button type="button" className="w-6 h-6 flex items-center justify-center text-gray-400 hover:text-red-500 cursor-pointer flex-shrink-0"
+                    onClick={() => onRemoveExistingAttachment?.(index)}>
+                    <X size={14} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {/* 新增附件 */}
+          <div>
+            <input ref={editAttachInputRef} type="file" multiple className="hidden"
+              onChange={(e) => {
+                const files = e.target.files;
+                if (files) onEditAttachFilesChange?.(prev => [...prev, ...Array.from(files)]);
+                if (editAttachInputRef?.current) editAttachInputRef.current.value = '';
+              }} />
+            <Button variant="outline" icon={<Upload size={16} />} onClick={() => editAttachInputRef?.current?.click()}>
+              添加附件
+            </Button>
+            <span className="text-xs text-gray-400 ml-2">支持图片、PDF、Word、Excel等文件</span>
+          </div>
+          {(editAttachFiles && editAttachFiles.length > 0) && (
+            <div className="mt-3 space-y-2">
+              {editAttachFiles.map((file, index) => (
+                <div key={index} className="flex items-center justify-between px-3 py-2 bg-gray-50 rounded-lg">
+                  <div className="flex items-center gap-2 flex-1 min-w-0">
+                    <Upload size={14} className="text-gray-400 flex-shrink-0" />
+                    <span className="text-sm text-gray-700 truncate">{file.name}</span>
+                    <span className="text-xs text-gray-400 flex-shrink-0">({(file.size / 1024).toFixed(1)}KB)</span>
+                  </div>
+                  <button type="button" className="w-6 h-6 flex items-center justify-center text-gray-400 hover:text-red-500 cursor-pointer flex-shrink-0"
+                    onClick={() => onEditAttachFilesChange?.(prev => prev.filter((_, i) => i !== index))}>
+                    <X size={14} />
+                  </button>
+                </div>
+              ))}
             </div>
           )}
         </div>
@@ -1307,10 +1405,10 @@ function InvoiceImagePreview({ files }: { files: InvoiceFile[] }) {
               src={item.tempFileURL}
               alt={item.fileName}
               fileName={item.fileName}
-              className="w-20 h-20 object-cover border rounded hover:border-blue-400 transition-colors"
+              className="w-20 h-20 object-cover border rounded hover:border-blue-400"
             />
-            <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 rounded transition-colors flex items-center justify-center">
-              <Eye size={16} className="text-white opacity-0 group-hover:opacity-100 transition-opacity" />
+            <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 rounded flex items-center justify-center">
+              <Eye size={16} className="text-white opacity-0 group-hover:opacity-100" />
             </div>
           </div>
         ))}
@@ -1415,10 +1513,10 @@ function ImageLightbox({ src, alt, onClose }: { src: string; alt: string; onClos
   return (
     <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70" onClick={onClose}>
       <div className="relative max-w-[90vw] max-h-[90vh]" onClick={e => e.stopPropagation()}>
-        <ImageWithBmpSupport src={src} alt={alt} fileName={alt} className="max-w-full max-h-[85vh] object-contain rounded shadow-2xl" />
+        <ImageWithBmpSupport src={src} alt={alt} fileName={alt} className="max-w-full max-h-[85vh] object-contain rounded shadow" />
         <button
           type="button"
-          className="absolute -top-3 -right-3 w-8 h-8 bg-white rounded-full flex items-center justify-center shadow-lg text-gray-600 hover:text-gray-900 cursor-pointer"
+          className="absolute -top-3 -right-3 w-8 h-8 bg-white rounded-full flex items-center justify-center shadow-sm text-gray-600 hover:text-gray-900 cursor-pointer"
           onClick={onClose}
         >
           <X size={18} />
@@ -1500,19 +1598,19 @@ function InvoiceAttachmentPreview({ files }: { files: InvoiceFile[] }) {
             return (
               <div
                 key={i}
-                className="relative group border border-gray-200 rounded-lg overflow-hidden cursor-pointer hover:border-blue-400 transition-colors"
+                className="relative group border border-gray-200 rounded-lg overflow-hidden cursor-pointer hover:border-blue-400"
                 onClick={() => { setLightboxSrc(item.tempFileURL); setLightboxAlt(item.fileName); }}
               >
                 <ImageWithBmpSupport src={item.tempFileURL} alt={item.fileName} fileName={item.fileName} className="w-full h-24 object-cover" />
-                <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors flex items-center justify-center">
-                  <Eye size={20} className="text-white opacity-0 group-hover:opacity-100 transition-opacity" />
+                <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 flex items-center justify-center">
+                  <Eye size={20} className="text-white opacity-0 group-hover:opacity-100" />
                 </div>
                 <div className="px-2 py-1 text-xs text-gray-500 truncate bg-gray-50">{item.fileName}</div>
               </div>
             );
           }
           return (
-            <div key={i} className="flex flex-col items-center justify-center border border-gray-200 rounded-lg p-3 hover:border-blue-400 hover:bg-blue-50/30 transition-colors cursor-pointer"
+            <div key={i} className="flex flex-col items-center justify-center border border-gray-200 rounded-lg p-3 hover:border-blue-400 hover:bg-blue-50/30 cursor-pointer"
               onClick={() => handleDownload(item.tempFileURL, item.fileName)}>
               <Download size={24} className="text-gray-400 mb-1" />
               <span className="text-xs text-gray-600 truncate w-full text-center">{item.fileName}</span>

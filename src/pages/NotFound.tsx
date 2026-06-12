@@ -5,7 +5,7 @@ export function NotFound() {
   const navigate = useNavigate();
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-50">
+    <div className="min-h-screen flex items-center justify-center bg-blue-50">
       <div className="text-center px-6">
         {/* 装饰性图标 */}
         <div className="mb-8 flex justify-center">

@@ -120,7 +120,7 @@ export function PhoneModels() {
                 <div key={brand.brand} className="border border-gray-200 rounded-lg overflow-hidden">
                   <button
                     onClick={() => toggleBrand(brand.brand)}
-                    className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 transition-colors"
+                    className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100"
                   >
                     <div className="flex items-center gap-2">
                       {expandedBrand === brand.brand ? <ChevronDown size={16} /> : <ChevronRight size={16} />}

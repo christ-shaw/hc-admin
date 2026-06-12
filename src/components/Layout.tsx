@@ -95,13 +95,13 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
     <TLayout className="h-screen">
       {/* 侧边栏 */}
       <Aside
-        className="!bg-gradient-to-b from-sidebar to-[#0f1923] !border-r-0 transition-all duration-300"
+        className="!bg-sidebar !border-r-0"
         width={collapsed ? '64px' : '220px'}
       >
         <div className="flex flex-col h-full">
           {/* Logo */}
           <div className="flex items-center gap-3 px-4 h-16 border-b border-white/10">
-            <div className="w-8 h-8 bg-gradient-to-br from-primary to-primary-light rounded-lg flex items-center justify-center flex-shrink-0">
+            <div className="w-8 h-8 bg-primary rounded-lg flex items-center justify-center flex-shrink-0">
               <Package size={18} className="text-white" />
             </div>
             {!collapsed && (
@@ -122,9 +122,9 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
                   <div key={item.label}>
                     <button
                       onClick={() => toggleMenu(item.label)}
-                      className={`w-full relative flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 cursor-pointer ${
+                      className={`w-full relative flex items-center gap-3 px-4 py-3 rounded-xl cursor-pointer ${
                         groupActive
-                          ? 'text-white bg-white/15 shadow-[0_0_20px_rgba(0,82,217,0.3)]'
+                          ? 'text-white bg-white/15'
                           : 'text-white/60 hover:text-white hover:bg-white/10'
                       }`}
                     >
@@ -147,7 +147,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
                             <button
                               key={child.path}
                               onClick={() => navigate(child.path)}
-                              className={`w-full relative flex items-center gap-3 px-4 py-2.5 rounded-lg transition-all duration-200 cursor-pointer ${
+                              className={`w-full relative flex items-center gap-3 px-4 py-2.5 rounded-lg cursor-pointer ${
                                 isActive
                                   ? 'text-white bg-white/15'
                                   : 'text-white/50 hover:text-white hover:bg-white/10'
@@ -176,9 +176,9 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
                 <button
                   key={path}
                   onClick={() => navigate(path)}
-                  className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 cursor-pointer ${
+                  className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl cursor-pointer ${
                     isActive
-                      ? 'text-white bg-white/15 shadow-[0_0_20px_rgba(0,82,217,0.3)]'
+                      ? 'text-white bg-white/15'
                       : 'text-white/60 hover:text-white hover:bg-white/10'
                   }`}
                 >
@@ -193,10 +193,10 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
 
       <TLayout>
         {/* 顶栏 */}
-        <Header className="!bg-white/80 !backdrop-blur-xl border-b border-gray-100 !h-14 flex items-center justify-between px-6">
+        <Header className="!bg-white/95 border-b border-gray-100 !h-14 flex items-center justify-between px-6">
           <button
             onClick={() => setCollapsed(!collapsed)}
-            className="text-gray-500 hover:text-primary transition-colors"
+            className="text-gray-500 hover:text-primary"
           >
             {collapsed ? <PanelLeftOpen size={20} /> : <PanelLeftClose size={20} />}
           </button>
@@ -212,7 +212,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
             </div>
             <button
               onClick={handleLogout}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-500 hover:text-danger hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-500 hover:text-danger hover:bg-red-50 rounded-lg cursor-pointer"
             >
               <LogOut size={16} />
               <span>退出</span>

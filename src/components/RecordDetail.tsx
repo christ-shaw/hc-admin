@@ -96,10 +96,10 @@ export function RecordDetail({ visible, record, type, onClose, onEdit, onDelete 
               修改历史
             </button>
             <div className="flex-1" />
-            <button onClick={onEdit} className="px-4 py-2 bg-primary text-white rounded-lg hover:bg-primary-hover transition-colors cursor-pointer">
+            <button onClick={onEdit} className="px-4 py-2 bg-primary text-white rounded-lg hover:bg-primary-hover cursor-pointer">
               编辑
             </button>
-            <button onClick={onDelete} className="px-4 py-2 bg-danger text-white rounded-lg hover:bg-red-400 transition-colors cursor-pointer">
+            <button onClick={onDelete} className="px-4 py-2 bg-danger text-white rounded-lg hover:bg-red-400 cursor-pointer">
               删除
             </button>
           </div>
@@ -225,7 +225,7 @@ export function RecordDetail({ visible, record, type, onClose, onEdit, onDelete 
           onClick={() => setPreviewVisible(false)}
         >
           <button
-            className="absolute top-4 right-4 w-10 h-10 rounded-full bg-white/20 hover:bg-white/40 flex items-center justify-center text-white text-xl transition-colors cursor-pointer z-10"
+            className="absolute top-4 right-4 w-10 h-10 rounded-full bg-white/20 hover:bg-white/40 flex items-center justify-center text-white text-xl cursor-pointer z-10"
             onClick={() => setPreviewVisible(false)}
           >
             ✕
@@ -233,7 +233,7 @@ export function RecordDetail({ visible, record, type, onClose, onEdit, onDelete 
           <img
             src={previewSrc}
             alt="照片预览"
-            className="max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl"
+            className="max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow"
             onClick={(e) => e.stopPropagation()}
           />
         </div>
@@ -265,7 +265,7 @@ function PhotoItem({ photo, imageUrls, onPreview }: { photo: string; imageUrls: 
             (e.target as HTMLImageElement).style.display = 'none';
             (e.target as HTMLImageElement).nextElementSibling?.classList.remove('hidden');
           }}
-          className="w-full h-20 object-cover rounded-lg border border-gray-200 hover:opacity-80 hover:shadow-md transition-all cursor-zoom-in"
+          className="w-full h-20 object-cover rounded-lg border border-gray-200 hover:opacity-80 cursor-zoom-in"
         />
       ) : null}
       <div className={`w-full h-20 rounded-lg border border-gray-200 bg-gray-100 flex items-center justify-center text-gray-400 text-xs ${isLoaded ? 'hidden' : ''}`}>

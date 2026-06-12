@@ -1,5 +1,6 @@
 import { useCallback } from 'react';
 import { callFunction } from '../lib/cloudbase';
+import { CHANNEL_TYPE_MAP, RECORD_TYPE_MAP, LOG_ACTION_MAP } from '../data/dict';
 
 export function useStorage() {
   const getRealImageUrl = useCallback(async (fileID: string): Promise<string> => {
@@ -22,17 +23,14 @@ export function useStorage() {
     operationLogId?: string | null
   ) => {
     try {
-      const typeName = recordType === 'inbound' ? '入库' : '出库';
-      const actionName = action === 'add' ? '新增' : action === 'update' ? '修改' : '删除';
+      const typeName = RECORD_TYPE_MAP[recordType as keyof typeof RECORD_TYPE_MAP] || recordType;
+      const actionName = LOG_ACTION_MAP[action as keyof typeof LOG_ACTION_MAP] || action;
 
       let detailContent = '';
       if (action === 'delete') {
         detailContent = `客户: ${(record.customerName as string) || '未知'}`;
       } else {
         const date = (record.inboundDate || record.outboundDate || '') as string;
-        const CHANNEL_TYPE_MAP: Record<string, string> = {
-          return: '归还', afterSale: '售后', recycle: '回收', purchase: '采购', normal: '正常',
-        };
         const channelType = CHANNEL_TYPE_MAP[record.type as string] || (record.type as string) || '';
         const shopName = (record.shopName as string) || '';
 

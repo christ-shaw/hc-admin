@@ -1,5 +1,6 @@
 import * as XLSX from 'xlsx';
 import { OrderRecord } from '../types';
+import { getDictLabel, ORDER_SOURCE_MAP, ORDER_ATTRIBUTE_MAP, ORDER_TYPE_MAP, SALES_CHANNEL_MAP, CHANNEL_CATEGORY_MAP, ORDER_STATUS_MAP } from '../data/dict';
 
 /** Excel 列名 → OrderRecord 字段映射 */
 const EXCEL_COLUMN_MAP: Record<string, keyof OrderRecord> = {
@@ -142,10 +143,22 @@ export function parseOrderExcel(file: File): Promise<OrderRecord[]> {
 /** 将订单数据导出为 Excel 文件并触发下载 */
 export function exportOrderExcel(records: OrderRecord[], filename?: string): void {
   const headerRow = EXPORT_COLUMNS.map(c => c.header);
+  /** 需要做 key→中文 label 转换的字段 */
+  const DICT_FIELDS: Partial<Record<keyof OrderRecord, Record<string, string>>> = {
+    orderSource: ORDER_SOURCE_MAP,
+    orderAttribute: ORDER_ATTRIBUTE_MAP,
+    orderType: ORDER_TYPE_MAP,
+    salesChannel: SALES_CHANNEL_MAP,
+    channelCategory: CHANNEL_CATEGORY_MAP,
+    status: ORDER_STATUS_MAP,
+  };
+
   const dataRows = records.map(r =>
     EXPORT_COLUMNS.map(c => {
       const val = r[c.key];
       if (c.key === 'date') return val || '';
+      const dict = DICT_FIELDS[c.key];
+      if (dict && typeof val === 'string' && val) return getDictLabel(dict, val);
       return val ?? '';
     })
   );

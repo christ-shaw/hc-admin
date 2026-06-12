@@ -85,18 +85,18 @@ export function Dashboard() {
         <h2 className="text-lg font-semibold text-gray-800 mb-4">快捷操作</h2>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           {[
-            { label: '入库记录', path: '/inbound', icon: <ArrowDownCircle size={20} />, color: 'from-success to-emerald-400' },
-            { label: '出库记录', path: '/outbound', icon: <ArrowUpCircle size={20} />, color: 'from-danger to-red-400' },
-            { label: '统计分析', path: '/stats', icon: <Package size={20} />, color: 'from-primary to-primary-light' },
-            { label: '库存管理', path: '/inventory', icon: <Warehouse size={20} />, color: 'from-purple-500 to-violet-400' },
-            { label: '型号管理', path: '/models', icon: <Smartphone size={20} />, color: 'from-warning to-orange-400' },
+            { label: '入库记录', path: '/inbound', icon: <ArrowDownCircle size={20} />, color: 'bg-success' },
+            { label: '出库记录', path: '/outbound', icon: <ArrowUpCircle size={20} />, color: 'bg-danger' },
+            { label: '统计分析', path: '/stats', icon: <Package size={20} />, color: 'bg-primary' },
+            { label: '库存管理', path: '/inventory', icon: <Warehouse size={20} />, color: 'bg-purple-500' },
+            { label: '型号管理', path: '/models', icon: <Smartphone size={20} />, color: 'bg-warning' },
           ].map(item => (
             <button
               key={item.path}
               onClick={() => navigate(item.path)}
-              className="flex flex-col items-center gap-2 p-4 rounded-xl hover:bg-gray-50 transition-all duration-200 hover:shadow-md group cursor-pointer"
+              className="flex flex-col items-center gap-2 p-4 rounded-xl hover:bg-gray-50 cursor-pointer"
             >
-              <div className={`w-10 h-10 bg-gradient-to-br ${item.color} rounded-xl flex items-center justify-center text-white shadow-lg group-hover:scale-110 transition-transform`}>
+              <div className={`w-10 h-10 ${item.color} rounded-xl flex items-center justify-center text-white`}>
                 {item.icon}
               </div>
               <span className="text-sm text-gray-600">{item.label}</span>

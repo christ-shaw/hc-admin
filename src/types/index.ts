@@ -1,3 +1,33 @@
+import type { InvoiceStatus } from '../data/dict';
+
+// 字典常量统一从 data/dict.ts 重新导出（保持现有消费者 import 路径不变）
+export {
+  CHANNEL_TYPE_MAP,
+  ORDER_STATUS_MAP,
+  ORDER_SOURCE_MAP,
+  ORDER_ATTRIBUTE_MAP,
+  ORDER_TYPE_MAP,
+  SALES_CHANNEL_MAP,
+  CHANNEL_CATEGORY_MAP,
+  INVOICE_STATUS_MAP,
+  SHIPPING_FEE_MAP,
+  RECORD_TYPE_MAP,
+  LOG_ACTION_MAP,
+  getDictLabel,
+  dictToOptions,
+} from '../data/dict';
+
+export type {
+  OrderStatus,
+  OrderSource,
+  OrderAttribute,
+  OrderType,
+  SalesChannel,
+  ChannelCategory,
+  InvoiceStatus,
+  ShippingFee,
+} from '../data/dict';
+
 /** 手机型号项 */
 export interface PhoneModelItem {
   model: string;
@@ -99,15 +129,6 @@ export interface PhoneBrand {
   models: string[];
 }
 
-/** 渠道类型映射 */
-export const CHANNEL_TYPE_MAP: Record<string, string> = {
-  return: '归还',
-  afterSale: '售后',
-  recycle: '回收',
-  purchase: '采购',
-  normal: '正常',
-};
-
 /** 订单记录 —— 对齐 Excel「订单明细」工作表 25 列 */
 export interface OrderRecord {
   _id: string;
@@ -132,13 +153,28 @@ export interface OrderRecord {
   consignee: string;                // 收货人名称
   consigneePhone: string;           // 收货人电话
   consigneeAddress: string;         // 收货人地址
-  status: string;                   // 订单状态: 已发货/--/未发货
+  shippingFee: string;              // 邮寄费用: prepaid | cod | pickup
+  status: string;                   // 订单状态
   customerRemark: string;           // 客服备注
+  transferBrand: string;            // 转租赁2品牌
   transferProductName: string;      // 转租赁2货品名称
   transferSpecification: string;    // 转租赁2规格
   paidPeriod: number;               // 已交租期
   paidRent: number;                 // 已交租金
+  transferItems?: string;            // 转租赁2多组货品JSON（兼容多组）
+  attachments: OrderAttachment[];   // 订单附件
+  returnStatus?: string;            // 归还状态（租后发货/租后退货时使用）
+  returnTrackingNumbers?: string;   // 归还物流单号（多个逗号分隔，归还状态=运输途中时必填）
   createTime?: { $date: string };
+}
+
+/** 转租赁2货品条目（支持多组） */
+export interface TransferProductItem {
+  brand: string;
+  productName: string;
+  specification: string;
+  paidPeriod: number;
+  paidRent: number;
 }
 
 /** 货品条目（新增订单时支持多条） */
@@ -151,62 +187,6 @@ export interface ProductItem {
   amount: number;
   paymentAccount: string;
 }
-
-/** 订单状态映射 */
-export const ORDER_STATUS_MAP: Record<string, string> = {
-  '已发货': '已发货',
-  '不用发货': '不用发货',
-  '退货已收': '退货已收',
-  '退发已发': '退发已发',
-  '--': '--',
-};
-
-/** 订单来源映射 */
-export const ORDER_SOURCE_MAP: Record<string, string> = {
-  '新增': '新增',
-  '服务': '服务',
-};
-
-/** 订单属性映射 */
-export const ORDER_ATTRIBUTE_MAP: Record<string, string> = {
-  '租赁1': '租赁1',
-  '租赁2': '租赁2',
-};
-
-/** 订单类型映射 */
-export const ORDER_TYPE_MAP: Record<string, string> = {
-  '新增业务': '新增业务',
-  '租后发货': '租后发货',
-  '租后退货': '租后退货',
-  '仅退款': '仅退款',
-  '退租金': '退租金',
-};
-
-/** 销售渠道映射 */
-export const SALES_CHANNEL_MAP: Record<string, string> = {
-  'A人人租': 'A人人租',
-  'F人人租': 'F人人租',
-  '云途': '云途',
-  '汇租机': '汇租机',
-  '租机乐': '租机乐',
-  '倬石电子': '倬石电子',
-  '云界互联': '云界互联',
-  '极客矩阵': '极客矩阵',
-  '极速闪租': '极速闪租',
-  'L人人租': 'L人人租',
-  'J人人租': 'J人人租',
-  'G人人租': 'G人人租',
-  'X/ZZ': 'X/ZZ',
-  'X/LL': 'X/LL',
-  'X/XX': 'X/XX',
-  'X/YY': 'X/YY',
-};
-
-/** 渠道类别映射 */
-export const CHANNEL_CATEGORY_MAP: Record<string, string> = {
-  '平台': '平台',
-  '线下': '线下',
-};
 
 /** 订单筛选条件 */
 export interface OrderFilters {
@@ -260,6 +240,12 @@ export interface HistoryItem {
   changes: HistoryChange[];
 }
 
+/** 订单附件文件 */
+export interface OrderAttachment {
+  fileID: string;                 // 云存储文件ID
+  fileName: string;               // 原始文件名
+}
+
 /** 电子发票文件 */
 export interface InvoiceFile {
   fileID: string;                 // 云存储文件ID，如 cloud://env-id/invoices/xxx.png
@@ -273,7 +259,7 @@ export interface InvoiceRecord {
   companyName: string;            // 公司名称（单位名称）
   applicant: string;              // 开票申请人
   shopName: string;               // 店铺名字
-  status: '未开票' | '已开票';    // 开票状态
+  status: InvoiceStatus;          // 开票状态
   taxId: string;                  // 纳税人识别号
   registeredAddress: string;      // 注册地址
   contactPhone: string;           // 联系电话
@@ -290,12 +276,6 @@ export interface InvoiceRecord {
   completedTime?: string;         // 开票完成时间
   createTime?: { $date: string };
 }
-
-/** 发票状态映射 */
-export const INVOICE_STATUS_MAP: Record<string, string> = {
-  '未开票': '未开票',
-  '已开票': '已开票',
-};
 
 /** 发票筛选条件 */
 export interface InvoiceFilters {

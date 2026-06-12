@@ -111,10 +111,8 @@ export async function uploadToCloudStorage(cloudPath: string, file: File): Promi
 /** AI 智能解析收件人信息（姓名、电话、地址） */
 export async function parseConsigneeInfo(text: string): Promise<{ name: string; phone: string; address: string } | null> {
   try {
-    const ai = app.ai();
-    const model = ai.createModel('hunyuan-exp');
-    const result = await model.generateText({
-      model: 'hunyuan-2.0-instruct-20251111',
+    const res = await app.ai().createModel('hunyuan-v3').streamText({
+      model: 'hy3-preview',
       messages: [
         {
           role: 'system',
@@ -126,7 +124,14 @@ export async function parseConsigneeInfo(text: string): Promise<{ name: string; 
         },
       ],
     });
-    const jsonStr = result.text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+
+    let fullText = '';
+    for await (const data of res.dataStream) {
+      const content = data?.choices?.[0]?.delta?.content;
+      if (content) fullText += content;
+    }
+
+    const jsonStr = fullText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
     const parsed = JSON.parse(jsonStr);
     if (parsed && typeof parsed === 'object') {
       return {
@@ -136,8 +141,8 @@ export async function parseConsigneeInfo(text: string): Promise<{ name: string; 
       };
     }
     return null;
-  } catch (err: any) {
-    const msg = String(err?.message || err || '');
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err || '');
     if (msg.includes('not found') || msg.includes('not enabled') || msg.includes('未开通')) {
       throw new Error('AI 模型未启用，请在 CloudBase 控制台开启 AI 模型服务：https://tcb.cloud.tencent.com/dev?envId=cloud1-8gvbotkt966e5e19#/ai');
     }

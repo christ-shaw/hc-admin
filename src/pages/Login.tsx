@@ -30,10 +30,10 @@ export function Login() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-900 via-slate-800 to-gray-900 flex items-center justify-center p-4">
-      <form onSubmit={handleLogin} className="w-full max-w-[400px] bg-white rounded-2xl shadow-2xl p-8">
+    <div className="min-h-screen bg-gray-900 flex items-center justify-center p-4">
+      <form onSubmit={handleLogin} className="w-full max-w-[400px] bg-white rounded-2xl shadow p-8">
         <div className="text-center mb-8">
-          <div className="w-14 h-14 bg-gradient-to-br from-primary to-primary-light rounded-xl flex items-center justify-center mx-auto mb-4">
+          <div className="w-14 h-14 bg-primary rounded-xl flex items-center justify-center mx-auto mb-4">
             <Package size={28} className="text-white" />
           </div>
           <h1 className="text-2xl font-bold text-gray-800">租赁综合管理系统</h1>

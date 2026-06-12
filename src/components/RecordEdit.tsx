@@ -170,7 +170,7 @@ export function RecordEdit({ visible, record, type, onClose, onSave }: RecordEdi
                 />
                 <button
                   onClick={() => removeModelRow(index)}
-                  className="text-gray-400 hover:text-danger transition-colors p-1 cursor-pointer"
+                  className="text-gray-400 hover:text-danger p-1 cursor-pointer"
                 >
                   <Trash2 size={16} />
                 </button>

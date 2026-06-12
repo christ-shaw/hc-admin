@@ -1,6 +1,140 @@
-/** 产品数据字典 —— 由订单明细表6月份.xlsx「产品资料」工作表生成 */
-/** 品牌 → 货品名称 → 规格 三级级联 */
+/**
+ * 📖 统一数据字典
+ *
+ * 本文件是项目中所有数据字典常量和级联数据的唯一数据源（Single Source of Truth）。
+ * 所有 import 应优先指向本文件，而非 types/index.ts 或 productDict.ts 中的 re-export。
+ */
 
+/* ================================================================
+ * 1. 渠道类型映射（入库/出库）
+ * ================================================================ */
+export const CHANNEL_TYPE_MAP: Record<string, string> = {
+  return: '归还',
+  afterSale: '售后',
+  recycle: '回收',
+  purchase: '采购',
+  normal: '正常',
+};
+
+/* ================================================================
+ * 2. 订单字典（key=英文枚举，value=中文展示文本）
+ * ================================================================ */
+export const ORDER_STATUS_MAP = {
+  shipped: '已发货',
+  noShip: '不用发货',
+  returnReceived: '退货已收',
+  returnShipped: '退发已发',
+  unknown: '--',
+} as const;
+
+/** 从 ORDER_STATUS_MAP 导出的状态枚举值类型 */
+export type OrderStatus = keyof typeof ORDER_STATUS_MAP;
+
+export const ORDER_SOURCE_MAP = {
+  new: '新增',
+  service: '服务',
+} as const;
+
+export type OrderSource = keyof typeof ORDER_SOURCE_MAP;
+
+export const ORDER_ATTRIBUTE_MAP = {
+  rental1: '租赁1',
+  rental2: '租赁2',
+} as const;
+
+export type OrderAttribute = keyof typeof ORDER_ATTRIBUTE_MAP;
+
+export const ORDER_TYPE_MAP = {
+  newBusiness: '新增业务',
+  postRentalShip: '租后发货',
+  postRentalReturn: '租后退货',
+  postRentalPayment: '租后款项',
+  deposit: '押金',
+} as const;
+
+export type OrderType = keyof typeof ORDER_TYPE_MAP;
+
+export const SALES_CHANNEL_MAP = {
+  aRrz: 'A人人租',
+  fRrz: 'F人人租',
+  yuntu: '云途',
+  huizuji: '汇租机',
+  zujile: '租机乐',
+  zhuoshi: '倬石电子',
+  yunjie: '云界互联',
+  jikejuzhen: '极客矩阵',
+  jisushanzu: '极速闪租',
+  lRrz: 'L人人租',
+  jRrz: 'J人人租',
+  gRrz: 'G人人租',
+  xZz: 'X/ZZ',
+  xLl: 'X/LL',
+  xXx: 'X/XX',
+  xYy: 'X/YY',
+  xHh: 'X/HH'
+} as const;
+
+export type SalesChannel = keyof typeof SALES_CHANNEL_MAP;
+
+export const CHANNEL_CATEGORY_MAP = {
+  platform: '平台',
+  offline: '线下',
+} as const;
+
+export type ChannelCategory = keyof typeof CHANNEL_CATEGORY_MAP;
+
+/* ================================================================
+ * 3. 发票字典（key=英文枚举，value=中文展示文本）
+ * ================================================================ */
+export const INVOICE_STATUS_MAP = {
+  unpaid: '未开票',
+  paid: '已开票',
+} as const;
+
+export type InvoiceStatus = keyof typeof INVOICE_STATUS_MAP;
+
+export const INVOICE_CATEGORIES = ['租赁服务费', '二手手机'] as const;
+export type InvoiceCategory = typeof INVOICE_CATEGORIES[number];
+
+/* ================================================================
+ * 4. 人员 / 收款账户 / 店铺
+ * ================================================================ */
+export const SALESPERSONS = ['XX', 'YY', 'LL', 'ZZ', 'HH'];
+
+export const PAYMENT_ACCOUNTS = [
+  'XX微信',
+  'YY微信',
+  'XX支付宝',
+  'YY支付宝',
+  'MAJINGLONG微信',
+  '倬石公户',
+  '租机乐公户',
+  '云途公户',
+  '汇创公户',
+  'YY闲鱼',
+  'XX闲鱼',
+  'HH闲鱼',
+  '未收款',
+  '其他'
+];
+
+export const SHOP_NAMES = ['倬石电子', '云途', '租机乐', '汇创'];
+
+/* ================================================================
+ * 5. 邮寄费用类型
+ * ================================================================ */
+export const SHIPPING_FEE_MAP = {
+  prepaid: '包邮',
+  cod: '到付',
+  pickup: '自提',
+} as const;
+
+export type ShippingFee = keyof typeof SHIPPING_FEE_MAP;
+
+/* ================================================================
+ * 6. 产品三级级联数据（品牌 → 货品名称 → 规格）
+ *    由订单明细表6月份.xlsx「产品资料」工作表生成
+ * ================================================================ */
 export const PRODUCT_DICT: Record<string, Record<string, string[]>> = {
   '大疆': {
     '大疆pocket3全能版相机': ['默认'],
@@ -372,47 +506,61 @@ export const PRODUCT_DICT: Record<string, Record<string, string[]>> = {
     'VIVOIQOO': ['默认'],
     'VIVONEXS': ['默认'],
     'VIVO x30': ['默认'],
+    'VIVO Y20s': ['默认'],
   },
   '虚拟产品': {
+    '平台租金': ['默认'],
+    '续期租金': ['默认'],
     '补收差价': ['默认'],
-    '部分转租赁2': ['默认'],
     '全部转租赁2': ['默认'],
+    '部分转租赁2': ['默认'],
     '仅退款': ['默认'],
     '快递费': ['默认'],
-    '平台租金': ['默认'],
-    '退押金': ['默认'],
     '维修费': ['默认'],
-    '续期租金': ['默认'],
-    '押金默认': ['默认'],
-  }
+    '收押金': ['默认'],
+    '退押金': ['默认'],
+  },
 };
 
-/** 人员列表 */
-export const SALESPERSONS = ['XX', 'YY', 'LL', 'ZZ'];
-
-/** 收款账户列表 */
-export const PAYMENT_ACCOUNTS = [
-  'XX微信',
-  'YY微信',
-  'XX支付宝',
-  'YY支付宝',
-  'MAJINGLONG微信',
-  '倬石公户',
-  '租机乐公户',
-  '云途公户',
-  '汇创公户',
-
-];
-
-/** 店铺名字列表 */
-export const SHOP_NAMES = ['倬石电子', '云途', '租机乐', '汇创'];
-
-/** 开票类目列表 */
-export const INVOICE_CATEGORIES = ['租赁服务费', '二手手机'] as const;
-export type InvoiceCategory = typeof INVOICE_CATEGORIES[number];
-
-/** 所有品牌列表 */
+/* ================================================================
+ * 6. 品牌列表（从 PRODUCT_DICT 派生）
+ * ================================================================ */
 export const BRANDS = Object.keys(PRODUCT_DICT).sort((a, b) => a.localeCompare(b, 'zh-CN'));
+
+/* ================================================================
+ * 7. 通用日志/存储类型字典
+ * ================================================================ */
+export const RECORD_TYPE_MAP = {
+  inbound: '入库',
+  outbound: '出库',
+} as const;
+
+export const LOG_ACTION_MAP = {
+  create: '创建',
+  update: '更新',
+  delete: '删除',
+} as const;
+
+/* ================================================================
+ * 8. 辅助函数
+ * ================================================================ */
+
+/**
+ * 从字典 MAP 获取中文展示文本。优先按 key 查找，若 key 不存在则直接返回原值（兼容数据库中的旧中文数据）。
+ * @example getDictLabel(ORDER_STATUS_MAP, 'shipped')  // → '已发货'
+ * @example getDictLabel(ORDER_STATUS_MAP, '已发货')   // → '已发货'（fallback：旧数据中文值直接返回）
+ */
+export function getDictLabel<T extends Record<string, string>>(dict: T, key: string): string {
+  return (dict as Record<string, string>)[key] ?? key;
+}
+
+/**
+ * 将字典转换为下拉选项数组（label=中文，value=英文 key）
+ * @example dictToOptions(ORDER_STATUS_MAP) // → [{ label: '已发货', value: 'shipped' }, ...]
+ */
+export function dictToOptions<T extends Record<string, string>>(dict: T): { label: string; value: string }[] {
+  return Object.entries(dict).map(([value, label]) => ({ label, value }));
+}
 
 /** 获取指定品牌下的货品名称列表 */
 export function getProductsByBrand(brand: string): string[] {

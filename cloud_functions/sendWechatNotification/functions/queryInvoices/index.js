@@ -8,6 +8,13 @@ cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 const db = cloud.database();
 const _ = db.command;
 
+const STATUS_COMPAT_MAP = {
+  unpaid: ['unpaid', '未开票'],
+  paid: ['paid', '已开票'],
+  '未开票': ['unpaid', '未开票'],
+  '已开票': ['paid', '已开票'],
+};
+
 exports.main = async (event, context) => {
   const payload = event.data || event;
   const { limit = 10, cursor, companyName, applicant, status, startDate, endDate } = payload;
@@ -18,7 +25,10 @@ exports.main = async (event, context) => {
     const conditions = {};
     if (companyName) conditions['companyName'] = db.RegExp({ regexp: companyName, options: 'i' });
     if (applicant) conditions['applicant'] = db.RegExp({ regexp: applicant, options: 'i' });
-    if (status) conditions['status'] = status;
+    if (status) {
+      const compatStatuses = STATUS_COMPAT_MAP[status];
+      conditions['status'] = compatStatuses ? _.in(compatStatuses) : status;
+    }
     if (startDate || endDate) {
       const dateCondition = {};
       if (startDate) dateCondition['gte'] = startDate;
