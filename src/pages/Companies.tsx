@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
-import { Table, Button, Input, Dialog, MessagePlugin } from 'tdesign-react';
-import { Plus, Pencil, Trash2, Building2 } from 'lucide-react';
+import { Table, Button, Input, Dialog, MessagePlugin, Textarea } from 'tdesign-react';
+import { ClipboardPaste, Plus, Sparkles } from 'lucide-react';
 import { CompanyTemplate } from '../types';
 import { useCompanies } from '../hooks/useCompanies';
+import { parseCompanyInfo } from '../lib/cloudbase';
 
 const EMPTY_COMPANY: Omit<CompanyTemplate, '_id' | 'createTime'> = {
   companyName: '',
@@ -26,6 +27,8 @@ export function Companies() {
   const [deleteTarget, setDeleteTarget] = useState<CompanyTemplate | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [pasteText, setPasteText] = useState('');
+  const [parsing, setParsing] = useState(false);
 
   useEffect(() => {
     companies.fetchRecords();
@@ -34,7 +37,51 @@ export function Companies() {
   /** 新增 */
   const handleAddOpen = () => {
     setAddForm(EMPTY_COMPANY);
+    setPasteText('');
     setAddVisible(true);
+  };
+
+  const applyParsedCompany = (parsed: Omit<CompanyTemplate, '_id' | 'createTime'>) => {
+    setAddForm(prev => ({
+      ...prev,
+      ...parsed,
+    }));
+  };
+
+  const handleParseText = async (text: string) => {
+    const content = text.trim();
+    if (!content) {
+      MessagePlugin.warning('请先粘贴公司开票信息');
+      return;
+    }
+    setParsing(true);
+    try {
+      const parsed = await parseCompanyInfo(content);
+      if (!parsed || !parsed.companyName) {
+        MessagePlugin.warning('未识别到单位名称，请补充或手动填写');
+        return;
+      }
+      applyParsedCompany(parsed);
+      setPasteText(content);
+      setAddVisible(true);
+      MessagePlugin.success('公司信息识别成功，请确认后保存');
+    } catch (err) {
+      MessagePlugin.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setParsing(false);
+    }
+  };
+
+  const handleReadClipboard = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      setPasteText(text);
+      await handleParseText(text);
+    } catch (err) {
+      MessagePlugin.error('读取剪贴板失败，请手动粘贴后识别: ' + String(err));
+      setAddForm(EMPTY_COMPANY);
+      setAddVisible(true);
+    }
   };
 
   const handleAddSave = async () => {
@@ -151,9 +198,14 @@ export function Companies() {
           <h1 className="text-2xl font-semibold text-gray-800">公司模版</h1>
           <p className="text-gray-500 mt-1">管理开票公司信息模版，新建发票时可快速选择</p>
         </div>
-        <Button theme="primary" icon={<Plus size={16} />} onClick={handleAddOpen}>
-          新增公司
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" icon={<ClipboardPaste size={16} />} loading={parsing} onClick={handleReadClipboard}>
+            粘贴识别
+          </Button>
+          <Button theme="primary" icon={<Plus size={16} />} onClick={handleAddOpen}>
+            新增公司
+          </Button>
+        </div>
       </div>
 
       {/* 表格 */}
@@ -182,7 +234,15 @@ export function Companies() {
           </div>
         }
       >
-        <CompanyFormFields form={addForm} onChange={setAddForm} />
+        <CompanyFormFields
+          form={addForm}
+          onChange={setAddForm}
+          pasteText={pasteText}
+          onPasteTextChange={setPasteText}
+          parsing={parsing}
+          onReadClipboard={handleReadClipboard}
+          onParseText={() => handleParseText(pasteText)}
+        />
       </Dialog>
 
       {/* 编辑弹窗 */}
@@ -223,12 +283,38 @@ export function Companies() {
 }
 
 /** 公司表单字段 */
-function CompanyFormFields({ form, onChange }: {
+function CompanyFormFields({ form, onChange, pasteText, onPasteTextChange, parsing, onReadClipboard, onParseText }: {
   form: Omit<CompanyTemplate, '_id' | 'createTime'>;
   onChange: React.Dispatch<React.SetStateAction<Omit<CompanyTemplate, '_id' | 'createTime'>>>;
+  pasteText?: string;
+  onPasteTextChange?: (text: string) => void;
+  parsing?: boolean;
+  onReadClipboard?: () => void;
+  onParseText?: () => void;
 }) {
   return (
     <div className="space-y-4 max-h-[60vh] overflow-auto px-1">
+      {onParseText && (
+        <div className="rounded-lg border border-blue-100 bg-blue-50/40 p-3">
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <span className="text-sm font-medium text-gray-700">AI 识别公司信息</span>
+            <div className="flex gap-2">
+              <Button size="small" variant="outline" icon={<ClipboardPaste size={14} />} loading={parsing} onClick={onReadClipboard}>
+                读剪贴板
+              </Button>
+              <Button size="small" theme="primary" icon={<Sparkles size={14} />} loading={parsing} onClick={onParseText}>
+                识别
+              </Button>
+            </div>
+          </div>
+          <Textarea
+            placeholder="粘贴营业执照、开票资料或银行账户信息"
+            value={pasteText || ''}
+            onChange={val => onPasteTextChange?.(val as string)}
+            autosize={{ minRows: 3, maxRows: 6 }}
+          />
+        </div>
+      )}
       <div className="grid grid-cols-2 gap-3">
         <div className="col-span-2">
           <label className="block text-xs text-gray-500 mb-1">单位名称 <span className="text-red-500">*</span></label>

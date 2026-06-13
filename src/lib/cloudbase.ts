@@ -150,6 +150,60 @@ export async function parseConsigneeInfo(text: string): Promise<{ name: string; 
   }
 }
 
+/** AI 智能解析公司开票信息 */
+export async function parseCompanyInfo(text: string): Promise<{
+  companyName: string;
+  taxId: string;
+  registeredAddress: string;
+  contactPhone: string;
+  bankName: string;
+  bankAccount: string;
+  bankCode: string;
+} | null> {
+  try {
+    const res = await app.ai().createModel('hunyuan-v3').streamText({
+      model: 'hy3-preview',
+      messages: [
+        {
+          role: 'system',
+          content: '你是一个公司开票信息解析助手。用户会输入包含单位名称、纳税人识别号、注册地址、联系电话、开户行名称、银行账号、开户行行号的文本。请提取字段并只返回JSON，格式：{"companyName":"单位名称","taxId":"纳税人识别号","registeredAddress":"注册地址","contactPhone":"联系电话","bankName":"开户行名称","bankAccount":"账号","bankCode":"开户行行号"}。无法识别的字段返回空字符串，不要返回解释。',
+        },
+        {
+          role: 'user',
+          content: text,
+        },
+      ],
+    });
+
+    let fullText = '';
+    for await (const data of res.dataStream) {
+      const content = data?.choices?.[0]?.delta?.content;
+      if (content) fullText += content;
+    }
+
+    const jsonStr = fullText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const parsed = JSON.parse(jsonStr);
+    if (parsed && typeof parsed === 'object') {
+      return {
+        companyName: String(parsed.companyName || ''),
+        taxId: String(parsed.taxId || ''),
+        registeredAddress: String(parsed.registeredAddress || ''),
+        contactPhone: String(parsed.contactPhone || ''),
+        bankName: String(parsed.bankName || ''),
+        bankAccount: String(parsed.bankAccount || ''),
+        bankCode: String(parsed.bankCode || ''),
+      };
+    }
+    return null;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err || '');
+    if (msg.includes('not found') || msg.includes('not enabled') || msg.includes('未开通')) {
+      throw new Error('AI 模型未启用，请在 CloudBase 控制台开启 AI 模型服务：https://tcb.cloud.tencent.com/dev?envId=cloud1-8gvbotkt966e5e19#/ai');
+    }
+    throw new Error('智能识别失败: ' + msg);
+  }
+}
+
 /** 获取云存储文件的临时访问链接 */
 export async function getCloudFileURLs(fileIDs: string[]): Promise<Array<{ fileID: string; tempFileURL: string }>> {
   const result = await app.getTempFileURL({

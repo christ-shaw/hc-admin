@@ -5,7 +5,7 @@ import { OrderRecord, OrderFilters, ORDER_TYPE_MAP, ORDER_SOURCE_MAP, ORDER_ATTR
 import { useOrders } from '../hooks/useOrders';
 import { formatDate } from '../utils/format';
 import { parseOrderExcel, exportOrderExcel } from '../utils/orderExcel';
-import { BRANDS, getProductsByBrand, getSpecsByProduct, PAYMENT_ACCOUNTS, SALESPERSONS } from '../data/dict';
+import { BRANDS, getBrandLabel, getProductLabel, getProductsByBrand, getSpecsByProduct, PAYMENT_ACCOUNTS, SALESPERSONS } from '../data/dict';
 import { parseConsigneeInfo, callFunction, getCurrentOperatorName, uploadToCloudStorage } from '../lib/cloudbase';
 
 /** ========== 预计算静态 options（模块级常量，避免每次渲染重建） ========== */
@@ -52,7 +52,7 @@ const PAYMENT_ACCOUNT_OPTIONS = [PLACEHOLDER_OPTION, ...PAYMENT_ACCOUNTS.map(v =
 const ORDER_STATUS_OPTIONS = dictToOptions(ORDER_STATUS_MAP);
 
 const SHIPPING_FEE_OPTIONS = [PLACEHOLDER_OPTION, ...dictToOptions(SHIPPING_FEE_MAP)];
-const BRAND_OPTIONS = [PLACEHOLDER_OPTION, ...BRANDS.map(v => ({ label: v, value: v }))];
+const BRAND_OPTIONS = [PLACEHOLDER_OPTION, ...BRANDS.map(v => ({ label: getBrandLabel(v), value: v }))];
 const FILTER_SALESPERSON_OPTIONS = [{ label: '全部', value: '' }, ...SALESPERSONS.map(v => ({ label: v, value: v }))];
 
 /** 货品条目默认值 */
@@ -666,7 +666,7 @@ export function Orders() {
       cell: ({ row }: { row: OrderRecord }) => {
         const name = row.productName || '';
         const spec = row.specification && row.specification !== '默认' ? ` ${row.specification}` : '';
-        return name ? `${name}${spec}` : '-';
+        return name ? `${getProductLabel(name)}${spec}` : '-';
       },
     },
     { colKey: 'quantity', title: '数量', width: 60, cell: ({ row }: { row: OrderRecord }) => row.quantity || '-' },
@@ -800,8 +800,8 @@ export function Orders() {
             <DetailRow label="渠道类别" value={currentRecord.channelCategory} />
             <DetailRow label="网店订单号" value={currentRecord.onlineOrderNumber} />
             <DetailRow label="客户名称" value={currentRecord.customerName} />
-            <DetailRow label="品牌" value={currentRecord.brand} />
-            <DetailRow label="货品名称" value={currentRecord.productName} />
+            <DetailRow label="品牌" value={getBrandLabel(currentRecord.brand)} />
+            <DetailRow label="货品名称" value={getProductLabel(currentRecord.productName)} />
             <DetailRow label="规格" value={currentRecord.specification} />
             <DetailRow label="数量" value={currentRecord.quantity} />
             <DetailRow label="单价" value={currentRecord.unitPrice ? `¥${currentRecord.unitPrice}` : '-'} />
@@ -846,8 +846,8 @@ export function Orders() {
                 return items.map((t, i) => (
                   <div key={i} className="border-l-2 border-blue-300 pl-3 my-1">
                     {items.length > 1 && <div className="text-xs text-blue-500 font-medium mb-1">转租赁2 - 第{i + 1}组</div>}
-                    <DetailRow label="转租赁2品牌" value={t.brand} />
-                    <DetailRow label="转租赁2货品名称" value={t.productName} />
+                    <DetailRow label="转租赁2品牌" value={getBrandLabel(t.brand)} />
+                    <DetailRow label="转租赁2货品名称" value={getProductLabel(t.productName)} />
                     <DetailRow label="转租赁2规格" value={t.specification} />
                     <DetailRow label="已交租期" value={t.paidPeriod || '-'} />
                     <DetailRow label="已交租金" value={t.paidRent ? `¥${t.paidRent}` : '-'} />
@@ -1217,7 +1217,7 @@ function AddOrderWizard({
           const allowed = new Set(ORDER_TYPE_VIRTUAL_PRODUCTS[form.orderType]!);
           products = products.filter(name => allowed.has(name));
         }
-        cache[p.brand] = [PLACEHOLDER_OPTION, ...products.map(v => ({ label: v, value: v }))];
+        cache[p.brand] = [PLACEHOLDER_OPTION, ...products.map(v => ({ label: getProductLabel(v), value: v }))];
       }
     }
     return cache;
@@ -1238,7 +1238,7 @@ function AddOrderWizard({
     const cache: Record<string, { label: string; value: string }[]> = {};
     for (const t of form.transferProducts) {
       if (t.brand && !cache[t.brand]) {
-        cache[t.brand] = [PLACEHOLDER_OPTION, ...getProductsByBrand(t.brand).map(v => ({ label: v, value: v }))];
+        cache[t.brand] = [PLACEHOLDER_OPTION, ...getProductsByBrand(t.brand).map(v => ({ label: getProductLabel(v), value: v }))];
       }
     }
     return cache;
@@ -1679,7 +1679,7 @@ function AddOrderWizard({
             <PreviewSection title="货品信息">
               {form.products.map((p, i) => (
                 <div key={i} className="text-xs text-gray-600 ml-2 border-l-2 border-blue-200 pl-2 mb-1">
-                  货品{i + 1}：{p.brand || '-'} / {p.productName || '-'} / {p.specification || '-'}，
+                  货品{i + 1}：{p.brand ? getBrandLabel(p.brand) : '-'} / {p.productName ? getProductLabel(p.productName) : '-'} / {p.specification || '-'}，
                   数量 {p.quantity || 0}，单价 ¥{p.unitPrice || 0}，金额 ¥{p.amount || 0}，收款账户 {p.paymentAccount || '-'}
                 </div>
               ))}
@@ -1689,7 +1689,7 @@ function AddOrderWizard({
                 {form.transferProducts.map((t, i) => (
                   <div key={i} className="text-xs text-gray-600 ml-2 border-l-2 border-blue-200 pl-2 mb-1">
                     {form.transferProducts.length > 1 && <span className="text-blue-500 font-medium">第{i + 1}组：</span>}
-                    {t.brand || '-'} / {t.productName || '-'} / {t.specification || '-'}，
+                    {t.brand ? getBrandLabel(t.brand) : '-'} / {t.productName ? getProductLabel(t.productName) : '-'} / {t.specification || '-'}，
                     已交租期 {t.paidPeriod || 0}，已交租金 ¥{t.paidRent || 0}
                   </div>
                 ))}

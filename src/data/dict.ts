@@ -111,9 +111,9 @@ export const PAYMENT_ACCOUNTS = [
   '租机乐公户',
   '云途公户',
   '汇创公户',
-  'YY闲鱼',
-  'XX闲鱼',
-  'HH闲鱼',
+  'YYFISH',
+  'XXFISH',
+  'HHFISH',
   '未收款',
   '其他'
 ];
@@ -527,6 +527,15 @@ export const PRODUCT_DICT: Record<string, Record<string, string[]>> = {
  * ================================================================ */
 export const BRANDS = Object.keys(PRODUCT_DICT).sort((a, b) => a.localeCompare(b, 'zh-CN'));
 
+/** 品牌展示别名：数据库与级联 key 保持不变，仅用于前端展示 */
+export const BRAND_LABEL_MAP: Record<string, string> = {
+  '华为': '菊花',
+  'vivo': '蓝厂',
+  'OPPO': '绿厂',
+  '小米': '粗粮',
+  '红米': '红粮',
+};
+
 /* ================================================================
  * 7. 通用日志/存储类型字典
  * ================================================================ */
@@ -552,6 +561,22 @@ export const LOG_ACTION_MAP = {
  */
 export function getDictLabel<T extends Record<string, string>>(dict: T, key: string): string {
   return (dict as Record<string, string>)[key] ?? key;
+}
+
+/** 获取品牌展示名，未配置别名时返回原 key */
+export function getBrandLabel(brand: string): string {
+  return BRAND_LABEL_MAP[brand] ?? brand;
+}
+
+/** 获取货品名称展示名，存储 key 保持不变 */
+export function getProductLabel(productName: string): string {
+  if (!productName) return productName;
+  return productName
+    .replace(/红米/g, '红粮')
+    .replace(/华为/g, '菊花')
+    .replace(/小米/g, '粗粮')
+    .replace(/OPPO/gi, '绿厂')
+    .replace(/vivo/gi, '蓝厂');
 }
 
 /**
