@@ -2,7 +2,26 @@
 @tailwind components;
 @tailwind utilities;
 
+@-webkit-keyframes fadeOut {
+  to {
+    opacity: 0;
+    visibility: hidden;
+  }
+}
+
+@keyframes fadeOut {
+  to {
+    opacity: 0;
+    visibility: hidden;
+  }
+}
+
 @layer base {
+  html,
+  :host {
+    text-size-adjust: 100%;
+  }
+
   body {
     font-family: 'PingFang-SC', system-ui, -apple-system, sans-serif;
     -webkit-font-smoothing: antialiased;

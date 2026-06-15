@@ -27,7 +27,9 @@ export function Companies() {
   const [deleteTarget, setDeleteTarget] = useState<CompanyTemplate | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [pasteText, setPasteText] = useState('');
+  const [importVisible, setImportVisible] = useState(false);
+  const [importText, setImportText] = useState('');
+  const [readingClipboard, setReadingClipboard] = useState(false);
   const [parsing, setParsing] = useState(false);
 
   useEffect(() => {
@@ -37,34 +39,33 @@ export function Companies() {
   /** 新增 */
   const handleAddOpen = () => {
     setAddForm(EMPTY_COMPANY);
-    setPasteText('');
     setAddVisible(true);
   };
 
-  const applyParsedCompany = (parsed: Omit<CompanyTemplate, '_id' | 'createTime'>) => {
-    setAddForm(prev => ({
-      ...prev,
-      ...parsed,
-    }));
-  };
-
-  const handleParseText = async (text: string) => {
-    const content = text.trim();
+  const handleAnalyzeImport = async () => {
+    const content = importText.trim();
     if (!content) {
-      MessagePlugin.warning('请先粘贴公司开票信息');
+      MessagePlugin.warning('请先确认或粘贴公司开票信息');
       return;
     }
     setParsing(true);
     try {
       const parsed = await parseCompanyInfo(content);
-      if (!parsed || !parsed.companyName) {
-        MessagePlugin.warning('未识别到单位名称，请补充或手动填写');
+      if (!parsed) {
+        MessagePlugin.warning('未识别到公司信息，请补充或重新粘贴');
         return;
       }
-      applyParsedCompany(parsed);
-      setPasteText(content);
+      setAddForm({
+        ...EMPTY_COMPANY,
+        ...parsed,
+      });
+      setImportVisible(false);
       setAddVisible(true);
-      MessagePlugin.success('公司信息识别成功，请确认后保存');
+      if (parsed.companyName) {
+        MessagePlugin.success('公司信息识别成功，请确认后保存');
+      } else {
+        MessagePlugin.warning('未识别到单位名称，请补充后保存');
+      }
     } catch (err) {
       MessagePlugin.error(err instanceof Error ? err.message : String(err));
     } finally {
@@ -73,14 +74,20 @@ export function Companies() {
   };
 
   const handleReadClipboard = async () => {
+    setReadingClipboard(true);
     try {
       const text = await navigator.clipboard.readText();
-      setPasteText(text);
-      await handleParseText(text);
+      setImportText(text);
+      setImportVisible(true);
+      if (!text.trim()) {
+        MessagePlugin.warning('剪贴板为空，请手动粘贴公司开票信息');
+      }
     } catch (err) {
       MessagePlugin.error('读取剪贴板失败，请手动粘贴后识别: ' + String(err));
-      setAddForm(EMPTY_COMPANY);
-      setAddVisible(true);
+      setImportText('');
+      setImportVisible(true);
+    } finally {
+      setReadingClipboard(false);
     }
   };
 
@@ -199,7 +206,7 @@ export function Companies() {
           <p className="text-gray-500 mt-1">管理开票公司信息模版，新建发票时可快速选择</p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" icon={<ClipboardPaste size={16} />} loading={parsing} onClick={handleReadClipboard}>
+          <Button variant="outline" icon={<ClipboardPaste size={16} />} loading={readingClipboard} onClick={handleReadClipboard}>
             粘贴识别
           </Button>
           <Button theme="primary" icon={<Plus size={16} />} onClick={handleAddOpen}>
@@ -234,15 +241,7 @@ export function Companies() {
           </div>
         }
       >
-        <CompanyFormFields
-          form={addForm}
-          onChange={setAddForm}
-          pasteText={pasteText}
-          onPasteTextChange={setPasteText}
-          parsing={parsing}
-          onReadClipboard={handleReadClipboard}
-          onParseText={() => handleParseText(pasteText)}
-        />
+        <CompanyFormFields form={addForm} onChange={setAddForm} />
       </Dialog>
 
       {/* 编辑弹窗 */}
@@ -259,6 +258,33 @@ export function Companies() {
         }
       >
         <CompanyFormFields form={editForm} onChange={setEditForm} />
+      </Dialog>
+
+      {/* 粘贴导入确认 */}
+      <Dialog
+        header="确认导入内容"
+        visible={importVisible}
+        onClose={() => { if (!parsing) setImportVisible(false); }}
+        width="640px"
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button disabled={parsing} onClick={() => setImportVisible(false)}>取消</Button>
+            <Button theme="primary" icon={<Sparkles size={16} />} loading={parsing} onClick={handleAnalyzeImport}>
+              确认并识别
+            </Button>
+          </div>
+        }
+      >
+        <div className="space-y-3">
+          <p className="text-sm text-gray-600">请确认下面是需要导入的公司开票信息，确认后再进行 AI 分析。</p>
+          <Textarea
+            placeholder="粘贴营业执照、开票资料或银行账户信息"
+            value={importText}
+            onChange={val => setImportText(val as string)}
+            autosize={{ minRows: 8, maxRows: 12 }}
+            disabled={parsing}
+          />
+        </div>
       </Dialog>
 
       {/* 删除确认 */}
@@ -283,38 +309,12 @@ export function Companies() {
 }
 
 /** 公司表单字段 */
-function CompanyFormFields({ form, onChange, pasteText, onPasteTextChange, parsing, onReadClipboard, onParseText }: {
+function CompanyFormFields({ form, onChange }: {
   form: Omit<CompanyTemplate, '_id' | 'createTime'>;
   onChange: React.Dispatch<React.SetStateAction<Omit<CompanyTemplate, '_id' | 'createTime'>>>;
-  pasteText?: string;
-  onPasteTextChange?: (text: string) => void;
-  parsing?: boolean;
-  onReadClipboard?: () => void;
-  onParseText?: () => void;
 }) {
   return (
     <div className="space-y-4 max-h-[60vh] overflow-auto px-1">
-      {onParseText && (
-        <div className="rounded-lg border border-blue-100 bg-blue-50/40 p-3">
-          <div className="flex items-center justify-between gap-2 mb-2">
-            <span className="text-sm font-medium text-gray-700">AI 识别公司信息</span>
-            <div className="flex gap-2">
-              <Button size="small" variant="outline" icon={<ClipboardPaste size={14} />} loading={parsing} onClick={onReadClipboard}>
-                读剪贴板
-              </Button>
-              <Button size="small" theme="primary" icon={<Sparkles size={14} />} loading={parsing} onClick={onParseText}>
-                识别
-              </Button>
-            </div>
-          </div>
-          <Textarea
-            placeholder="粘贴营业执照、开票资料或银行账户信息"
-            value={pasteText || ''}
-            onChange={val => onPasteTextChange?.(val as string)}
-            autosize={{ minRows: 3, maxRows: 6 }}
-          />
-        </div>
-      )}
       <div className="grid grid-cols-2 gap-3">
         <div className="col-span-2">
           <label className="block text-xs text-gray-500 mb-1">单位名称 <span className="text-red-500">*</span></label>

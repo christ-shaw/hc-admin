@@ -1,13 +1,47 @@
 import { useState, useEffect } from 'react';
-import { Button, Input, MessagePlugin } from 'tdesign-react';
-import { Settings, Save, RotateCcw } from 'lucide-react';
-import { callFunction } from '../lib/cloudbase';
+import { Button, Input, MessagePlugin, Select } from 'tdesign-react';
+import { Settings, Save, RotateCcw, Cpu } from 'lucide-react';
+import { callFunction, AI_MODEL_OPTIONS, getAIModelConfig, setAIModelConfig, type AIModelConfig } from '../lib/cloudbase';
 
 export function SettingsPage() {
   const [counterValue, setCounterValue] = useState<number>(0);
   const [savedValue, setSavedValue] = useState<number>(0);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [aiModel, setAiModel] = useState<AIModelConfig>(getAIModelConfig);
+
+  const AI_MODEL_SELECT_OPTIONS = [
+    { label: '─ DeepSeek 系列 ─', value: '__header_ds__' },
+    ...AI_MODEL_OPTIONS.filter(o => o.label.includes('DeepSeek')).map(o => ({
+      label: o.label, value: `${o.group}|${o.model}`,
+    })),
+    { label: '─ 混元系列 ─', value: '__header_hy__' },
+    ...AI_MODEL_OPTIONS.filter(o => o.label.includes('混元')).map(o => ({
+      label: o.label, value: `${o.group}|${o.model}`,
+    })),
+    { label: '─ GLM 系列 ─', value: '__header_glm__' },
+    ...AI_MODEL_OPTIONS.filter(o => o.label.includes('GLM')).map(o => ({
+      label: o.label, value: `${o.group}|${o.model}`,
+    })),
+    { label: '─ Kimi 系列 ─', value: '__header_kimi__' },
+    ...AI_MODEL_OPTIONS.filter(o => o.label.includes('Kimi')).map(o => ({
+      label: o.label, value: `${o.group}|${o.model}`,
+    })),
+  ];
+
+  const currentAiModelValue = `${aiModel.group}|${aiModel.model}`;
+
+  const handleAiModelChange = (val: unknown) => {
+    const selectedValue = String(val);
+    if (selectedValue.startsWith('__')) return; // 跳过分组标题
+    const [group, model] = selectedValue.split('|');
+    const match = AI_MODEL_OPTIONS.find(o => o.group === group && o.model === model);
+    if (match) {
+      setAiModel(match);
+      setAIModelConfig(match);
+      MessagePlugin.success(`AI 模型已切换为 ${match.label}`);
+    }
+  };
 
   /** 加载计数器当前值 */
   const fetchCounter = async () => {
@@ -66,6 +100,49 @@ export function SettingsPage() {
       <div>
         <h1 className="text-2xl font-semibold text-gray-800">系统设置</h1>
         <p className="text-gray-500 mt-1">管理系统的全局配置</p>
+      </div>
+
+      {/* AI 模型设置 */}
+      <div className="glass-card p-6">
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-10 h-10 bg-purple-100 rounded-lg flex items-center justify-center">
+            <Cpu size={20} className="text-purple-600" />
+          </div>
+          <div>
+            <h3 className="text-base font-medium text-gray-800">AI 模型设置</h3>
+            <p className="text-sm text-gray-500">切换智能识别（收件人/开票信息解析）使用的 AI 模型</p>
+          </div>
+        </div>
+
+        <div className="bg-gray-50 rounded-lg p-4 space-y-4">
+          <div className="flex items-center gap-4">
+            <div className="flex-1 max-w-xs">
+              <label className="block text-sm text-gray-600 mb-1">当前 AI 模型</label>
+              <Select
+                value={currentAiModelValue}
+                onChange={handleAiModelChange}
+                options={AI_MODEL_SELECT_OPTIONS}
+              />
+            </div>
+          </div>
+
+          <div className="flex items-center gap-6 text-sm">
+            <div className="flex items-center gap-2">
+              <span className="text-gray-500">模型组:</span>
+              <span className="font-mono font-medium text-gray-800">{aiModel.group}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-gray-500">模型 ID:</span>
+              <span className="font-mono font-medium text-blue-600">{aiModel.model}</span>
+            </div>
+          </div>
+
+          <div className="text-xs text-gray-400 space-y-1">
+            <p>• 切换模型后立即生效，无需刷新页面</p>
+            <p>• 如遇 429 限流错误，可尝试切换到其他模型</p>
+            <p>• CloudBase 托管模型需要在控制台先启用，自定义模型组需要配置 API Key</p>
+          </div>
+        </div>
       </div>
 
       {/* 订单序号计数器 */}

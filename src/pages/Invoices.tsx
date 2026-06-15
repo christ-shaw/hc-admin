@@ -14,6 +14,9 @@ const STATUS_TAG_THEME: Record<string, 'success' | 'warning' | 'danger' | 'defau
   '未开票': 'warning',
 };
 
+const INVOICE_IMAGE_ACCEPT = '.bmp,.bpm,.png,.jpg,.jpeg,image/bmp,image/x-ms-bmp,image/png,image/jpeg';
+const INVOICE_IMAGE_EXTENSIONS = ['bmp', 'bpm', 'png', 'jpg', 'jpeg'];
+
 function isInvoicePaid(status: string | undefined): boolean {
   return status === 'paid' || status === '已开票';
 }
@@ -410,7 +413,12 @@ export function Invoices() {
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files) return;
-    setUploadFiles(prev => [...prev, ...Array.from(files)]);
+    const selectedFiles = Array.from(files);
+    const validFiles = selectedFiles.filter(isSupportedInvoiceImageFile);
+    if (validFiles.length < selectedFiles.length) {
+      MessagePlugin.warning('仅支持 BMP、PNG、JPEG 格式图片');
+    }
+    setUploadFiles(prev => [...prev, ...validFiles]);
     // 重置 input 以便再次选择同一文件
     if (uploadInputRef.current) uploadInputRef.current.value = '';
   };
@@ -502,6 +510,12 @@ export function Invoices() {
     { colKey: 'applyDate', title: '申请日期', width: 110, cell: ({ row }: { row: InvoiceRecord }) => formatDate(row.applyDate, false) },
     { colKey: 'companyName', title: '公司名称', width: 180, ellipsis: true },
     { colKey: 'shopName', title: '店铺名字', width: 100 },
+    {
+      colKey: 'invoiceAmount',
+      title: '开票金额',
+      width: 100,
+      cell: ({ row }: { row: InvoiceRecord }) => row.invoiceAmount ? `¥${row.invoiceAmount}` : '-',
+    },
     { colKey: 'applicant', title: '开票申请人', width: 90 },
     {
       colKey: 'status', title: '开票状态', width: 90,
@@ -893,6 +907,8 @@ export function Invoices() {
                   type="file"
                   multiple
                   className="hidden"
+                  title="上传开票附件"
+                  aria-label="上传开票附件"
                   onChange={(e) => {
                     const files = e.target.files;
                     if (files) {
@@ -1019,15 +1035,17 @@ export function Invoices() {
       >
         <div className="space-y-4">
           <p className="text-sm text-gray-500">
-            为 <span className="font-medium text-gray-800">{uploadTarget?.companyName}</span> 上传电子发票二维码图片（支持多张）
+            为 <span className="font-medium text-gray-800">{uploadTarget?.companyName}</span> 上传电子发票二维码图片（支持 BMP、PNG、JPEG，多张）
           </p>
           <div>
             <input
               ref={uploadInputRef}
               type="file"
-              accept="image/*"
+              accept={INVOICE_IMAGE_ACCEPT}
               multiple
               className="hidden"
+              title="上传电子发票二维码图片"
+              aria-label="上传电子发票二维码图片"
               onChange={handleFileSelect}
             />
             <Button variant="outline" icon={<Upload size={16} />} onClick={() => uploadInputRef.current?.click()}>
@@ -1038,11 +1056,7 @@ export function Invoices() {
             <div className="grid grid-cols-3 gap-3">
               {uploadFiles.map((file, index) => (
                 <div key={index} className="relative group border border-gray-200 rounded-lg overflow-hidden">
-                  <img
-                    src={URL.createObjectURL(file)}
-                    alt={file.name}
-                    className="w-full h-28 object-contain bg-gray-50"
-                  />
+                  <LocalInvoiceImagePreview file={file} className="w-full h-28 object-contain bg-gray-50" />
                   <button
                     type="button"
                     className="absolute top-1 right-1 w-6 h-6 bg-black/50 rounded-full flex items-center justify-center text-white opacity-0 group-hover:opacity-100 cursor-pointer"
@@ -1325,6 +1339,8 @@ function InvoiceFormFields({ form, onChange, isEdit = false, onCompanyNameChange
           {/* 新增附件 */}
           <div>
             <input ref={editAttachInputRef} type="file" multiple className="hidden"
+              title="添加发票附件"
+              aria-label="添加发票附件"
               onChange={(e) => {
                 const files = e.target.files;
                 if (files) onEditAttachFilesChange?.(prev => [...prev, ...Array.from(files)]);
@@ -1432,14 +1448,38 @@ function DetailRow({ label, value }: { label: string; value: React.ReactNode }) 
 
 /** 判断文件是否为图片 */
 function isImageFile(fileName: string) {
-  const ext = fileName.split('.').pop()?.toLowerCase() || '';
-  return ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(ext);
+  const ext = getFileExtension(fileName);
+  return ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'bpm', 'svg'].includes(ext);
+}
+
+/** 判断是否为发票上传支持的图片格式 */
+function isSupportedInvoiceImageFile(file: File) {
+  const ext = getFileExtension(file.name);
+  const type = file.type.toLowerCase();
+  return INVOICE_IMAGE_EXTENSIONS.includes(ext)
+    || ['image/bmp', 'image/x-ms-bmp', 'image/png', 'image/jpeg', 'image/pjpeg'].includes(type);
 }
 
 /** 判断文件是否为 BMP 格式 */
 function isBmpFile(fileName: string) {
-  const ext = fileName.split('.').pop()?.toLowerCase() || '';
-  return ext === 'bmp';
+  const ext = getFileExtension(fileName);
+  return ext === 'bmp' || ext === 'bpm';
+}
+
+function getFileExtension(fileName: string) {
+  return fileName.split('.').pop()?.toLowerCase() || '';
+}
+
+function LocalInvoiceImagePreview({ file, className }: { file: File; className?: string }) {
+  const [src, setSrc] = useState('');
+
+  useEffect(() => {
+    const objectUrl = URL.createObjectURL(file);
+    setSrc(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [file]);
+
+  return <ImageWithBmpSupport src={src} alt={file.name} fileName={file.name} className={className} />;
 }
 
 /** 支持 BMP 格式的图片组件 - BMP 文件通过 Canvas 转 PNG 确保兼容性 */
@@ -1449,6 +1489,12 @@ function ImageWithBmpSupport({ src, alt, className, fileName }: { src: string; a
   const isBmp = fileName ? isBmpFile(fileName) : isBmpFile(alt);
 
   useEffect(() => {
+    setError(false);
+    setConvertedSrc(null);
+    if (!src) {
+      setError(true);
+      return;
+    }
     if (!isBmp) return;
     let cancelled = false;
     const img = new Image();
@@ -1483,14 +1529,14 @@ function ImageWithBmpSupport({ src, alt, className, fileName }: { src: string; a
     return (
       <div className={`${className} flex flex-col items-center justify-center`}>
         <Download size={24} className="text-gray-300 mb-1" />
-        <span className="text-xs text-gray-400">图片加载失败</span>
+        <span className="text-xs text-gray-400 text-center px-1">图片链接获取失败</span>
       </div>
     );
   }
 
   // 非 BMP 文件直接用 img 标签
   if (!isBmp) {
-    return <img src={src} alt={alt} className={className} />;
+    return <img src={src} alt={alt} className={className} onError={() => setError(true)} />;
   }
 
   // BMP 文件：等待 Canvas 转换完成

@@ -219,6 +219,8 @@ export function Inventory() {
             type="file"
             accept=".xlsx,.xls"
             className="hidden"
+            title="导入库存 Excel"
+            aria-label="导入库存 Excel"
             onChange={handleFileUpload}
           />
           <Button

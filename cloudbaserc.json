@@ -14,6 +14,21 @@
       "runtime": "Nodejs18.15"
     },
     {
+      "name": "getSfAccessToken",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
+      "name": "applySfExpress",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
+      "name": "getCloudFileUrls",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
       "name": "countPendingInvoices",
       "handler": "index.main",
       "runtime": "Nodejs18.15"

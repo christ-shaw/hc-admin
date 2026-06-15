@@ -106,6 +106,7 @@ export const PAYMENT_ACCOUNTS = [
   'YY微信',
   'XX支付宝',
   'YY支付宝',
+  'ZKP支付宝',
   'MAJINGLONG微信',
   '倬石公户',
   '租机乐公户',
@@ -118,7 +119,7 @@ export const PAYMENT_ACCOUNTS = [
   '其他'
 ];
 
-export const SHOP_NAMES = ['倬石电子', '云途', '租机乐', '汇创'];
+export const SHOP_NAMES = ['倬石电子', '云途', '租机乐', '汇创', '鸿城数码'];
 
 /* ================================================================
  * 5. 邮寄费用类型
@@ -206,6 +207,7 @@ export const PRODUCT_DICT: Record<string, Record<string, string[]>> = {
     '红米note14PRO': ['默认'],
     '红米Turbo3': ['默认'],
     '红米Turbo4': ['默认'],
+    '红米80':['默认']
   },
   '华为': {
     '华为Davinci': ['默认'],

@@ -308,14 +308,14 @@ MIT
 
 ## 部署信息
 
-**部署时间**: 2026-06-12 09:25
+**部署时间**: 2026-06-14 15:49
 
 ### 访问地址
 
-**前端应用（静态托管）**: https://cloud1-8gvbotkt966e5e19-1405003451.tcloudbaseapp.com/?v=202606120925
+**前端应用（静态托管）**: https://cloud1-8gvbotkt966e5e19-1405003451.tcloudbaseapp.com/?v=202606141549
 
 ### 当前版本
-- **hc-admin-009** - 2026-06-12 09:25（订单校验增强、收款账户扩展、邮寄结算方式必填、归还状态功能、发票编辑附件、未收款/未退回红色高亮）
+- **hc-admin-010** - 2026-06-14 15:49（SDK初始化改用 publishableKey 语义命名、环境变量重命名）
 
 ### 云开发资源
 
@@ -377,6 +377,11 @@ MIT
 - **静态网站管理**: https://tcb.cloud.tencent.com/dev?envId=cloud1-8gvbotkt966e5e19#/static-hosting
 
 ### 最新更新日志
+
+**2026-06-14 15:49**
+- ✅ 部署 hc-admin-010 版本
+- ✅ SDK 初始化环境变量从 VITE_CLOUDBASE_ACCESS_KEY 重命名为 VITE_CLOUDBASE_PUBLISHABLE_KEY
+- ✅ 代码变量名从 ACCESS_KEY 改为 PUBLISHABLE_KEY，语义与实际密钥类型一致
 
 **2026-06-12 09:25**
 - ✅ 部署 hc-admin-009 版本

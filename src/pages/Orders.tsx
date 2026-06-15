@@ -18,8 +18,8 @@ const SALES_CHANNEL_OPTIONS = [PLACEHOLDER_OPTION, ...dictToOptions(SALES_CHANNE
 const CHANNEL_CATEGORY_OPTIONS = [PLACEHOLDER_OPTION, ...dictToOptions(CHANNEL_CATEGORY_MAP)];
 const SALESPERSON_OPTIONS = [PLACEHOLDER_OPTION, ...SALESPERSONS.map(v => ({ label: v, value: v }))];
 
-/** 平台渠道的 salesChannel key 集合（人人租系列 + 云途/汇租机/倬石电子/云界互联/极客矩阵/极速闪租） */
-const PLATFORM_CHANNELS = new Set(['aRrz', 'fRrz', 'lRrz', 'jRrz', 'gRrz', 'yuntu', '云途', 'huizuji', 'zhuoshi', 'yunjie', 'jikejuzhen', 'jisushanzu']);
+/** 平台渠道的 salesChannel key 集合（人人租系列 + 云途/汇租机/租机乐/倬石电子/云界互联/极客矩阵/极速闪租） */
+const PLATFORM_CHANNELS = new Set(['aRrz', 'fRrz', 'lRrz', 'jRrz', 'gRrz', 'yuntu', '云途', 'huizuji', 'zujile', '租机乐', 'zhuoshi', 'yunjie', 'jikejuzhen', 'jisushanzu']);
 
 /** 根据 salesChannel key 推算渠道类别 */
 function calcChannelCategory(salesChannel: string): 'platform' | 'offline' | '' {
@@ -131,6 +131,10 @@ const STATUS_TAG_THEME: Record<string, 'success' | 'warning' | 'danger' | 'defau
   unknown: 'default',
 };
 
+function isExpressApplicableStatus(status: string | undefined): boolean {
+  return status === 'unknown' || status === '--';
+}
+
 export function Orders() {
   const orders = useOrders();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -193,6 +197,10 @@ export function Orders() {
   const handleDetail = useCallback((record: OrderRecord) => {
     setCurrentRecord(record);
     setDetailVisible(true);
+  }, []);
+
+  const handleApplyExpress = useCallback((record: OrderRecord) => {
+    MessagePlugin.info(`订单 ${record.serialNumber || ''} 的申请快递功能暂未实现`);
   }, []);
 
   /** 导入 Excel */
@@ -342,10 +350,17 @@ export function Orders() {
     if (addStep === 3) {
       if (addForm.products.length === 0) { MessagePlugin.warning('请至少添加一条货品'); return; }
       if (addForm.products.some(p => !p.brand)) { MessagePlugin.warning('请选择货品品牌'); return; }
-      if (addForm.products.some(p => p.amount > 0 && !p.paymentAccount)) { MessagePlugin.warning('金额不为0时请选择收款账户'); return; }
+      if (addForm.products.some(p => !p.productName)) { MessagePlugin.warning('请选择货品名称'); return; }
+      if (addForm.products.some(p => !p.specification)) { MessagePlugin.warning('请选择规格'); return; }
+      if (addForm.products.some(p => !p.quantity || p.quantity <= 0)) { MessagePlugin.warning('请填写数量'); return; }
+      if (addForm.products.some(p => !(addForm.orderAttribute === 'rental1' && p.brand !== '虚拟产品') && (!p.unitPrice || p.unitPrice <= 0))) { MessagePlugin.warning('请填写单价'); return; }
+      if (addForm.products.some(p => !(addForm.orderAttribute === 'rental1' && p.brand !== '虚拟产品') && !p.paymentAccount)) { MessagePlugin.warning('请选择收款账户'); return; }
+      if (addForm.products.some(p => p.productName === '部分转租赁2' || p.productName === '全部转租赁2') && addForm.transferProducts.some(t => !t.paidPeriod || t.paidPeriod <= 0)) { MessagePlugin.warning('转租赁2请填写已交租期'); return; }
+      if (addForm.products.some(p => p.productName === '部分转租赁2' || p.productName === '全部转租赁2') && addForm.transferProducts.some(t => !t.paidRent || t.paidRent <= 0)) { MessagePlugin.warning('转租赁2请填写已交租金'); return; }
     }
     if (addStep === 4) {
-      if (!addForm.shippingFee) { MessagePlugin.warning('请选择邮寄结算方式'); return; }
+      if (addForm.status === 'shipped' && !addForm.shippingFee) { MessagePlugin.warning('已发货状态请选择邮寄结算方式'); return; }
+      if (addForm.status === 'shipped' && !addForm.trackingNumber) { MessagePlugin.warning('已发货状态请填写物流单号'); return; }
     }
     if (addStep === 5) {
       const needReturnStatus = addForm.orderType === 'postRentalShip' || addForm.orderType === 'postRentalReturn';
@@ -536,10 +551,18 @@ export function Orders() {
     if (editStep === 3) {
       if (editForm.products.length === 0) { MessagePlugin.warning('请至少添加一条货品'); return; }
       if (editForm.products.some(p => !p.brand)) { MessagePlugin.warning('请选择货品品牌'); return; }
-      if (editForm.products.some(p => p.amount > 0 && !p.paymentAccount)) { MessagePlugin.warning('金额不为0时请选择收款账户'); return; }
+      if (editForm.products.some(p => !p.productName)) { MessagePlugin.warning('请选择货品名称'); return; }
+      if (editForm.products.some(p => !p.specification)) { MessagePlugin.warning('请选择规格'); return; }
+      if (editForm.products.some(p => !p.quantity || p.quantity <= 0)) { MessagePlugin.warning('请填写数量'); return; }
+      if (editForm.products.some(p => !(editForm.orderAttribute === 'rental1' && p.brand !== '虚拟产品') && (!p.unitPrice || p.unitPrice <= 0))) { MessagePlugin.warning('请填写单价'); return; }
+      if (editForm.products.some(p => !(editForm.orderAttribute === 'rental1' && p.brand !== '虚拟产品') && !p.paymentAccount)) { MessagePlugin.warning('请选择收款账户'); return; }
+      const editHasTransfer = editForm.products.some(p => p.productName === '部分转租赁2' || p.productName === '全部转租赁2');
+      if (editHasTransfer && editForm.transferProducts.some(t => !t.paidPeriod || t.paidPeriod <= 0)) { MessagePlugin.warning('转租赁2请填写已交租期'); return; }
+      if (editHasTransfer && editForm.transferProducts.some(t => !t.paidRent || t.paidRent <= 0)) { MessagePlugin.warning('转租赁2请填写已交租金'); return; }
     }
     if (editStep === 4) {
-      if (!editForm.shippingFee) { MessagePlugin.warning('请选择邮寄结算方式'); return; }
+      if (editForm.status === 'shipped' && !editForm.shippingFee) { MessagePlugin.warning('已发货状态请选择邮寄结算方式'); return; }
+      if (editForm.status === 'shipped' && !editForm.trackingNumber) { MessagePlugin.warning('已发货状态请填写物流单号'); return; }
     }
     if (editStep === 5) {
       const needReturnStatus = editForm.orderType === 'postRentalShip' || editForm.orderType === 'postRentalReturn';
@@ -679,13 +702,19 @@ export function Orders() {
       },
     },
     {
-      colKey: 'op', title: '操作', width: 140, fixed: 'right' as const,
+      colKey: 'op', title: '操作', width: 210, fixed: 'right' as const,
       cell: ({ row }: { row: OrderRecord }) => (
         <div className="flex gap-1">
           <Button variant="text" theme="primary" size="small"
             onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleDetail(row); }}>
             详情
           </Button>
+          {isExpressApplicableStatus(row.status) && (
+            <Button variant="text" theme="primary" size="small"
+              onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleApplyExpress(row); }}>
+              申请快递
+            </Button>
+          )}
           <Button variant="text" theme="primary" size="small"
             onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleEditOpen(row); }}>
             编辑
@@ -697,7 +726,7 @@ export function Orders() {
         </div>
       ),
     },
-  ], [handleDetail, handleEditOpen, handleDeleteConfirm]);
+  ], [handleDetail, handleApplyExpress, handleEditOpen, handleDeleteConfirm]);
 
   const displayRecords = orders.getPageRecords(orders.currentPage);
 
@@ -712,7 +741,15 @@ export function Orders() {
           <Button theme="primary" icon={<Plus size={16} />} onClick={handleAddOpen}>
             新增订单
           </Button>
-          <input ref={fileInputRef} type="file" accept=".xlsx,.xls" className="hidden" onChange={handleFileSelect} />
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".xlsx,.xls"
+            className="hidden"
+            title="导入订单 Excel"
+            aria-label="导入订单 Excel"
+            onChange={handleFileSelect}
+          />
           <Button theme="default" icon={<Upload size={16} />} onClick={() => fileInputRef.current?.click()}>
             导入Excel
           </Button>
@@ -798,20 +835,19 @@ export function Orders() {
             <DetailRow label="销售渠道" value={currentRecord.salesChannel} />
             <DetailRow label="人员" value={currentRecord.salesperson} />
             <DetailRow label="渠道类别" value={currentRecord.channelCategory} />
-            <DetailRow label="网店订单号" value={currentRecord.onlineOrderNumber} />
-            <DetailRow label="客户名称" value={currentRecord.customerName} />
+            {currentRecord.channelCategory === 'platform' && <DetailRow label="网店订单号" value={currentRecord.onlineOrderNumber} />}
             <DetailRow label="品牌" value={getBrandLabel(currentRecord.brand)} />
             <DetailRow label="货品名称" value={getProductLabel(currentRecord.productName)} />
             <DetailRow label="规格" value={currentRecord.specification} />
             <DetailRow label="数量" value={currentRecord.quantity} />
-            <DetailRow label="单价" value={currentRecord.unitPrice ? `¥${currentRecord.unitPrice}` : '-'} />
-            <DetailRow label="金额" value={currentRecord.amount ? `¥${currentRecord.amount}` : '-'} />
-            <DetailRow label="收款账户" value={currentRecord.paymentAccount} />
+            {!(currentRecord.orderAttribute === 'rental1' && currentRecord.brand !== '虚拟产品') && <DetailRow label="单价" value={currentRecord.unitPrice ? `¥${currentRecord.unitPrice}` : '-'} />}
+            {!(currentRecord.orderAttribute === 'rental1' && currentRecord.brand !== '虚拟产品') && <DetailRow label="金额" value={currentRecord.amount ? `¥${currentRecord.amount}` : '-'} />}
+            {!(currentRecord.orderAttribute === 'rental1' && currentRecord.brand !== '虚拟产品') && <DetailRow label="收款账户" value={currentRecord.paymentAccount} />}
             <DetailRow label="收货人名称" value={currentRecord.consignee} />
             <DetailRow label="收货人电话" value={currentRecord.consigneePhone} />
             <DetailRow label="收货人地址" value={currentRecord.consigneeAddress} />
-            <DetailRow label="邮寄结算方式" value={getDictLabel(SHIPPING_FEE_MAP, currentRecord.shippingFee)} />
-            <DetailRow label="物流单号" value={currentRecord.trackingNumber} />
+            {currentRecord.status === 'shipped' && <DetailRow label="邮寄结算方式" value={getDictLabel(SHIPPING_FEE_MAP, currentRecord.shippingFee)} />}
+            {currentRecord.status === 'shipped' && <DetailRow label="物流单号" value={currentRecord.trackingNumber} />}
             <DetailRow label="订单状态" value={
               <Tag theme={STATUS_TAG_THEME[currentRecord.status] || 'default'} variant="light">
                 {getDictLabel(ORDER_STATUS_MAP, currentRecord.status) || '--'}
@@ -1212,8 +1248,8 @@ function AddOrderWizard({
     for (const p of form.products) {
       if (p.brand && !cache[p.brand]) {
         let products = getProductsByBrand(p.brand);
-        // 虚拟产品/无 品牌下根据订单类型过滤
-        if ((p.brand === '虚拟产品' || p.brand === '无') && form.orderType && ORDER_TYPE_VIRTUAL_PRODUCTS[form.orderType]) {
+        // 虚拟产品/无 品牌下根据订单类型过滤（仅租赁1生效）
+        if ((p.brand === '虚拟产品' || p.brand === '无') && form.orderAttribute === 'rental1' && form.orderType && ORDER_TYPE_VIRTUAL_PRODUCTS[form.orderType]) {
           const allowed = new Set(ORDER_TYPE_VIRTUAL_PRODUCTS[form.orderType]!);
           products = products.filter(name => allowed.has(name));
         }
@@ -1221,7 +1257,7 @@ function AddOrderWizard({
       }
     }
     return cache;
-  }, [form.products.map(p => p.brand).join(','), form.orderType]);
+  }, [form.products.map(p => p.brand).join(','), form.orderType, form.orderAttribute]);
   const specOptionsMap = useMemo(() => {
     const cache: Record<string, { label: string; value: string }[]> = {};
     for (const p of form.products) {
@@ -1329,8 +1365,8 @@ function AddOrderWizard({
             </div>
             <div>
               <label className="block text-xs text-gray-500 mb-1">客户名称 <span className="text-red-500">*</span></label>
-              <input type="text" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500" placeholder="请输入客户名称"
-                value={form.customerName} onChange={e => updateField('customerName', e.target.value)} />
+              <Input placeholder="请输入客户名称"
+                value={form.customerName} onChange={val => updateField('customerName', val as string)} />
             </div>
             <div>
               <label className="block text-xs text-gray-500 mb-1">销售人员 <span className="text-red-500">*</span></label>
@@ -1345,11 +1381,6 @@ function AddOrderWizard({
         <div className="py-4">
           <h4 className="text-sm font-medium text-gray-600 mb-4">填写订单属性</h4>
           <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">网店订单号{form.channelCategory === 'platform' && <span className="text-red-500"> *</span>}</label>
-              <input type="text" className={`w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500 ${form.channelCategory !== 'platform' ? 'bg-gray-100 cursor-not-allowed' : ''}`} placeholder={form.channelCategory === 'platform' ? '请填写网店订单号' : '线下渠道无需填写'}
-                value={form.onlineOrderNumber} onChange={e => updateField('onlineOrderNumber', e.target.value)} disabled={form.channelCategory !== 'platform'} />
-            </div>
             <div>
               <label className="block text-xs text-gray-500 mb-1">订单来源 <span className="text-red-500">*</span></label>
               <Select placeholder="请选择" value={form.orderSource || ''} onChange={val => {
@@ -1377,8 +1408,8 @@ function AddOrderWizard({
                 const newType = val as string;
                 onChange(prev => {
                   const updated = { ...prev, orderType: newType };
-                  // 如果当前有虚拟产品/无品牌的货品，且货品名称不在新订单类型白名单内，清空选择
-                  if (newType && ORDER_TYPE_VIRTUAL_PRODUCTS[newType]) {
+                  // 如果当前有虚拟产品/无品牌的货品，且货品名称不在新订单类型白名单内，清空选择（仅租赁1生效）
+                  if (newType && prev.orderAttribute === 'rental1' && ORDER_TYPE_VIRTUAL_PRODUCTS[newType]) {
                     const allowed = new Set(ORDER_TYPE_VIRTUAL_PRODUCTS[newType]!);
                     updated.products = prev.products.map(p => {
                       if ((p.brand === '虚拟产品' || p.brand === '无') && p.productName && !allowed.has(p.productName)) {
@@ -1405,6 +1436,13 @@ function AddOrderWizard({
               <label className="block text-xs text-gray-500 mb-1">渠道类别</label>
               <Input value={form.channelCategory ? (CHANNEL_CATEGORY_MAP as Record<string, string>)[form.channelCategory] || form.channelCategory : ''} readOnly className="bg-gray-50" />
             </div>
+            {form.channelCategory === 'platform' && (
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">网店订单号 <span className="text-red-500">*</span></label>
+                <Input placeholder="请填写网店订单号"
+                  value={form.onlineOrderNumber} onChange={val => updateField('onlineOrderNumber', val as string)} />
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1432,37 +1470,43 @@ function AddOrderWizard({
                     options={BRAND_OPTIONS} filterable />
                 </div>
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1">货品名称</label>
+                  <label className="block text-xs text-gray-500 mb-1">货品名称 <span className="text-red-500">*</span></label>
                   <Select placeholder="请先选择品牌" value={product.productName || ''}
                     onChange={val => updateProduct(idx, { productName: val as string, specification: '' })}
                     options={productOptionsMap[product.brand] || [PLACEHOLDER_OPTION]} filterable />
                 </div>
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1">规格</label>
+                  <label className="block text-xs text-gray-500 mb-1">规格 <span className="text-red-500">*</span></label>
                   <Select placeholder="请先选择货品" value={product.specification || ''}
                     onChange={val => updateProduct(idx, { specification: val as string })}
                     options={specOptionsMap[`${product.brand}|${product.productName}`] || [PLACEHOLDER_OPTION]} />
                 </div>
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1">数量</label>
-                  <input type="number" min="0" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500" placeholder="数量"
-                    value={product.quantity || ''} onChange={e => { const q = Math.max(0, Number(e.target.value)); updateProduct(idx, { quantity: q, amount: q * product.unitPrice }); }} />
+                  <label className="block text-xs text-gray-500 mb-1">数量 <span className="text-red-500">*</span></label>
+                  <Input type="number" placeholder="数量"
+                    value={product.quantity ? String(product.quantity) : ''} onChange={val => { const q = Math.max(0, Number(val)); updateProduct(idx, { quantity: q, amount: q * product.unitPrice }); }} />
                 </div>
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">单价</label>
-                  <input type="number" min="0" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500" placeholder="单价"
-                    value={product.unitPrice || ''} onChange={e => { const p = Math.max(0, Number(e.target.value)); updateProduct(idx, { unitPrice: p, amount: product.quantity * p }); }} />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">金额</label>
-                  <input type="number" min="0" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500 bg-gray-50" placeholder="自动计算"
-                    value={product.amount || ''} readOnly />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">收款账户{product.amount > 0 && <span className="text-red-500"> *</span>}</label>
-                  <Select placeholder="请选择" value={product.paymentAccount || ''}
-                    onChange={val => updateProduct(idx, { paymentAccount: val as string })} options={PAYMENT_ACCOUNT_OPTIONS} />
-                </div>
+                {!(form.orderAttribute === 'rental1' && product.brand !== '虚拟产品') && (
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">单价 <span className="text-red-500">*</span></label>
+                    <Input type="number" placeholder="单价"
+                      value={product.unitPrice ? String(product.unitPrice) : ''} onChange={val => { const p = Math.max(0, Number(val)); updateProduct(idx, { unitPrice: p, amount: product.quantity * p }); }} />
+                  </div>
+                )}
+                {!(form.orderAttribute === 'rental1' && product.brand !== '虚拟产品') && (
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">金额</label>
+                    <Input type="number" placeholder="自动计算"
+                      value={product.amount ? String(product.amount) : ''} readOnly />
+                  </div>
+                )}
+                {!(form.orderAttribute === 'rental1' && product.brand !== '虚拟产品') && (
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">收款账户 <span className="text-red-500">*</span></label>
+                    <Select placeholder="请选择" value={product.paymentAccount || ''}
+                      onChange={val => updateProduct(idx, { paymentAccount: val as string })} options={PAYMENT_ACCOUNT_OPTIONS} />
+                  </div>
+                )}
               </div>
             </div>
           ))}
@@ -1490,26 +1534,26 @@ function AddOrderWizard({
                         options={BRAND_OPTIONS} filterable />
                     </div>
                     <div>
-                      <label className="block text-xs text-gray-500 mb-1">货品名称</label>
+                      <label className="block text-xs text-gray-500 mb-1">货品名称 <span className="text-red-500">*</span></label>
                       <Select placeholder="请先选择品牌" value={tp.productName || ''}
                         onChange={val => updateTransferProduct(tIdx, { productName: val as string, specification: '' })}
                         options={transferProductOptionsMap[tp.brand] || [PLACEHOLDER_OPTION]} filterable />
                     </div>
                     <div>
-                      <label className="block text-xs text-gray-500 mb-1">规格</label>
+                      <label className="block text-xs text-gray-500 mb-1">规格 <span className="text-red-500">*</span></label>
                       <Select placeholder="请先选择货品" value={tp.specification || ''}
                         onChange={val => updateTransferProduct(tIdx, { specification: val as string })}
                         options={transferSpecOptionsMap[`${tp.brand}|${tp.productName}`] || [PLACEHOLDER_OPTION]} />
                     </div>
                     <div>
-                      <label className="block text-xs text-gray-500 mb-1">已交租期</label>
-                      <input type="number" min="0" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500" placeholder="已交租期"
-                        value={tp.paidPeriod || ''} onChange={e => updateTransferProduct(tIdx, { paidPeriod: Math.max(0, Number(e.target.value)) })} />
+                      <label className="block text-xs text-gray-500 mb-1">已交租期 <span className="text-red-500">*</span></label>
+                      <Input type="number" placeholder="已交租期"
+                        value={tp.paidPeriod ? String(tp.paidPeriod) : ''} onChange={val => updateTransferProduct(tIdx, { paidPeriod: Math.max(0, Number(val)) })} />
                     </div>
                     <div>
-                      <label className="block text-xs text-gray-500 mb-1">已交租金</label>
-                      <input type="number" min="0" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500" placeholder="已交租金"
-                        value={tp.paidRent || ''} onChange={e => updateTransferProduct(tIdx, { paidRent: Math.max(0, Number(e.target.value)) })} />
+                      <label className="block text-xs text-gray-500 mb-1">已交租金 <span className="text-red-500">*</span></label>
+                      <Input type="number" placeholder="已交租金"
+                        value={tp.paidRent ? String(tp.paidRent) : ''} onChange={val => updateTransferProduct(tIdx, { paidRent: Math.max(0, Number(val)) })} />
                     </div>
                   </div>
                 </div>
@@ -1537,32 +1581,44 @@ function AddOrderWizard({
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="block text-xs text-gray-500 mb-1">收货人名称</label>
-              <input type="text" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500" placeholder="收货人名称"
-                value={form.consignee} onChange={e => updateField('consignee', e.target.value)} />
+              <Input placeholder="收货人名称"
+                value={form.consignee} onChange={val => updateField('consignee', val as string)} />
             </div>
             <div>
               <label className="block text-xs text-gray-500 mb-1">收货人电话</label>
-              <input type="text" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500" placeholder="收货人电话"
-                value={form.consigneePhone} onChange={e => updateField('consigneePhone', e.target.value)} />
+              <Input placeholder="收货人电话"
+                value={form.consigneePhone} onChange={val => updateField('consigneePhone', val as string)} />
             </div>
             <div className="col-span-2">
               <label className="block text-xs text-gray-500 mb-1">收货人地址</label>
-              <input type="text" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500" placeholder="收货人地址"
-                value={form.consigneeAddress} onChange={e => updateField('consigneeAddress', e.target.value)} />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">邮寄结算方式 <span className="text-red-500">*</span></label>
-              <Select placeholder="请选择" value={form.shippingFee || ''} onChange={val => updateField('shippingFee', val as string)} options={SHIPPING_FEE_OPTIONS} />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">物流单号</label>
-              <input type="text" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500" placeholder="物流单号"
-                value={form.trackingNumber} onChange={e => updateField('trackingNumber', e.target.value)} />
+              <Input placeholder="收货人地址"
+                value={form.consigneeAddress} onChange={val => updateField('consigneeAddress', val as string)} />
             </div>
             <div>
               <label className="block text-xs text-gray-500 mb-1">订单状态</label>
-              <Select placeholder="请选择" value={form.status || ''} onChange={val => updateField('status', val as string)} options={ORDER_STATUS_OPTIONS} />
+              <Select placeholder="请选择" value={form.status || ''} onChange={val => {
+                const newStatus = val as string;
+                onChange(prev => ({
+                  ...prev,
+                  status: newStatus,
+                  shippingFee: newStatus === 'shipped' ? prev.shippingFee : '',
+                  trackingNumber: newStatus === 'shipped' ? prev.trackingNumber : '',
+                }));
+              }} options={ORDER_STATUS_OPTIONS} />
             </div>
+            {form.status === 'shipped' && (
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">邮寄结算方式 <span className="text-red-500">*</span></label>
+                <Select placeholder="请选择" value={form.shippingFee || ''} onChange={val => updateField('shippingFee', val as string)} options={SHIPPING_FEE_OPTIONS} />
+              </div>
+            )}
+            {form.status === 'shipped' && (
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">物流单号 <span className="text-red-500">*</span></label>
+                <Input placeholder="物流单号"
+                  value={form.trackingNumber} onChange={val => updateField('trackingNumber', val as string)} />
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1593,10 +1649,9 @@ function AddOrderWizard({
                 {form.returnStatus === 'inTransit' && (
                   <div>
                     <label className="block text-xs text-gray-500 mb-1">归还物流单号 <span className="text-red-500">*</span></label>
-                    <input type="text" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500"
-                      placeholder="多个单号请用逗号或空格分隔，如：SF1234567890, YT9876543210"
+                    <Input placeholder="多个单号请用逗号或空格分隔，如：SF1234567890, YT9876543210"
                       value={form.returnTrackingNumbers}
-                      onChange={e => updateField('returnTrackingNumbers', e.target.value)} />
+                      onChange={val => updateField('returnTrackingNumbers', val as string)} />
                     <p className="text-xs text-gray-400 mt-1">多个单号请用逗号或空格分隔</p>
                   </div>
                 )}
@@ -1627,6 +1682,8 @@ function AddOrderWizard({
             <h4 className="text-sm font-medium text-gray-600 mb-3">附件上传</h4>
             <div className="mb-3">
               <input ref={attachInputRef} type="file" multiple className="hidden"
+                title="上传订单附件"
+                aria-label="上传订单附件"
                 onChange={(e) => {
                   const files = e.target.files;
                   if (files) onAttachFilesChange(prev => [...prev, ...Array.from(files)]);
@@ -1669,18 +1726,18 @@ function AddOrderWizard({
               <PreviewItem label="销售人员" value={form.salesperson} />
             </PreviewSection>
             <PreviewSection title="订单属性">
-              <PreviewItem label="网店订单号" value={form.onlineOrderNumber} />
               <PreviewItem label="订单来源" value={getDictLabel(ORDER_SOURCE_MAP, form.orderSource)} />
               <PreviewItem label="订单属性" value={getDictLabel(ORDER_ATTRIBUTE_MAP, form.orderAttribute)} />
               <PreviewItem label="订单类型" value={getDictLabel(ORDER_TYPE_MAP, form.orderType)} />
               <PreviewItem label="销售渠道" value={getDictLabel(SALES_CHANNEL_MAP, form.salesChannel)} />
               <PreviewItem label="渠道类别" value={getDictLabel(CHANNEL_CATEGORY_MAP, form.channelCategory)} />
+              {form.channelCategory === 'platform' && <PreviewItem label="网店订单号" value={form.onlineOrderNumber} />}
             </PreviewSection>
             <PreviewSection title="货品信息">
               {form.products.map((p, i) => (
                 <div key={i} className="text-xs text-gray-600 ml-2 border-l-2 border-blue-200 pl-2 mb-1">
                   货品{i + 1}：{p.brand ? getBrandLabel(p.brand) : '-'} / {p.productName ? getProductLabel(p.productName) : '-'} / {p.specification || '-'}，
-                  数量 {p.quantity || 0}，单价 ¥{p.unitPrice || 0}，金额 ¥{p.amount || 0}，收款账户 {p.paymentAccount || '-'}
+                  数量 {p.quantity || 0}{!(form.orderAttribute === 'rental1' && p.brand !== '虚拟产品') ? `，单价 ¥${p.unitPrice || 0}，金额 ¥${p.amount || 0}，收款账户 ${p.paymentAccount || '-'}` : ''}
                 </div>
               ))}
             </PreviewSection>
@@ -1699,8 +1756,8 @@ function AddOrderWizard({
               <PreviewItem label="收货人名称" value={form.consignee} />
               <PreviewItem label="收货人电话" value={form.consigneePhone} />
               <PreviewItem label="收货人地址" value={form.consigneeAddress} />
-              <PreviewItem label="邮寄结算方式" value={getDictLabel(SHIPPING_FEE_MAP, form.shippingFee)} />
-              <PreviewItem label="物流单号" value={form.trackingNumber} />
+              {form.status === 'shipped' && <PreviewItem label="邮寄结算方式" value={getDictLabel(SHIPPING_FEE_MAP, form.shippingFee)} />}
+              {form.status === 'shipped' && <PreviewItem label="物流单号" value={form.trackingNumber} />}
               <PreviewItem label="订单状态" value={getDictLabel(ORDER_STATUS_MAP, form.status)} />
             </PreviewSection>
             {showReturnStatus && form.returnStatus && (

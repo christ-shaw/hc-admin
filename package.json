@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:sf-token": "node --test cloud_functions/sendWechatNotification/functions/getSfAccessToken/index.test.cjs"
   },
   "dependencies": {
     "@cloudbase/js-sdk": "^2.28.5",

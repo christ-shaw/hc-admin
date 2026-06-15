@@ -48,6 +48,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
   const navigate = useNavigate();
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(false);
+  const sidebarToggleLabel = collapsed ? '展开侧边栏' : '收起侧边栏';
   const [expandedMenus, setExpandedMenus] = useState<string[]>(['发票']);
   const [currentUser, setCurrentUser] = useState<{ id?: string; user_metadata?: { username?: string; nickName?: string } } | null>(null);
   const [pendingCount, setPendingCount] = useState(0);
@@ -197,6 +198,8 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
           <button
             onClick={() => setCollapsed(!collapsed)}
             className="text-gray-500 hover:text-primary"
+            title={sidebarToggleLabel}
+            aria-label={sidebarToggleLabel}
           >
             {collapsed ? <PanelLeftOpen size={20} /> : <PanelLeftClose size={20} />}
           </button>

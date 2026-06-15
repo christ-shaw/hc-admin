@@ -14,6 +14,47 @@ const app = cloudbase.init({
 export { app };
 export const auth = app.auth({ persistence: 'local' });
 
+/** ========== AI 模型动态配置 ========== */
+
+/** 可用的 AI 模型选项 */
+export const AI_MODEL_OPTIONS = [
+  { group: 'custom-deepseek', model: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
+  { group: 'hunyuan-v3', model: 'hy3-preview', label: '混元 3.0' }
+] as const;
+
+export type AIModelConfig = typeof AI_MODEL_OPTIONS[number];
+
+const AI_MODEL_STORAGE_KEY = 'hc_admin_ai_model';
+
+/** 获取当前 AI 模型配置 */
+export function getAIModelConfig(): AIModelConfig {
+  try {
+    const saved = localStorage.getItem(AI_MODEL_STORAGE_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      const match = AI_MODEL_OPTIONS.find(o => o.group === parsed.group && o.model === parsed.model);
+      if (match) return match;
+    }
+  } catch { /* ignore */ }
+  return AI_MODEL_OPTIONS[0]; // 默认 custom-deepseek / deepseek-v4-flash
+}
+
+/** 保存 AI 模型配置 */
+export function setAIModelConfig(config: AIModelConfig): void {
+  localStorage.setItem(AI_MODEL_STORAGE_KEY, JSON.stringify({ group: config.group, model: config.model }));
+}
+
+/** 创建当前配置的 AI 模型实例 */
+export function createCurrentAIModel() {
+  const config = getAIModelConfig();
+  return app.ai().createModel(config.group);
+}
+
+/** 获取当前模型 ID */
+export function getCurrentModelId(): string {
+  return getAIModelConfig().model;
+}
+
 /** 获取当前登录会话，未登录返回 null */
 export async function getSession() {
   const { data } = await auth.getSession();
@@ -111,8 +152,8 @@ export async function uploadToCloudStorage(cloudPath: string, file: File): Promi
 /** AI 智能解析收件人信息（姓名、电话、地址） */
 export async function parseConsigneeInfo(text: string): Promise<{ name: string; phone: string; address: string } | null> {
   try {
-    const res = await app.ai().createModel('hunyuan-v3').streamText({
-      model: 'hy3-preview',
+    const res = await createCurrentAIModel().streamText({
+      model: getCurrentModelId(),
       messages: [
         {
           role: 'system',
@@ -142,6 +183,7 @@ export async function parseConsigneeInfo(text: string): Promise<{ name: string; 
     }
     return null;
   } catch (err: unknown) {
+    console.error('[parseConsigneeInfo] AI 调用失败，完整错误:', err);
     const msg = err instanceof Error ? err.message : String(err || '');
     if (msg.includes('not found') || msg.includes('not enabled') || msg.includes('未开通')) {
       throw new Error('AI 模型未启用，请在 CloudBase 控制台开启 AI 模型服务：https://tcb.cloud.tencent.com/dev?envId=cloud1-8gvbotkt966e5e19#/ai');
@@ -161,8 +203,8 @@ export async function parseCompanyInfo(text: string): Promise<{
   bankCode: string;
 } | null> {
   try {
-    const res = await app.ai().createModel('hunyuan-v3').streamText({
-      model: 'hy3-preview',
+    const res = await createCurrentAIModel().streamText({
+      model: getCurrentModelId(),
       messages: [
         {
           role: 'system',
@@ -196,6 +238,7 @@ export async function parseCompanyInfo(text: string): Promise<{
     }
     return null;
   } catch (err: unknown) {
+    console.error('[parseCompanyInfo] AI 调用失败，完整错误:', err);
     const msg = err instanceof Error ? err.message : String(err || '');
     if (msg.includes('not found') || msg.includes('not enabled') || msg.includes('未开通')) {
       throw new Error('AI 模型未启用，请在 CloudBase 控制台开启 AI 模型服务：https://tcb.cloud.tencent.com/dev?envId=cloud1-8gvbotkt966e5e19#/ai');
@@ -206,11 +249,33 @@ export async function parseCompanyInfo(text: string): Promise<{
 
 /** 获取云存储文件的临时访问链接 */
 export async function getCloudFileURLs(fileIDs: string[]): Promise<Array<{ fileID: string; tempFileURL: string }>> {
+  const validFileIDs = fileIDs.filter(Boolean);
+  const uniqueFileIDs = Array.from(new Set(validFileIDs));
+  if (uniqueFileIDs.length === 0) return [];
+
+  try {
+    const result = await callFunction<{
+      success?: boolean;
+      fileList?: Array<{ fileID: string; tempFileURL?: string }>;
+    }>('getCloudFileUrls', { data: { fileIDs: uniqueFileIDs } });
+
+    if (result.success && Array.isArray(result.fileList)) {
+      const urlMap = new Map(result.fileList.map(item => [item.fileID, item.tempFileURL || '']));
+      return validFileIDs.map(fileID => ({
+        fileID,
+        tempFileURL: urlMap.get(fileID) || '',
+      }));
+    }
+  } catch (err) {
+    console.warn('[getCloudFileURLs] 云函数获取临时链接失败，尝试前端 SDK:', err);
+  }
+
   const result = await app.getTempFileURL({
-    fileList: fileIDs,
+    fileList: uniqueFileIDs,
   });
-  return (result.fileList || []).map((item: any) => ({
-    fileID: item.fileID,
-    tempFileURL: item.tempFileURL || '',
+  const urlMap = new Map((result.fileList || []).map((item: any) => [item.fileID, item.tempFileURL || '']));
+  return validFileIDs.map(fileID => ({
+    fileID,
+    tempFileURL: String(urlMap.get(fileID) || ''),
   }));
 }
