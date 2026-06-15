@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import { Table, Button, Input, Select, Tag, Dialog, MessagePlugin, Textarea } from 'tdesign-react';
 import { Search, RotateCcw, Upload, Download, Plus, Pencil, Trash2, Minus, X, ChevronRight, ChevronLeft, FileDown, Check } from 'lucide-react';
-import { OrderRecord, OrderFilters, ORDER_TYPE_MAP, ORDER_SOURCE_MAP, ORDER_ATTRIBUTE_MAP, SALES_CHANNEL_MAP, ORDER_STATUS_MAP, CHANNEL_CATEGORY_MAP, SHIPPING_FEE_MAP, ProductItem, TransferProductItem, OrderAttachment, dictToOptions, getDictLabel } from '../types';
+import { OrderRecord, OrderFilters, OutboundRecord, ORDER_TYPE_MAP, ORDER_SOURCE_MAP, ORDER_ATTRIBUTE_MAP, SALES_CHANNEL_MAP, ORDER_STATUS_MAP, CHANNEL_CATEGORY_MAP, SHIPPING_FEE_MAP, ProductItem, TransferProductItem, OrderAttachment, dictToOptions, getDictLabel } from '../types';
 import { useOrders } from '../hooks/useOrders';
 import { formatDate } from '../utils/format';
 import { parseOrderExcel, exportOrderExcel } from '../utils/orderExcel';
@@ -52,8 +52,13 @@ const PAYMENT_ACCOUNT_OPTIONS = [PLACEHOLDER_OPTION, ...PAYMENT_ACCOUNTS.map(v =
 const ORDER_STATUS_OPTIONS = dictToOptions(ORDER_STATUS_MAP);
 
 const SHIPPING_FEE_OPTIONS = [PLACEHOLDER_OPTION, ...dictToOptions(SHIPPING_FEE_MAP)];
+const SHIP_CONFIRM_SHIPPING_FEE_OPTIONS = [
+  { label: '包邮', value: 'prepaid' },
+  { label: '到付', value: 'cod' },
+];
 const BRAND_OPTIONS = [PLACEHOLDER_OPTION, ...BRANDS.map(v => ({ label: getBrandLabel(v), value: v }))];
 const FILTER_SALESPERSON_OPTIONS = [{ label: '全部', value: '' }, ...SALESPERSONS.map(v => ({ label: v, value: v }))];
+const FILTER_ORDER_STATUS_OPTIONS = [{ label: '全部', value: '' }, ...dictToOptions(ORDER_STATUS_MAP)];
 
 /** 货品条目默认值 */
 const EMPTY_PRODUCT: ProductItem = {
@@ -131,8 +136,63 @@ const STATUS_TAG_THEME: Record<string, 'success' | 'warning' | 'danger' | 'defau
   unknown: 'default',
 };
 
-function isExpressApplicableStatus(status: string | undefined): boolean {
+function isPendingShipmentStatus(status: string | undefined): boolean {
   return status === 'unknown' || status === '--';
+}
+
+function isExpressApplicableStatus(status: string | undefined): boolean {
+  return isPendingShipmentStatus(status);
+}
+
+function buildEditFormFromRecord(record: OrderRecord): OrderFormData {
+  let transferProducts: TransferProductItem[] = [];
+  if (record.transferItems) {
+    try {
+      transferProducts = JSON.parse(record.transferItems);
+    } catch { /* ignore parse error */ }
+  }
+  if (transferProducts.length === 0 && (record.transferBrand || record.transferProductName)) {
+    transferProducts = [{
+      brand: record.transferBrand || '',
+      productName: record.transferProductName || '',
+      specification: record.transferSpecification || '',
+      paidPeriod: record.paidPeriod || 0,
+      paidRent: record.paidRent || 0,
+    }];
+  }
+
+  return {
+    serialNumber: record.serialNumber,
+    date: record.date,
+    orderSource: record.orderSource,
+    orderAttribute: record.orderAttribute,
+    orderType: record.orderType,
+    salesChannel: record.salesChannel,
+    salesperson: record.salesperson,
+    channelCategory: record.channelCategory,
+    onlineOrderNumber: record.onlineOrderNumber,
+    customerName: record.customerName,
+    trackingNumber: record.trackingNumber,
+    consignee: record.consignee,
+    consigneePhone: record.consigneePhone || '',
+    consigneeAddress: record.consigneeAddress || '',
+    shippingFee: record.shippingFee || '',
+    status: record.status,
+    customerRemark: record.customerRemark,
+    transferProducts,
+    products: [{
+      brand: record.brand,
+      productName: record.productName,
+      specification: record.specification,
+      quantity: record.quantity,
+      unitPrice: record.unitPrice,
+      amount: record.amount,
+      paymentAccount: record.paymentAccount,
+    }],
+    attachments: record.attachments || [],
+    returnStatus: record.returnStatus || '',
+    returnTrackingNumbers: record.returnTrackingNumbers || '',
+  };
 }
 
 export function Orders() {
@@ -151,6 +211,13 @@ export function Orders() {
   const [editVisible, setEditVisible] = useState(false);
   const [editForm, setEditForm] = useState<OrderFormData>(EMPTY_ORDER);
   const [editId, setEditId] = useState('');
+  const [shipDialogVisible, setShipDialogVisible] = useState(false);
+  const [shipTarget, setShipTarget] = useState<OrderRecord | null>(null);
+  const [shipRecords, setShipRecords] = useState<OutboundRecord[]>([]);
+  const [selectedShipRecord, setSelectedShipRecord] = useState<OutboundRecord | null>(null);
+  const [shipShippingFee, setShipShippingFee] = useState('prepaid');
+  const [shipLoading, setShipLoading] = useState(false);
+  const [shipUpdating, setShipUpdating] = useState(false);
   const [deleteConfirmVisible, setDeleteConfirmVisible] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<OrderRecord | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -483,57 +550,102 @@ export function Orders() {
     setEditId(record._id);
     setEditStep(1);
     setEditAttachFiles([]);
-    // 解析转租赁2多组数据：优先 transferItems JSON，回退到旧单字段
-    let transferProducts: TransferProductItem[] = [];
-    if (record.transferItems) {
-      try {
-        transferProducts = JSON.parse(record.transferItems);
-      } catch { /* ignore parse error */ }
-    }
-    if (transferProducts.length === 0 && (record.transferBrand || record.transferProductName)) {
-      transferProducts = [{
-        brand: record.transferBrand || '',
-        productName: record.transferProductName || '',
-        specification: record.transferSpecification || '',
-        paidPeriod: record.paidPeriod || 0,
-        paidRent: record.paidRent || 0,
-      }];
-    }
-
-    setEditForm({
-      serialNumber: record.serialNumber,
-      date: record.date,
-      orderSource: record.orderSource,
-      orderAttribute: record.orderAttribute,
-      orderType: record.orderType,
-      salesChannel: record.salesChannel,
-      salesperson: record.salesperson,
-      channelCategory: record.channelCategory,
-      onlineOrderNumber: record.onlineOrderNumber,
-      customerName: record.customerName,
-      trackingNumber: record.trackingNumber,
-      consignee: record.consignee,
-      consigneePhone: record.consigneePhone || '',
-      consigneeAddress: record.consigneeAddress || '',
-      shippingFee: record.shippingFee || '',
-      status: record.status,
-      customerRemark: record.customerRemark,
-      transferProducts,
-      products: [{
-        brand: record.brand,
-        productName: record.productName,
-        specification: record.specification,
-        quantity: record.quantity,
-        unitPrice: record.unitPrice,
-        amount: record.amount,
-        paymentAccount: record.paymentAccount,
-      }],
-      attachments: record.attachments || [],
-      returnStatus: record.returnStatus || '',
-      returnTrackingNumbers: record.returnTrackingNumbers || '',
-    });
+    setEditForm(buildEditFormFromRecord(record));
     setEditVisible(true);
   }, []);
+
+  const findOutboundRecords = useCallback(async (consignee: string) => {
+    const keyword = consignee.trim();
+    if (!keyword) return [];
+
+    const result = await callFunction<{ success?: boolean; data?: OutboundRecord[] }>('queryRecords', {
+      data: {
+        type: 'outbound',
+        customerName: keyword,
+        limit: 20,
+        cursor: null,
+      },
+    });
+
+    return (result.data || [])
+      .filter(item => item.trackingNumber)
+      .sort((a, b) => Number(b.customerName === keyword) - Number(a.customerName === keyword));
+  }, []);
+
+  const handleShipOpen = useCallback(async (record: OrderRecord) => {
+    if (!isPendingShipmentStatus(record.status)) {
+      MessagePlugin.warning('仅订单状态为 -- 的订单允许发货');
+      return;
+    }
+
+    const consignee = record.consignee || '';
+    if (!consignee.trim()) {
+      MessagePlugin.warning('订单缺少收货人名称，无法匹配发货记录');
+      return;
+    }
+
+    setShipTarget(record);
+    setShipRecords([]);
+    setShipDialogVisible(true);
+    setShipLoading(true);
+
+    try {
+      const records = await findOutboundRecords(consignee);
+      setShipRecords(records);
+      if (records.length === 0) {
+        MessagePlugin.warning(`未找到客户名称为「${consignee}」的发货记录快递单号`);
+      }
+    } catch (err) {
+      MessagePlugin.error('匹配发货记录失败: ' + String(err));
+    } finally {
+      setShipLoading(false);
+    }
+  }, [findOutboundRecords]);
+
+  const handleSelectShipRecord = useCallback((record: OutboundRecord) => {
+    if (!record.trackingNumber) {
+      MessagePlugin.warning('该发货记录没有快递单号');
+      return;
+    }
+    setShipShippingFee('prepaid');
+    setSelectedShipRecord(record);
+  }, []);
+
+  const handleConfirmShipRecord = useCallback(async () => {
+    if (!shipTarget || !selectedShipRecord) return;
+    if (!selectedShipRecord.trackingNumber) {
+      MessagePlugin.warning('该发货记录没有快递单号');
+      return;
+    }
+    if (!shipShippingFee) {
+      MessagePlugin.warning('请选择邮寄结算方式');
+      return;
+    }
+
+    setShipUpdating(true);
+    try {
+      const success = await orders.updateOrder(shipTarget._id, {
+        trackingNumber: selectedShipRecord.trackingNumber,
+        status: 'shipped',
+        shippingFee: shipShippingFee,
+      });
+
+      if (success) {
+        MessagePlugin.success('发货信息已更新');
+        setShipDialogVisible(false);
+        setShipTarget(null);
+        setShipRecords([]);
+        setSelectedShipRecord(null);
+        setShipShippingFee('prepaid');
+      } else {
+        MessagePlugin.error('更新订单发货信息失败');
+      }
+    } catch (err) {
+      MessagePlugin.error('更新订单发货信息异常: ' + String(err));
+    } finally {
+      setShipUpdating(false);
+    }
+  }, [orders, selectedShipRecord, shipShippingFee, shipTarget]);
 
   /** 编辑向导 — 下一步校验 */
   const handleEditNext = () => {
@@ -702,9 +814,9 @@ export function Orders() {
       },
     },
     {
-      colKey: 'op', title: '操作', width: 210, fixed: 'right' as const,
+      colKey: 'op', title: '操作', width: 240, fixed: 'right' as const,
       cell: ({ row }: { row: OrderRecord }) => (
-        <div className="flex gap-1">
+        <div className="flex gap-1 flex-wrap">
           <Button variant="text" theme="primary" size="small"
             onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleDetail(row); }}>
             详情
@@ -719,6 +831,12 @@ export function Orders() {
             onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleEditOpen(row); }}>
             编辑
           </Button>
+          {isPendingShipmentStatus(row.status) && (
+            <Button variant="text" theme="primary" size="small"
+              onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleShipOpen(row); }}>
+              发货
+            </Button>
+          )}
           <Button variant="text" theme="danger" size="small"
             onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleDeleteConfirm(row); }}>
             删除
@@ -726,7 +844,7 @@ export function Orders() {
         </div>
       ),
     },
-  ], [handleDetail, handleApplyExpress, handleEditOpen, handleDeleteConfirm]);
+  ], [handleDetail, handleApplyExpress, handleEditOpen, handleShipOpen, handleDeleteConfirm]);
 
   const displayRecords = orders.getPageRecords(orders.currentPage);
 
@@ -777,6 +895,18 @@ export function Orders() {
             <Select placeholder="请选择人员" value={filters.salesperson || ''}
               onChange={(val) => setFilters(prev => ({ ...prev, salesperson: val as string }))}
               options={FILTER_SALESPERSON_OPTIONS} />
+          </div>
+          <div className="w-40">
+            <label className="block text-xs text-gray-500 mb-1">订单类型</label>
+            <Select placeholder="请选择订单类型" value={filters.orderType || ''}
+              onChange={(val) => setFilters(prev => ({ ...prev, orderType: val as string }))}
+              options={ORDER_TYPE_OPTIONS} />
+          </div>
+          <div className="w-40">
+            <label className="block text-xs text-gray-500 mb-1">订单状态</label>
+            <Select placeholder="请选择订单状态" value={filters.status || ''}
+              onChange={(val) => setFilters(prev => ({ ...prev, status: val as string }))}
+              options={FILTER_ORDER_STATUS_OPTIONS} />
           </div>
           <div className="w-40">
             <label className="block text-xs text-gray-500 mb-1">日期</label>
@@ -894,6 +1024,85 @@ export function Orders() {
             })()}
           </div>
         )}
+      </Dialog>
+
+      {/* 发货记录匹配弹窗 */}
+      <Dialog
+        header="选择发货记录"
+        visible={shipDialogVisible}
+        onClose={() => { if (!shipUpdating) { setShipDialogVisible(false); setShipTarget(null); setShipRecords([]); setSelectedShipRecord(null); setShipShippingFee('prepaid'); } }}
+        width="560px"
+        footer={<Button disabled={shipUpdating} onClick={() => { setShipDialogVisible(false); setShipTarget(null); setShipRecords([]); setSelectedShipRecord(null); setShipShippingFee('prepaid'); }}>取消</Button>}
+      >
+        <div className="space-y-3">
+          <div className="text-sm text-gray-500">
+            根据收件人名称「<span className="font-medium text-gray-800">{shipTarget?.consignee || '-'}</span>」匹配发货记录
+          </div>
+          {shipLoading ? (
+            <div className="py-8 text-center text-gray-400">正在查询发货记录...</div>
+          ) : shipRecords.length === 0 ? (
+            <div className="py-8 text-center text-gray-400">未找到可用的发货记录</div>
+          ) : (
+            <div className="max-h-[420px] overflow-auto space-y-2">
+              {shipRecords.map((record, index) => (
+                <button
+                  key={record._id || index}
+                  type="button"
+                  className="w-full text-left border border-gray-200 rounded-lg p-3 hover:border-blue-400 hover:bg-blue-50/40 disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={shipUpdating}
+                  onClick={() => handleSelectShipRecord(record)}
+                >
+                  <div className="text-sm text-gray-800">
+                    <span className="text-gray-400">发货时间：</span>{formatDate(record.outboundDate, false) || '-'}
+                  </div>
+                  <div className="text-sm text-gray-800 mt-1">
+                    <span className="text-gray-400">客户名称：</span>{record.customerName || '-'}
+                  </div>
+                  <div className="text-sm text-gray-800 mt-1">
+                    <span className="text-gray-400">发货单号：</span>{record.trackingNumber || '-'}
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </Dialog>
+
+      {/* 发货确认弹窗 */}
+      <Dialog
+        header="确认发货"
+        visible={!!selectedShipRecord}
+        onClose={() => { if (!shipUpdating) setSelectedShipRecord(null); }}
+        width="460px"
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button disabled={shipUpdating} onClick={() => setSelectedShipRecord(null)}>取消</Button>
+            <Button theme="primary" loading={shipUpdating} onClick={handleConfirmShipRecord}>确认发货</Button>
+          </div>
+        }
+      >
+        <div className="space-y-3 text-sm">
+          <p className="text-gray-600">确认使用以下发货记录更新订单吗？</p>
+          <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 space-y-2">
+            <div><span className="text-gray-400">订单客户：</span><span className="text-gray-800">{shipTarget?.customerName || '-'}</span></div>
+            <div><span className="text-gray-400">收件人：</span><span className="text-gray-800">{shipTarget?.consignee || '-'}</span></div>
+            <div><span className="text-gray-400">发货时间：</span><span className="text-gray-800">{selectedShipRecord ? formatDate(selectedShipRecord.outboundDate, false) : '-'}</span></div>
+            <div><span className="text-gray-400">发货客户：</span><span className="text-gray-800">{selectedShipRecord?.customerName || '-'}</span></div>
+            <div><span className="text-gray-400">快递单号：</span><span className="font-medium text-gray-900">{selectedShipRecord?.trackingNumber || '-'}</span></div>
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">邮寄结算方式 <span className="text-red-500">*</span></label>
+            <Select
+              placeholder="请选择邮寄结算方式"
+              value={shipShippingFee}
+              onChange={val => setShipShippingFee(val as string)}
+              options={SHIP_CONFIRM_SHIPPING_FEE_OPTIONS}
+            />
+          </div>
+          <div className="rounded-lg border border-blue-100 bg-blue-50/60 p-3 text-blue-700">
+            确认后将订单状态改为“已发货”，邮寄结算方式设为“{getDictLabel(SHIPPING_FEE_MAP, shipShippingFee)}”，并写入该快递单号。
+          </div>
+        </div>
       </Dialog>
 
       {/* 导入预览弹窗 */}
