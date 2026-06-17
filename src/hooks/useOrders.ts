@@ -16,6 +16,22 @@ interface SaveResult {
   errMsg?: string;
 }
 
+interface ApplyExpressResult {
+  success: boolean;
+  env?: string;
+  orderId?: string;
+  sfOrderId?: string;
+  waybillNo?: string;
+  errMsg?: string;
+  errorCode?: string;
+}
+
+type QuerySfOrderResult = ApplyExpressResult;
+
+interface CancelSfExpressResult extends ApplyExpressResult {
+  resStatus?: string | number;
+}
+
 interface OrderState {
   records: OrderRecord[];
   cursor: string | null;
@@ -137,6 +153,139 @@ export function useOrders() {
     }
   }, []);
 
+  /** 申请顺丰快递单 */
+  const applySfExpress = useCallback(async (_id: string): Promise<ApplyExpressResult> => {
+    try {
+      const result = await callFunction<ApplyExpressResult>('applySfExpress', {
+        data: { orderId: _id },
+      });
+
+      if (result.success) {
+        setState(prev => ({
+          ...prev,
+          records: prev.records.map(r => r._id === _id ? {
+            ...r,
+            status: 'shipped',
+            trackingNumber: result.waybillNo || r.trackingNumber,
+            shippingFee: r.shippingFee || 'prepaid',
+            expressProvider: 'sf',
+            sfEnv: result.env || r.sfEnv,
+            expressApplyStatus: 'applied',
+            expressApplyTime: new Date().toISOString(),
+            expressErrorMsg: '',
+            sfOrderId: result.sfOrderId || r.sfOrderId,
+            sfWaybillNo: result.waybillNo || r.sfWaybillNo,
+          } : r),
+        }));
+      } else {
+        setState(prev => ({
+          ...prev,
+          records: prev.records.map(r => r._id === _id ? {
+            ...r,
+            expressProvider: 'sf',
+            sfEnv: result.env || r.sfEnv,
+            expressApplyStatus: 'failed',
+            expressErrorMsg: result.errMsg || '申请快递失败',
+          } : r),
+        }));
+      }
+
+      return result;
+    } catch (err) {
+      console.error('申请顺丰快递失败:', err);
+      return { success: false, errMsg: String(err) };
+    }
+  }, []);
+
+  /** 查询顺丰下单结果 */
+  const querySfOrderResult = useCallback(async (_id: string): Promise<QuerySfOrderResult> => {
+    try {
+      const result = await callFunction<QuerySfOrderResult>('querySfOrderResult', {
+        data: { orderId: _id },
+      });
+
+      if (result.success) {
+        setState(prev => ({
+          ...prev,
+          records: prev.records.map(r => r._id === _id ? {
+            ...r,
+            status: 'shipped',
+            trackingNumber: result.waybillNo || r.trackingNumber,
+            shippingFee: r.shippingFee || 'prepaid',
+            expressProvider: 'sf',
+            sfEnv: result.env || r.sfEnv,
+            expressApplyStatus: 'applied',
+            expressApplyTime: new Date().toISOString(),
+            expressErrorMsg: '',
+            sfOrderId: result.sfOrderId || r.sfOrderId,
+            sfWaybillNo: result.waybillNo || r.sfWaybillNo,
+          } : r),
+        }));
+      } else {
+        setState(prev => ({
+          ...prev,
+          records: prev.records.map(r => r._id === _id ? {
+            ...r,
+            expressProvider: 'sf',
+            sfEnv: result.env || r.sfEnv,
+            expressApplyStatus: 'failed',
+            expressErrorMsg: result.errMsg || '查询顺丰下单结果失败',
+            sfOrderId: result.sfOrderId || r.sfOrderId,
+          } : r),
+        }));
+      }
+
+      return result;
+    } catch (err) {
+      console.error('查询顺丰下单结果失败:', err);
+      return { success: false, errMsg: String(err) };
+    }
+  }, []);
+
+  /** 取消顺丰发货 */
+  const cancelSfExpress = useCallback(async (_id: string): Promise<CancelSfExpressResult> => {
+    try {
+      const result = await callFunction<CancelSfExpressResult>('cancelSfExpress', {
+        data: { orderId: _id },
+      });
+
+      if (result.success) {
+        setState(prev => ({
+          ...prev,
+          records: prev.records.map(r => r._id === _id ? {
+            ...r,
+            status: 'unknown',
+            trackingNumber: '',
+            shippingFee: '',
+            expressProvider: 'sf',
+            sfEnv: result.env || r.sfEnv,
+            expressApplyStatus: 'cancelled',
+            expressCancelTime: new Date().toISOString(),
+            expressErrorMsg: '',
+            sfOrderId: result.sfOrderId || r.sfOrderId,
+            sfWaybillNo: '',
+          } : r),
+        }));
+      } else {
+        setState(prev => ({
+          ...prev,
+          records: prev.records.map(r => r._id === _id ? {
+            ...r,
+            expressProvider: 'sf',
+            sfEnv: result.env || r.sfEnv,
+            expressErrorMsg: result.errMsg || '取消顺丰发货失败',
+            sfOrderId: result.sfOrderId || r.sfOrderId,
+          } : r),
+        }));
+      }
+
+      return result;
+    } catch (err) {
+      console.error('取消顺丰发货失败:', err);
+      return { success: false, errMsg: String(err) };
+    }
+  }, []);
+
   const resetFilters = useCallback(() => {
     setState(prev => ({
       ...prev,
@@ -194,6 +343,9 @@ export function useOrders() {
     importOrders,
     deleteOrder,
     updateOrder,
+    applySfExpress,
+    querySfOrderResult,
+    cancelSfExpress,
     resetFilters,
     getPageRecords,
     setCurrentPage,

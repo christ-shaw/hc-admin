@@ -30,7 +30,7 @@ function calcChannelCategory(salesChannel: string): 'platform' | 'offline' | '' 
 /** 订单类型 → 虚拟产品货品名称白名单 */
 const ORDER_TYPE_VIRTUAL_PRODUCTS: Partial<Record<string, string[]>> = {
   newBusiness: ['平台租金', '续期租金'],
-  postRentalPayment: ['补收差价', '仅退款', '维修费', '快递费'],
+  postRentalPayment: ['补收差价', '仅退款', '利润差额', '维修费', '快递费'],
   deposit: ['收押金', '退押金'],
 };
 
@@ -144,6 +144,50 @@ function isExpressApplicableStatus(status: string | undefined): boolean {
   return isPendingShipmentStatus(status);
 }
 
+function isVirtualProductOrder(products: ProductItem[]): boolean {
+  const selectedBrands = products.map(product => product.brand).filter(Boolean);
+  return selectedBrands.length > 0 && selectedBrands.every(brand => brand === '虚拟产品');
+}
+
+function applyVirtualProductStatus(prev: OrderFormData, products: ProductItem[]): OrderFormData {
+  const wasVirtualProductOrder = isVirtualProductOrder(prev.products);
+  const isVirtualOrder = isVirtualProductOrder(products);
+
+  if (isVirtualOrder) {
+    return { ...prev, products, status: 'noShip', shippingFee: '', trackingNumber: '' };
+  }
+
+  if (wasVirtualProductOrder && prev.status === 'noShip') {
+    return { ...prev, products, status: 'unknown' };
+  }
+
+  return { ...prev, products };
+}
+
+function getEffectiveShipmentFields(form: OrderFormData) {
+  const status = isVirtualProductOrder(form.products) ? 'noShip' : form.status;
+  return {
+    status,
+    shippingFee: status === 'shipped' ? form.shippingFee : '',
+    trackingNumber: status === 'shipped' ? form.trackingNumber : '',
+  };
+}
+
+function shouldShowProductPaymentFields(orderSource?: string, orderType?: string, orderAttribute?: string): boolean {
+  if (orderSource === 'new' && orderAttribute === 'rental1') return false;
+  if (orderSource === 'service' && (orderType === 'postRentalShip' || orderType === 'postRentalReturn')) return false;
+  return true;
+}
+
+function clearProductPaymentFields(products: ProductItem[]): ProductItem[] {
+  return products.map(product => ({
+    ...product,
+    unitPrice: 0,
+    amount: 0,
+    paymentAccount: '',
+  }));
+}
+
 function buildEditFormFromRecord(record: OrderRecord): OrderFormData {
   let transferProducts: TransferProductItem[] = [];
   if (record.transferItems) {
@@ -205,6 +249,9 @@ export function Orders() {
   const [importing, setImporting] = useState(false);
   const [importPreviewVisible, setImportPreviewVisible] = useState(false);
   const [importPreviewData, setImportPreviewData] = useState<OrderRecord[]>([]);
+  const [applyingExpressId, setApplyingExpressId] = useState<string | null>(null);
+  const [queryingSfResultId, setQueryingSfResultId] = useState<string | null>(null);
+  const [cancelingSfId, setCancelingSfId] = useState<string | null>(null);
   const [addVisible, setAddVisible] = useState(false);
   const [addForm, setAddForm] = useState<OrderFormData>(EMPTY_ORDER);
   const [saving, setSaving] = useState(false);
@@ -266,9 +313,66 @@ export function Orders() {
     setDetailVisible(true);
   }, []);
 
-  const handleApplyExpress = useCallback((record: OrderRecord) => {
-    MessagePlugin.info(`订单 ${record.serialNumber || ''} 的申请快递功能暂未实现`);
-  }, []);
+  const handleApplyExpress = useCallback(async (record: OrderRecord) => {
+    if (!record._id || applyingExpressId) return;
+    if (!isExpressApplicableStatus(record.status)) {
+      MessagePlugin.warning('仅订单状态为 -- 的订单可申请快递');
+      return;
+    }
+    if (record.trackingNumber || record.sfWaybillNo) {
+      MessagePlugin.warning('订单已存在快递单号，请勿重复申请');
+      return;
+    }
+
+    setApplyingExpressId(record._id);
+    try {
+      const result = await orders.applySfExpress(record._id);
+      if (result.success) {
+        MessagePlugin.success(`顺丰下单成功，运单号：${result.waybillNo || '-'}`);
+      } else {
+        MessagePlugin.error(result.errMsg || '顺丰下单失败');
+      }
+    } finally {
+      setApplyingExpressId(null);
+    }
+  }, [applyingExpressId, orders]);
+
+  const handleQuerySfOrderResult = useCallback(async (record: OrderRecord) => {
+    if (!record._id || queryingSfResultId) return;
+
+    setQueryingSfResultId(record._id);
+    try {
+      const result = await orders.querySfOrderResult(record._id);
+      if (result.success) {
+        MessagePlugin.success(`顺丰下单结果已更新，运单号：${result.waybillNo || '-'}`);
+      } else {
+        MessagePlugin.error(result.errMsg || '查询顺丰下单结果失败');
+      }
+    } finally {
+      setQueryingSfResultId(null);
+    }
+  }, [orders, queryingSfResultId]);
+
+  const handleCancelSfExpress = useCallback(async (record: OrderRecord) => {
+    if (!record._id || cancelingSfId) return;
+    if (!record.sfOrderId && !record.sfWaybillNo && !record.trackingNumber) {
+      MessagePlugin.warning('订单缺少顺丰订单信息，无法取消');
+      return;
+    }
+    if (!window.confirm('确认取消这笔顺丰发货吗？取消后的顺丰客户订单号不能重复使用。')) return;
+
+    setCancelingSfId(record._id);
+    try {
+      const result = await orders.cancelSfExpress(record._id);
+      if (result.success) {
+        MessagePlugin.success('顺丰发货已取消');
+      } else {
+        MessagePlugin.error(result.errMsg || '取消顺丰发货失败');
+      }
+    } finally {
+      setCancelingSfId(null);
+    }
+  }, [cancelingSfId, orders]);
 
   /** 导入 Excel */
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -415,19 +519,21 @@ export function Orders() {
       if (!addForm.salesChannel) { MessagePlugin.warning('请选择销售渠道'); return; }
     }
     if (addStep === 3) {
+      const shouldShowPaymentFields = shouldShowProductPaymentFields(addForm.orderSource, addForm.orderType, addForm.orderAttribute);
       if (addForm.products.length === 0) { MessagePlugin.warning('请至少添加一条货品'); return; }
       if (addForm.products.some(p => !p.brand)) { MessagePlugin.warning('请选择货品品牌'); return; }
       if (addForm.products.some(p => !p.productName)) { MessagePlugin.warning('请选择货品名称'); return; }
       if (addForm.products.some(p => !p.specification)) { MessagePlugin.warning('请选择规格'); return; }
       if (addForm.products.some(p => !p.quantity || p.quantity <= 0)) { MessagePlugin.warning('请填写数量'); return; }
-      if (addForm.products.some(p => !(addForm.orderAttribute === 'rental1' && p.brand !== '虚拟产品') && (!p.unitPrice || p.unitPrice <= 0))) { MessagePlugin.warning('请填写单价'); return; }
-      if (addForm.products.some(p => !(addForm.orderAttribute === 'rental1' && p.brand !== '虚拟产品') && !p.paymentAccount)) { MessagePlugin.warning('请选择收款账户'); return; }
+      if (shouldShowPaymentFields && addForm.products.some(p => !p.unitPrice || p.unitPrice <= 0)) { MessagePlugin.warning('请填写单价'); return; }
+      if (shouldShowPaymentFields && addForm.products.some(p => !p.paymentAccount)) { MessagePlugin.warning('请选择收款账户'); return; }
       if (addForm.products.some(p => p.productName === '部分转租赁2' || p.productName === '全部转租赁2') && addForm.transferProducts.some(t => !t.paidPeriod || t.paidPeriod <= 0)) { MessagePlugin.warning('转租赁2请填写已交租期'); return; }
       if (addForm.products.some(p => p.productName === '部分转租赁2' || p.productName === '全部转租赁2') && addForm.transferProducts.some(t => !t.paidRent || t.paidRent <= 0)) { MessagePlugin.warning('转租赁2请填写已交租金'); return; }
     }
     if (addStep === 4) {
-      if (addForm.status === 'shipped' && !addForm.shippingFee) { MessagePlugin.warning('已发货状态请选择邮寄结算方式'); return; }
-      if (addForm.status === 'shipped' && !addForm.trackingNumber) { MessagePlugin.warning('已发货状态请填写物流单号'); return; }
+      const { status } = getEffectiveShipmentFields(addForm);
+      if (status === 'shipped' && !addForm.shippingFee) { MessagePlugin.warning('已发货状态请选择邮寄结算方式'); return; }
+      if (status === 'shipped' && !addForm.trackingNumber) { MessagePlugin.warning('已发货状态请填写物流单号'); return; }
     }
     if (addStep === 5) {
       const needReturnStatus = addForm.orderType === 'postRentalShip' || addForm.orderType === 'postRentalReturn';
@@ -498,6 +604,7 @@ export function Orders() {
       const serialNumber = counterResult.value;
 
       const firstTransfer = addForm.transferProducts[0];
+      const shipmentFields = getEffectiveShipmentFields(addForm);
       const newRecords: OrderRecord[] = addForm.products.map((product, index) => ({
         _id: `manual_${Date.now()}_${index}`,
         serialNumber,
@@ -511,12 +618,12 @@ export function Orders() {
         onlineOrderNumber: addForm.onlineOrderNumber,
         customerName: addForm.customerName,
         ...product,
-        trackingNumber: addForm.trackingNumber,
+        trackingNumber: shipmentFields.trackingNumber,
         consignee: addForm.consignee,
         consigneePhone: addForm.consigneePhone,
         consigneeAddress: addForm.consigneeAddress,
-        shippingFee: addForm.shippingFee,
-        status: addForm.status,
+        shippingFee: shipmentFields.shippingFee,
+        status: shipmentFields.status,
         customerRemark: addForm.customerRemark,
         transferBrand: firstTransfer?.brand || '',
         transferProductName: firstTransfer?.productName || '',
@@ -661,20 +768,22 @@ export function Orders() {
       if (!editForm.salesChannel) { MessagePlugin.warning('请选择销售渠道'); return; }
     }
     if (editStep === 3) {
+      const shouldShowPaymentFields = shouldShowProductPaymentFields(editForm.orderSource, editForm.orderType, editForm.orderAttribute);
       if (editForm.products.length === 0) { MessagePlugin.warning('请至少添加一条货品'); return; }
       if (editForm.products.some(p => !p.brand)) { MessagePlugin.warning('请选择货品品牌'); return; }
       if (editForm.products.some(p => !p.productName)) { MessagePlugin.warning('请选择货品名称'); return; }
       if (editForm.products.some(p => !p.specification)) { MessagePlugin.warning('请选择规格'); return; }
       if (editForm.products.some(p => !p.quantity || p.quantity <= 0)) { MessagePlugin.warning('请填写数量'); return; }
-      if (editForm.products.some(p => !(editForm.orderAttribute === 'rental1' && p.brand !== '虚拟产品') && (!p.unitPrice || p.unitPrice <= 0))) { MessagePlugin.warning('请填写单价'); return; }
-      if (editForm.products.some(p => !(editForm.orderAttribute === 'rental1' && p.brand !== '虚拟产品') && !p.paymentAccount)) { MessagePlugin.warning('请选择收款账户'); return; }
+      if (shouldShowPaymentFields && editForm.products.some(p => !p.unitPrice || p.unitPrice <= 0)) { MessagePlugin.warning('请填写单价'); return; }
+      if (shouldShowPaymentFields && editForm.products.some(p => !p.paymentAccount)) { MessagePlugin.warning('请选择收款账户'); return; }
       const editHasTransfer = editForm.products.some(p => p.productName === '部分转租赁2' || p.productName === '全部转租赁2');
       if (editHasTransfer && editForm.transferProducts.some(t => !t.paidPeriod || t.paidPeriod <= 0)) { MessagePlugin.warning('转租赁2请填写已交租期'); return; }
       if (editHasTransfer && editForm.transferProducts.some(t => !t.paidRent || t.paidRent <= 0)) { MessagePlugin.warning('转租赁2请填写已交租金'); return; }
     }
     if (editStep === 4) {
-      if (editForm.status === 'shipped' && !editForm.shippingFee) { MessagePlugin.warning('已发货状态请选择邮寄结算方式'); return; }
-      if (editForm.status === 'shipped' && !editForm.trackingNumber) { MessagePlugin.warning('已发货状态请填写物流单号'); return; }
+      const { status } = getEffectiveShipmentFields(editForm);
+      if (status === 'shipped' && !editForm.shippingFee) { MessagePlugin.warning('已发货状态请选择邮寄结算方式'); return; }
+      if (status === 'shipped' && !editForm.trackingNumber) { MessagePlugin.warning('已发货状态请填写物流单号'); return; }
     }
     if (editStep === 5) {
       const needReturnStatus = editForm.orderType === 'postRentalShip' || editForm.orderType === 'postRentalReturn';
@@ -702,6 +811,7 @@ export function Orders() {
       const allAttachments = [...editForm.attachments, ...newAttachments];
 
       const firstTransfer = editForm.transferProducts[0];
+      const shipmentFields = getEffectiveShipmentFields(editForm);
       const buildFlatData = (product: ProductItem): Omit<OrderRecord, '_id' | 'createTime'> => ({
         serialNumber: editForm.serialNumber,
         date: editForm.date,
@@ -714,12 +824,12 @@ export function Orders() {
         onlineOrderNumber: editForm.onlineOrderNumber,
         customerName: editForm.customerName,
         ...product,
-        trackingNumber: editForm.trackingNumber,
+        trackingNumber: shipmentFields.trackingNumber,
         consignee: editForm.consignee,
         consigneePhone: editForm.consigneePhone,
         consigneeAddress: editForm.consigneeAddress,
-        shippingFee: editForm.shippingFee,
-        status: editForm.status,
+        shippingFee: shipmentFields.shippingFee,
+        status: shipmentFields.status,
         customerRemark: editForm.customerRemark,
         transferBrand: firstTransfer?.brand || '',
         transferProductName: firstTransfer?.productName || '',
@@ -814,17 +924,35 @@ export function Orders() {
       },
     },
     {
-      colKey: 'op', title: '操作', width: 240, fixed: 'right' as const,
+      colKey: 'op', title: '操作', width: 280, fixed: 'right' as const,
       cell: ({ row }: { row: OrderRecord }) => (
         <div className="flex gap-1 flex-wrap">
           <Button variant="text" theme="primary" size="small"
             onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleDetail(row); }}>
             详情
           </Button>
-          {isExpressApplicableStatus(row.status) && (
+          {isExpressApplicableStatus(row.status) && row.expressApplyStatus !== 'cancelled' && (
             <Button variant="text" theme="primary" size="small"
+              loading={applyingExpressId === row._id}
+              disabled={!!applyingExpressId && applyingExpressId !== row._id}
               onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleApplyExpress(row); }}>
               申请快递
+            </Button>
+          )}
+          {!row.trackingNumber && !['applied', 'cancelled'].includes(row.expressApplyStatus || '') && (
+            <Button variant="text" theme="primary" size="small"
+              loading={queryingSfResultId === row._id}
+              disabled={!!queryingSfResultId && queryingSfResultId !== row._id}
+              onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleQuerySfOrderResult(row); }}>
+              查顺丰
+            </Button>
+          )}
+          {row.expressApplyStatus === 'applied' && (row.sfOrderId || row.sfWaybillNo || row.trackingNumber) && (
+            <Button variant="text" theme="danger" size="small"
+              loading={cancelingSfId === row._id}
+              disabled={!!cancelingSfId && cancelingSfId !== row._id}
+              onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleCancelSfExpress(row); }}>
+              取消顺丰
             </Button>
           )}
           <Button variant="text" theme="primary" size="small"
@@ -844,7 +972,7 @@ export function Orders() {
         </div>
       ),
     },
-  ], [handleDetail, handleApplyExpress, handleEditOpen, handleShipOpen, handleDeleteConfirm]);
+  ], [handleDetail, handleApplyExpress, handleQuerySfOrderResult, handleCancelSfExpress, handleEditOpen, handleShipOpen, handleDeleteConfirm, applyingExpressId, queryingSfResultId, cancelingSfId]);
 
   const displayRecords = orders.getPageRecords(orders.currentPage);
 
@@ -970,9 +1098,9 @@ export function Orders() {
             <DetailRow label="货品名称" value={getProductLabel(currentRecord.productName)} />
             <DetailRow label="规格" value={currentRecord.specification} />
             <DetailRow label="数量" value={currentRecord.quantity} />
-            {!(currentRecord.orderAttribute === 'rental1' && currentRecord.brand !== '虚拟产品') && <DetailRow label="单价" value={currentRecord.unitPrice ? `¥${currentRecord.unitPrice}` : '-'} />}
-            {!(currentRecord.orderAttribute === 'rental1' && currentRecord.brand !== '虚拟产品') && <DetailRow label="金额" value={currentRecord.amount ? `¥${currentRecord.amount}` : '-'} />}
-            {!(currentRecord.orderAttribute === 'rental1' && currentRecord.brand !== '虚拟产品') && <DetailRow label="收款账户" value={currentRecord.paymentAccount} />}
+            {shouldShowProductPaymentFields(currentRecord.orderSource, currentRecord.orderType, currentRecord.orderAttribute) && <DetailRow label="单价" value={currentRecord.unitPrice ? `¥${currentRecord.unitPrice}` : '-'} />}
+            {shouldShowProductPaymentFields(currentRecord.orderSource, currentRecord.orderType, currentRecord.orderAttribute) && <DetailRow label="金额" value={currentRecord.amount ? `¥${currentRecord.amount}` : '-'} />}
+            {shouldShowProductPaymentFields(currentRecord.orderSource, currentRecord.orderType, currentRecord.orderAttribute) && <DetailRow label="收款账户" value={currentRecord.paymentAccount} />}
             <DetailRow label="收货人名称" value={currentRecord.consignee} />
             <DetailRow label="收货人电话" value={currentRecord.consigneePhone} />
             <DetailRow label="收货人地址" value={currentRecord.consigneeAddress} />
@@ -1423,14 +1551,16 @@ function AddOrderWizard({
     onChange(prev => {
       const products = [...prev.products];
       products[index] = { ...products[index], ...patch };
-      return { ...prev, products };
+      return applyVirtualProductStatus(prev, products);
     });
   }, [onChange]);
-  const addProduct = useCallback(() => onChange(prev => ({ ...prev, products: [...prev.products, { ...EMPTY_PRODUCT }] })), [onChange]);
+  const addProduct = useCallback(() => {
+    onChange(prev => applyVirtualProductStatus(prev, [...prev.products, { ...EMPTY_PRODUCT }]));
+  }, [onChange]);
   const removeProduct = useCallback((index: number) => {
     onChange(prev => {
       if (prev.products.length <= 1) return prev;
-      return { ...prev, products: prev.products.filter((_, i) => i !== index) };
+      return applyVirtualProductStatus(prev, prev.products.filter((_, i) => i !== index));
     });
   }, [onChange]);
 
@@ -1498,6 +1628,7 @@ function AddOrderWizard({
     }
     return cache;
   }, [form.transferProducts.map(t => `${t.brand}|${t.productName}`).join(',')]);
+  const shouldShowPaymentFields = shouldShowProductPaymentFields(form.orderSource, form.orderType, form.orderAttribute);
 
   // 订单类型选项（根据订单来源过滤）
   const filteredOrderTypeOptions = useMemo(() => {
@@ -1517,6 +1648,18 @@ function AddOrderWizard({
   const showReturnStatus = useMemo(() => {
     return form.orderType === 'postRentalShip' || form.orderType === 'postRentalReturn';
   }, [form.orderType]);
+
+  const virtualProductOrder = useMemo(() => {
+    return isVirtualProductOrder(form.products);
+  }, [form.products.map(p => p.brand).join(',')]);
+
+  useEffect(() => {
+    if (!virtualProductOrder || form.status === 'noShip') return;
+    onChange(prev => {
+      if (!isVirtualProductOrder(prev.products) || prev.status === 'noShip') return prev;
+      return { ...prev, status: 'noShip', shippingFee: '', trackingNumber: '' };
+    });
+  }, [form.status, onChange, virtualProductOrder]);
 
   // 当 hasTransferProduct 变为 true 且 transferProducts 为空时，自动添加一组默认条目
   useEffect(() => {
@@ -1603,13 +1746,25 @@ function AddOrderWizard({
                       updated.orderType = '';
                     }
                   }
+                  if (!shouldShowProductPaymentFields(updated.orderSource, updated.orderType, updated.orderAttribute)) {
+                    updated.products = clearProductPaymentFields(prev.products);
+                  }
                   return updated;
                 });
               }} options={ORDER_SOURCE_OPTIONS} />
             </div>
             <div>
               <label className="block text-xs text-gray-500 mb-1">订单属性 <span className="text-red-500">*</span></label>
-              <Select placeholder="请选择" value={form.orderAttribute || ''} onChange={val => updateField('orderAttribute', val as string)} options={ORDER_ATTRIBUTE_OPTIONS} />
+              <Select placeholder="请选择" value={form.orderAttribute || ''} onChange={val => {
+                const newAttribute = val as string;
+                onChange(prev => {
+                  const updated = { ...prev, orderAttribute: newAttribute };
+                  if (!shouldShowProductPaymentFields(updated.orderSource, updated.orderType, updated.orderAttribute)) {
+                    updated.products = clearProductPaymentFields(prev.products);
+                  }
+                  return updated;
+                });
+              }} options={ORDER_ATTRIBUTE_OPTIONS} />
             </div>
             <div>
               <label className="block text-xs text-gray-500 mb-1">订单类型</label>
@@ -1626,6 +1781,9 @@ function AddOrderWizard({
                       }
                       return p;
                     });
+                  }
+                  if (!shouldShowProductPaymentFields(updated.orderSource, updated.orderType, updated.orderAttribute)) {
+                    updated.products = clearProductPaymentFields(updated.products || prev.products);
                   }
                   return updated;
                 });
@@ -1695,21 +1853,21 @@ function AddOrderWizard({
                   <Input type="number" placeholder="数量"
                     value={product.quantity ? String(product.quantity) : ''} onChange={val => { const q = Math.max(0, Number(val)); updateProduct(idx, { quantity: q, amount: q * product.unitPrice }); }} />
                 </div>
-                {!(form.orderAttribute === 'rental1' && product.brand !== '虚拟产品') && (
+                {shouldShowPaymentFields && (
                   <div>
                     <label className="block text-xs text-gray-500 mb-1">单价 <span className="text-red-500">*</span></label>
                     <Input type="number" placeholder="单价"
                       value={product.unitPrice ? String(product.unitPrice) : ''} onChange={val => { const p = Math.max(0, Number(val)); updateProduct(idx, { unitPrice: p, amount: product.quantity * p }); }} />
                   </div>
                 )}
-                {!(form.orderAttribute === 'rental1' && product.brand !== '虚拟产品') && (
+                {shouldShowPaymentFields && (
                   <div>
                     <label className="block text-xs text-gray-500 mb-1">金额</label>
                     <Input type="number" placeholder="自动计算"
                       value={product.amount ? String(product.amount) : ''} readOnly />
                   </div>
                 )}
-                {!(form.orderAttribute === 'rental1' && product.brand !== '虚拟产品') && (
+                {shouldShowPaymentFields && (
                   <div>
                     <label className="block text-xs text-gray-500 mb-1">收款账户 <span className="text-red-500">*</span></label>
                     <Select placeholder="请选择" value={product.paymentAccount || ''}
@@ -1803,18 +1961,20 @@ function AddOrderWizard({
               <Input placeholder="收货人地址"
                 value={form.consigneeAddress} onChange={val => updateField('consigneeAddress', val as string)} />
             </div>
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">订单状态</label>
-              <Select placeholder="请选择" value={form.status || ''} onChange={val => {
-                const newStatus = val as string;
-                onChange(prev => ({
-                  ...prev,
-                  status: newStatus,
-                  shippingFee: newStatus === 'shipped' ? prev.shippingFee : '',
-                  trackingNumber: newStatus === 'shipped' ? prev.trackingNumber : '',
-                }));
-              }} options={ORDER_STATUS_OPTIONS} />
-            </div>
+            {!virtualProductOrder && (
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">订单状态</label>
+                <Select placeholder="请选择" value={form.status || ''} onChange={val => {
+                  const newStatus = val as string;
+                  onChange(prev => ({
+                    ...prev,
+                    status: newStatus,
+                    shippingFee: newStatus === 'shipped' ? prev.shippingFee : '',
+                    trackingNumber: newStatus === 'shipped' ? prev.trackingNumber : '',
+                  }));
+                }} options={ORDER_STATUS_OPTIONS} />
+              </div>
+            )}
             {form.status === 'shipped' && (
               <div>
                 <label className="block text-xs text-gray-500 mb-1">邮寄结算方式 <span className="text-red-500">*</span></label>
@@ -1946,7 +2106,7 @@ function AddOrderWizard({
               {form.products.map((p, i) => (
                 <div key={i} className="text-xs text-gray-600 ml-2 border-l-2 border-blue-200 pl-2 mb-1">
                   货品{i + 1}：{p.brand ? getBrandLabel(p.brand) : '-'} / {p.productName ? getProductLabel(p.productName) : '-'} / {p.specification || '-'}，
-                  数量 {p.quantity || 0}{!(form.orderAttribute === 'rental1' && p.brand !== '虚拟产品') ? `，单价 ¥${p.unitPrice || 0}，金额 ¥${p.amount || 0}，收款账户 ${p.paymentAccount || '-'}` : ''}
+                  数量 {p.quantity || 0}{shouldShowPaymentFields ? `，单价 ¥${p.unitPrice || 0}，金额 ¥${p.amount || 0}，收款账户 ${p.paymentAccount || '-'}` : ''}
                 </div>
               ))}
             </PreviewSection>

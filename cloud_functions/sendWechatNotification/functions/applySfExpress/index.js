@@ -1,22 +1,28 @@
 /**
- * applySfExpress - 顺丰沙箱下快递单
- *
- * 当前仅支持沙箱环境：
- * POST https://sfapi-sbox.sf-express.com/std/service
+ * applySfExpress - 顺丰下快递单
  *
  * 依赖云函数：
  * getSfAccessToken
  *
  * 云函数环境变量：
- * SF_CLIENT_CODE       顺丰客户编码
- * SF_SENDER_MAP        按订单人员切换寄件人，JSON 对象（可选）
- * SF_SENDER_CONTACT   默认寄件人
- * SF_SENDER_TEL       默认寄件电话
- * SF_SENDER_COMPANY   默认寄件公司（可选）
- * SF_SENDER_PROVINCE  默认寄件省（可选）
- * SF_SENDER_CITY      默认寄件市（可选）
- * SF_SENDER_COUNTY    默认寄件区县（可选）
- * SF_SENDER_ADDRESS   默认寄件详细地址
+ * SF_ENV                   sandbox | production，默认 sandbox
+ * SF_CLIENT_CODE           默认顺丰客户编码
+ * SF_SANDBOX_CLIENT_CODE   沙箱客户编码（可选，优先于 SF_CLIENT_CODE）
+ * SF_PROD_CLIENT_CODE      生产客户编码（可选，优先于 SF_CLIENT_CODE）
+ * SF_SANDBOX_SERVICE_URL   沙箱业务接口地址（可选）
+ * SF_PROD_SERVICE_URL      生产业务接口地址（可选）
+ * SF_PAY_METHOD            付款方式，默认 1
+ * SF_MONTHLY_CARD          顺丰月结卡号（可选）
+ * SF_EXPRESS_TYPE_ID       快件产品类别，默认 1
+ * SF_PARCEL_QTY            包裹数，默认 1
+ * SF_SENDER_MAP            按订单人员切换寄件人，JSON 对象（可选）
+ * SF_SENDER_CONTACT        默认寄件人
+ * SF_SENDER_TEL            默认寄件电话
+ * SF_SENDER_COMPANY        默认寄件公司（可选）
+ * SF_SENDER_PROVINCE       默认寄件省（可选）
+ * SF_SENDER_CITY           默认寄件市（可选）
+ * SF_SENDER_COUNTY         默认寄件区县（可选）
+ * SF_SENDER_ADDRESS        默认寄件详细地址
  *
  * event.data:
  * orderId: string     orders 集合的 _id
@@ -31,16 +37,69 @@ cloud.init({
 
 const db = cloud.database();
 
-const SF_ENV = 'sandbox';
 const ORDERS_COLLECTION = 'orders';
-const SERVICE_URL = 'https://sfapi-sbox.sf-express.com/std/service';
+const TOKEN_COLLECTION = 'sf_tokens';
 const SERVICE_CODE = 'EXP_RECE_CREATE_ORDER';
-const DEFAULT_PAY_METHOD = 1;
-const DEFAULT_EXPRESS_TYPE_ID = 1;
-const DEFAULT_PARCEL_QTY = 1;
+const DEFAULT_SERVICE_URLS = {
+  sandbox: 'https://sfapi-sbox.sf-express.com/std/service',
+  production: 'https://bspgw.sf-express.com/std/service',
+};
 
 function trimString(value) {
   return String(value || '').trim();
+}
+
+function normalizeSfEnv(value = process.env.SF_ENV || 'sandbox') {
+  const normalized = trimString(value).toLowerCase();
+  if (!normalized || normalized === 'sandbox' || normalized === 'sbox') return 'sandbox';
+  if (normalized === 'prod' || normalized === 'production') return 'production';
+  throw new Error(`SF_ENV 仅支持 sandbox 或 production，当前值: ${value}`);
+}
+
+function getFirstEnv(names) {
+  for (const name of names) {
+    const value = trimString(process.env[name]);
+    if (value) return value;
+  }
+  return '';
+}
+
+function getPositiveIntegerEnv(name, defaultValue) {
+  const value = trimString(process.env[name]);
+  if (!value) return defaultValue;
+
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${name} 必须是正整数`);
+  }
+
+  return parsed;
+}
+
+function getSfConfig() {
+  const env = normalizeSfEnv();
+  const partnerID = env === 'production'
+    ? getFirstEnv(['SF_PROD_CLIENT_CODE', 'SF_PRODUCTION_CLIENT_CODE', 'SF_CLIENT_CODE'])
+    : getFirstEnv(['SF_SANDBOX_CLIENT_CODE', 'SF_CLIENT_CODE']);
+  const serviceUrl = env === 'production'
+    ? getFirstEnv(['SF_PROD_SERVICE_URL', 'SF_PRODUCTION_SERVICE_URL']) || DEFAULT_SERVICE_URLS.production
+    : getFirstEnv(['SF_SANDBOX_SERVICE_URL']) || DEFAULT_SERVICE_URLS.sandbox;
+
+  if (!partnerID) {
+    throw new Error(env === 'production'
+      ? '缺少云函数环境变量 SF_PROD_CLIENT_CODE 或 SF_CLIENT_CODE'
+      : '缺少云函数环境变量 SF_SANDBOX_CLIENT_CODE 或 SF_CLIENT_CODE');
+  }
+
+  return {
+    env,
+    partnerID,
+    serviceUrl,
+    payMethod: getPositiveIntegerEnv('SF_PAY_METHOD', 1),
+    monthlyCard: getFirstEnv(['SF_MONTHLY_CARD', 'SF_MONTHLY_CARD_NO']),
+    expressTypeId: getPositiveIntegerEnv('SF_EXPRESS_TYPE_ID', 1),
+    parcelQty: getPositiveIntegerEnv('SF_PARCEL_QTY', 1),
+  };
 }
 
 function isApplicableOrderStatus(status) {
@@ -193,17 +252,23 @@ function buildCargoDetails(order) {
   ];
 }
 
-function buildMsgData(order, orderId, sender) {
-  return {
+function buildMsgData(order, orderId, sender, config) {
+  const msgData = {
     language: 'zh-CN',
     orderId: order.sfOrderId || buildSfOrderId(orderId),
     cargoDetails: buildCargoDetails(order),
     contactInfoList: buildContactInfoList(order, sender),
-    payMethod: DEFAULT_PAY_METHOD,
-    expressTypeId: DEFAULT_EXPRESS_TYPE_ID,
-    parcelQty: DEFAULT_PARCEL_QTY,
+    payMethod: config.payMethod,
+    expressTypeId: config.expressTypeId,
+    parcelQty: config.parcelQty,
     remark: trimString(order.customerRemark).slice(0, 100),
   };
+
+  if (config.monthlyCard) {
+    msgData.monthlyCard = config.monthlyCard;
+  }
+
+  return msgData;
 }
 
 async function getOrder(orderId) {
@@ -225,52 +290,28 @@ async function updateOrder(orderId, data) {
   });
 }
 
-async function getAccessToken(forceRefresh = false) {
+async function getAccessToken(config, forceRefresh = false) {
   const result = await cloud.callFunction({
     name: 'getSfAccessToken',
-    data: { forceRefresh },
+    data: { forceRefresh, sfEnv: config.env },
   });
 
   const tokenResult = result.result || {};
-  if (!tokenResult.success || !tokenResult.accessToken) {
+  if (!tokenResult.success) {
     throw new Error(tokenResult.errMsg || '获取顺丰 accessToken 失败');
   }
 
-  return tokenResult.accessToken;
-}
-
-async function callCreateOrder({ partnerID, accessToken, requestID, msgData }) {
-  const body = new URLSearchParams({
-    partnerID,
-    requestID,
-    serviceCode: SERVICE_CODE,
-    timestamp: String(Date.now()),
-    accessToken,
-    msgData: JSON.stringify(msgData),
-  });
-
-  const response = await fetch(SERVICE_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-    },
-    body,
-  });
-
-  const text = await response.text();
-  let result;
-
-  try {
-    result = JSON.parse(text);
-  } catch (err) {
-    throw new Error(`顺丰下单接口返回非 JSON，HTTP ${response.status}`);
+  const tokenDoc = await db.collection(TOKEN_COLLECTION).doc(config.env).get();
+  const tokenData = tokenDoc.data || {};
+  if (!tokenData.accessToken) {
+    throw new Error('顺丰 accessToken 缓存为空');
   }
 
-  if (!response.ok) {
-    throw new Error(`顺丰下单接口 HTTP ${response.status}: ${result.apiErrorMsg || result.message || text}`);
+  if (Number(tokenData.expiresAt || 0) <= Date.now()) {
+    throw new Error('顺丰 accessToken 已过期');
   }
 
-  return result;
+  return tokenData.accessToken;
 }
 
 function parseJsonMaybe(value) {
@@ -330,14 +371,48 @@ function parseSfCreateOrderResponse(result) {
   };
 }
 
-async function applyCreateOrder({ partnerID, requestID, msgData }) {
-  let accessToken = await getAccessToken(false);
-  let result = await callCreateOrder({ partnerID, accessToken, requestID, msgData });
+async function callCreateOrder({ config, accessToken, requestID, msgData }) {
+  const body = new URLSearchParams({
+    partnerID: config.partnerID,
+    requestID,
+    serviceCode: SERVICE_CODE,
+    timestamp: String(Date.now()),
+    accessToken,
+    msgData: JSON.stringify(msgData),
+  });
+
+  const response = await fetch(config.serviceUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+    },
+    body,
+  });
+
+  const text = await response.text();
+  let result;
+
+  try {
+    result = JSON.parse(text);
+  } catch (err) {
+    throw new Error(`顺丰下单接口返回非 JSON，HTTP ${response.status}`);
+  }
+
+  if (!response.ok) {
+    throw new Error(`顺丰下单接口 HTTP ${response.status}: ${result.apiErrorMsg || result.message || text}`);
+  }
+
+  return result;
+}
+
+async function applyCreateOrder({ config, requestID, msgData }) {
+  let accessToken = await getAccessToken(config, false);
+  let result = await callCreateOrder({ config, accessToken, requestID, msgData });
   let parsed = parseSfCreateOrderResponse(result);
 
   if (parsed.authFailed) {
-    accessToken = await getAccessToken(true);
-    result = await callCreateOrder({ partnerID, accessToken, requestID, msgData });
+    accessToken = await getAccessToken(config, true);
+    result = await callCreateOrder({ config, accessToken, requestID, msgData });
     parsed = parseSfCreateOrderResponse(result);
   }
 
@@ -354,26 +429,20 @@ exports.main = async (event) => {
     };
   }
 
-  const partnerID = trimString(process.env.SF_CLIENT_CODE);
-  if (!partnerID) {
-    return {
-      success: false,
-      errMsg: '缺少云函数环境变量 SF_CLIENT_CODE',
-    };
-  }
-
   let hasMarkedApplying = false;
 
   try {
+    const config = getSfConfig();
     const order = await getOrder(orderId);
     validateOrder(order);
     const sender = getSenderConfig(order);
 
     const requestID = buildRequestID();
-    const msgData = buildMsgData(order, orderId, sender);
+    const msgData = buildMsgData(order, orderId, sender, config);
 
     await updateOrder(orderId, {
       expressProvider: 'sf',
+      sfEnv: config.env,
       expressApplyStatus: 'applying',
       expressErrorMsg: '',
       sfRequestId: requestID,
@@ -383,7 +452,7 @@ exports.main = async (event) => {
     });
     hasMarkedApplying = true;
 
-    const parsed = await applyCreateOrder({ partnerID, requestID, msgData });
+    const parsed = await applyCreateOrder({ config, requestID, msgData });
 
     if (!parsed.success) {
       await updateOrder(orderId, {
@@ -394,7 +463,7 @@ exports.main = async (event) => {
 
       return {
         success: false,
-        env: SF_ENV,
+        env: config.env,
         errMsg: parsed.errMsg,
         errorCode: parsed.errorCode || '',
       };
@@ -405,6 +474,7 @@ exports.main = async (event) => {
       trackingNumber: parsed.waybillNo,
       shippingFee: order.shippingFee || 'prepaid',
       expressProvider: 'sf',
+      sfEnv: config.env,
       expressApplyStatus: 'applied',
       expressApplyTime: new Date().toISOString(),
       expressErrorMsg: '',
@@ -416,7 +486,7 @@ exports.main = async (event) => {
 
     return {
       success: true,
-      env: SF_ENV,
+      env: config.env,
       orderId,
       sfOrderId: parsed.sfOrderId || msgData.orderId,
       waybillNo: parsed.waybillNo,
@@ -443,7 +513,9 @@ exports.main = async (event) => {
 
     return {
       success: false,
-      env: SF_ENV,
+      env: (() => {
+        try { return normalizeSfEnv(); } catch { return trimString(process.env.SF_ENV) || 'sandbox'; }
+      })(),
       orderId,
       errMsg: err.message || String(err),
     };

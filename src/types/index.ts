@@ -150,6 +150,22 @@ export interface OrderRecord {
   amount: number;                   // 金额
   paymentAccount: string;           // 收款账户
   trackingNumber: string;           // 物流单号
+  expressProvider?: string;         // 快递服务商
+  sfEnv?: string;                   // 顺丰环境
+  expressApplyStatus?: string;      // 快递申请状态
+  expressApplyTime?: string;        // 快递申请时间
+  expressErrorMsg?: string;         // 快递申请失败原因
+  sfRequestId?: string;             // 顺丰请求ID
+  sfOrderId?: string;               // 顺丰客户订单号
+  sfWaybillNo?: string;             // 顺丰运单号
+  sfSenderContact?: string;         // 顺丰寄件人
+  sfSenderTel?: string;             // 顺丰寄件电话（脱敏）
+  sfSearchRequestId?: string;       // 顺丰查询请求ID
+  sfSearchRawResponse?: unknown;    // 顺丰查询原始响应
+  expressCancelTime?: string;       // 快递取消时间
+  sfCancelRequestId?: string;       // 顺丰取消请求ID
+  sfCancelRawResponse?: unknown;    // 顺丰取消原始响应
+  sfRawResponse?: unknown;          // 顺丰原始响应
   consignee: string;                // 收货人名称
   consigneePhone: string;           // 收货人电话
   consigneeAddress: string;         // 收货人地址

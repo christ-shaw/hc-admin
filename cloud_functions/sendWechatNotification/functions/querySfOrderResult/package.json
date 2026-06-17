@@ -1,0 +1,9 @@
+{
+  "name": "querySfOrderResult",
+  "version": "1.0.0",
+  "description": "查询顺丰下单结果",
+  "main": "index.js",
+  "dependencies": {
+    "wx-server-sdk": "~2.6.3"
+  }
+}

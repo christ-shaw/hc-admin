@@ -24,6 +24,16 @@
       "runtime": "Nodejs18.15"
     },
     {
+      "name": "querySfOrderResult",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
+      "name": "cancelSfExpress",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
       "name": "getCloudFileUrls",
       "handler": "index.main",
       "runtime": "Nodejs18.15"
