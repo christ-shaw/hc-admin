@@ -1,12 +1,13 @@
 import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import { Table, Button, Input, Select, Tag, Dialog, MessagePlugin, Textarea } from 'tdesign-react';
 import { Search, RotateCcw, Upload, Download, Plus, Pencil, Trash2, Minus, X, ChevronRight, ChevronLeft, FileDown, Check } from 'lucide-react';
-import { OrderRecord, OrderFilters, OutboundRecord, ORDER_TYPE_MAP, ORDER_SOURCE_MAP, ORDER_ATTRIBUTE_MAP, SALES_CHANNEL_MAP, ORDER_STATUS_MAP, CHANNEL_CATEGORY_MAP, SHIPPING_FEE_MAP, ProductItem, TransferProductItem, OrderAttachment, dictToOptions, getDictLabel } from '../types';
+import { OrderRecord, OrderFilters, InboundRecord, OutboundRecord, PhoneModelItem, ORDER_TYPE_MAP, ORDER_SOURCE_MAP, ORDER_ATTRIBUTE_MAP, SALES_CHANNEL_MAP, ORDER_STATUS_MAP, CHANNEL_CATEGORY_MAP, SHIPPING_FEE_MAP, ProductItem, TransferProductItem, OrderAttachment, dictToOptions, getDictLabel } from '../types';
 import { useOrders } from '../hooks/useOrders';
-import { formatDate } from '../utils/format';
+import { formatDate, getChannelTypeText, getTotalQuantity } from '../utils/format';
 import { parseOrderExcel, exportOrderExcel } from '../utils/orderExcel';
 import { BRANDS, getBrandLabel, getProductLabel, getProductsByBrand, getSpecsByProduct, PAYMENT_ACCOUNTS, SALESPERSONS } from '../data/dict';
-import { parseConsigneeInfo, callFunction, getCurrentOperatorName, uploadToCloudStorage } from '../lib/cloudbase';
+import { parseConsigneeInfo, callFunction, getCloudFileURLs, getCurrentOperatorName, uploadToCloudStorage } from '../lib/cloudbase';
+import { PAGE_SIZE } from '../utils/constants';
 
 /** ========== 预计算静态 options（模块级常量，避免每次渲染重建） ========== */
 const PLACEHOLDER_OPTION = { label: '请选择', value: '' };
@@ -173,19 +174,36 @@ function getEffectiveShipmentFields(form: OrderFormData) {
   };
 }
 
-function shouldShowProductPaymentFields(orderSource?: string, orderType?: string, orderAttribute?: string): boolean {
-  if (orderSource === 'new' && orderAttribute === 'rental1') return false;
+function shouldShowProductPaymentFields(orderSource?: string, orderType?: string, orderAttribute?: string, productBrand?: string): boolean {
+  if (orderSource === 'new' && orderAttribute === 'rental1' && productBrand !== '虚拟产品') return false;
   if (orderSource === 'service' && (orderType === 'postRentalShip' || orderType === 'postRentalReturn')) return false;
   return true;
 }
 
-function clearProductPaymentFields(products: ProductItem[]): ProductItem[] {
-  return products.map(product => ({
-    ...product,
-    unitPrice: 0,
-    amount: 0,
-    paymentAccount: '',
-  }));
+function formatPhoneModels(phoneModels?: PhoneModelItem[]): string {
+  if (!phoneModels || phoneModels.length === 0) return '-';
+  return phoneModels.map(item => `${item.model || '-'} x${item.quantity || 0}`).join('，');
+}
+
+function getOutboundPhoneTotal(record?: OutboundRecord | null): number {
+  return record?.phoneModels?.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0) || 0;
+}
+
+function shouldShowAfterSaleInboundConfirm(record: OrderRecord): boolean {
+  const needsReturnConfirm = ['postRentalShip', 'postRentalReturn', '租后发货', '租后退货', '售后发货'].includes(record.orderType);
+  return needsReturnConfirm && record.returnStatus !== 'returned';
+}
+
+function clearHiddenProductPaymentFields(form: Pick<OrderFormData, 'orderSource' | 'orderType' | 'orderAttribute' | 'products'>): ProductItem[] {
+  return form.products.map(product => {
+    if (shouldShowProductPaymentFields(form.orderSource, form.orderType, form.orderAttribute, product.brand)) return product;
+    return {
+      ...product,
+      unitPrice: 0,
+      amount: 0,
+      paymentAccount: '',
+    };
+  });
 }
 
 function buildEditFormFromRecord(record: OrderRecord): OrderFormData {
@@ -265,6 +283,17 @@ export function Orders() {
   const [shipShippingFee, setShipShippingFee] = useState('prepaid');
   const [shipLoading, setShipLoading] = useState(false);
   const [shipUpdating, setShipUpdating] = useState(false);
+  const [shipPhotoVisible, setShipPhotoVisible] = useState(false);
+  const [shipPhotoLoading, setShipPhotoLoading] = useState(false);
+  const [shipPhotoTarget, setShipPhotoTarget] = useState<OutboundRecord | null>(null);
+  const [shipPhotoUrls, setShipPhotoUrls] = useState<Array<{ fileID: string; tempFileURL: string }>>([]);
+  const [afterSaleInboundVisible, setAfterSaleInboundVisible] = useState(false);
+  const [afterSaleInboundTarget, setAfterSaleInboundTarget] = useState<OrderRecord | null>(null);
+  const [afterSaleInboundCustomerName, setAfterSaleInboundCustomerName] = useState('');
+  const [afterSaleInboundTrackingNumber, setAfterSaleInboundTrackingNumber] = useState('');
+  const [afterSaleInboundRecords, setAfterSaleInboundRecords] = useState<InboundRecord[]>([]);
+  const [afterSaleInboundLoading, setAfterSaleInboundLoading] = useState(false);
+  const [afterSaleInboundUpdatingId, setAfterSaleInboundUpdatingId] = useState<string | null>(null);
   const [deleteConfirmVisible, setDeleteConfirmVisible] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<OrderRecord | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -519,14 +548,13 @@ export function Orders() {
       if (!addForm.salesChannel) { MessagePlugin.warning('请选择销售渠道'); return; }
     }
     if (addStep === 3) {
-      const shouldShowPaymentFields = shouldShowProductPaymentFields(addForm.orderSource, addForm.orderType, addForm.orderAttribute);
       if (addForm.products.length === 0) { MessagePlugin.warning('请至少添加一条货品'); return; }
       if (addForm.products.some(p => !p.brand)) { MessagePlugin.warning('请选择货品品牌'); return; }
       if (addForm.products.some(p => !p.productName)) { MessagePlugin.warning('请选择货品名称'); return; }
       if (addForm.products.some(p => !p.specification)) { MessagePlugin.warning('请选择规格'); return; }
       if (addForm.products.some(p => !p.quantity || p.quantity <= 0)) { MessagePlugin.warning('请填写数量'); return; }
-      if (shouldShowPaymentFields && addForm.products.some(p => !p.unitPrice || p.unitPrice <= 0)) { MessagePlugin.warning('请填写单价'); return; }
-      if (shouldShowPaymentFields && addForm.products.some(p => !p.paymentAccount)) { MessagePlugin.warning('请选择收款账户'); return; }
+      if (addForm.products.some(p => shouldShowProductPaymentFields(addForm.orderSource, addForm.orderType, addForm.orderAttribute, p.brand) && (!p.unitPrice || p.unitPrice <= 0))) { MessagePlugin.warning('请填写单价'); return; }
+      if (addForm.products.some(p => shouldShowProductPaymentFields(addForm.orderSource, addForm.orderType, addForm.orderAttribute, p.brand) && !p.paymentAccount)) { MessagePlugin.warning('请选择收款账户'); return; }
       if (addForm.products.some(p => p.productName === '部分转租赁2' || p.productName === '全部转租赁2') && addForm.transferProducts.some(t => !t.paidPeriod || t.paidPeriod <= 0)) { MessagePlugin.warning('转租赁2请填写已交租期'); return; }
       if (addForm.products.some(p => p.productName === '部分转租赁2' || p.productName === '全部转租赁2') && addForm.transferProducts.some(t => !t.paidRent || t.paidRent <= 0)) { MessagePlugin.warning('转租赁2请填写已交租金'); return; }
     }
@@ -718,6 +746,25 @@ export function Orders() {
     setSelectedShipRecord(record);
   }, []);
 
+  const handlePreviewShipPhotos = useCallback(async (record: OutboundRecord) => {
+    const photos = record.phonePhotos || [];
+    setShipPhotoTarget(record);
+    setShipPhotoUrls([]);
+    setShipPhotoVisible(true);
+
+    if (photos.length === 0) return;
+
+    setShipPhotoLoading(true);
+    try {
+      const urls = await getCloudFileURLs(photos);
+      setShipPhotoUrls(urls);
+    } catch (err) {
+      MessagePlugin.error('发货照片加载失败: ' + String(err));
+    } finally {
+      setShipPhotoLoading(false);
+    }
+  }, []);
+
   const handleConfirmShipRecord = useCallback(async () => {
     if (!shipTarget || !selectedShipRecord) return;
     if (!selectedShipRecord.trackingNumber) {
@@ -754,6 +801,101 @@ export function Orders() {
     }
   }, [orders, selectedShipRecord, shipShippingFee, shipTarget]);
 
+  const searchAfterSaleInboundRecords = useCallback(async (customerName: string, trackingNumber: string) => {
+    const trimmedCustomerName = customerName.trim();
+    const trimmedTrackingNumber = trackingNumber.trim();
+    if (!trimmedCustomerName && !trimmedTrackingNumber) {
+      MessagePlugin.warning('请输入客户名称或快递单号');
+      return;
+    }
+
+    setAfterSaleInboundLoading(true);
+    try {
+      const result = await callFunction<{ success?: boolean; data?: InboundRecord[] }>('queryRecords', {
+        data: {
+          type: 'inbound',
+          customerName: trimmedCustomerName || undefined,
+          trackingNumber: trimmedTrackingNumber || undefined,
+          limit: 50,
+          cursor: null,
+        },
+      });
+
+      const records = (result.data || []).sort((a, b) => {
+        const aScore = Number(a.customerName === trimmedCustomerName) + Number(a.trackingNumber === trimmedTrackingNumber);
+        const bScore = Number(b.customerName === trimmedCustomerName) + Number(b.trackingNumber === trimmedTrackingNumber);
+        return bScore - aScore;
+      });
+      setAfterSaleInboundRecords(records);
+      if (records.length === 0) {
+        MessagePlugin.warning('未找到匹配的入库记录');
+      }
+    } catch (err) {
+      MessagePlugin.error('查询入库记录失败: ' + String(err));
+    } finally {
+      setAfterSaleInboundLoading(false);
+    }
+  }, []);
+
+  const handleAfterSaleInboundOpen = useCallback((record: OrderRecord) => {
+    if (!shouldShowAfterSaleInboundConfirm(record)) {
+      MessagePlugin.warning('仅租后发货且未入库的订单可确认回库');
+      return;
+    }
+
+    const customerName = record.customerName || '';
+    const trackingNumber = '';
+    setAfterSaleInboundTarget(record);
+    setAfterSaleInboundCustomerName(customerName);
+    setAfterSaleInboundTrackingNumber(trackingNumber);
+    setAfterSaleInboundRecords([]);
+    setAfterSaleInboundVisible(true);
+    searchAfterSaleInboundRecords(customerName, trackingNumber);
+  }, [searchAfterSaleInboundRecords]);
+
+  const handleAfterSaleInboundSearch = useCallback(() => {
+    searchAfterSaleInboundRecords(afterSaleInboundCustomerName, afterSaleInboundTrackingNumber);
+  }, [afterSaleInboundCustomerName, afterSaleInboundTrackingNumber, searchAfterSaleInboundRecords]);
+
+  const resetAfterSaleInboundDialog = useCallback(() => {
+    setAfterSaleInboundVisible(false);
+    setAfterSaleInboundTarget(null);
+    setAfterSaleInboundCustomerName('');
+    setAfterSaleInboundTrackingNumber('');
+    setAfterSaleInboundRecords([]);
+    setAfterSaleInboundLoading(false);
+    setAfterSaleInboundUpdatingId(null);
+  }, []);
+
+  const handleConfirmAfterSaleInboundRecord = useCallback(async (record: InboundRecord) => {
+    if (!afterSaleInboundTarget || afterSaleInboundUpdatingId) return;
+    if (!record.trackingNumber) {
+      MessagePlugin.warning('该入库记录没有快递单号，无法写入客服备注');
+      return;
+    }
+    if (!window.confirm(`确认使用快递单号「${record.trackingNumber}」将此订单标记为已入库吗？`)) return;
+
+    setAfterSaleInboundUpdatingId(record._id);
+    try {
+      const success = await orders.updateOrder(afterSaleInboundTarget._id, {
+        returnStatus: 'returned',
+        returnTrackingNumbers: record.trackingNumber,
+        customerRemark: record.trackingNumber,
+      });
+
+      if (success) {
+        MessagePlugin.success('售后回库已确认');
+        resetAfterSaleInboundDialog();
+      } else {
+        MessagePlugin.error('更新订单回库状态失败');
+      }
+    } catch (err) {
+      MessagePlugin.error('更新订单回库状态异常: ' + String(err));
+    } finally {
+      setAfterSaleInboundUpdatingId(null);
+    }
+  }, [afterSaleInboundTarget, afterSaleInboundUpdatingId, orders, resetAfterSaleInboundDialog]);
+
   /** 编辑向导 — 下一步校验 */
   const handleEditNext = () => {
     if (editStep === 1) {
@@ -768,14 +910,13 @@ export function Orders() {
       if (!editForm.salesChannel) { MessagePlugin.warning('请选择销售渠道'); return; }
     }
     if (editStep === 3) {
-      const shouldShowPaymentFields = shouldShowProductPaymentFields(editForm.orderSource, editForm.orderType, editForm.orderAttribute);
       if (editForm.products.length === 0) { MessagePlugin.warning('请至少添加一条货品'); return; }
       if (editForm.products.some(p => !p.brand)) { MessagePlugin.warning('请选择货品品牌'); return; }
       if (editForm.products.some(p => !p.productName)) { MessagePlugin.warning('请选择货品名称'); return; }
       if (editForm.products.some(p => !p.specification)) { MessagePlugin.warning('请选择规格'); return; }
       if (editForm.products.some(p => !p.quantity || p.quantity <= 0)) { MessagePlugin.warning('请填写数量'); return; }
-      if (shouldShowPaymentFields && editForm.products.some(p => !p.unitPrice || p.unitPrice <= 0)) { MessagePlugin.warning('请填写单价'); return; }
-      if (shouldShowPaymentFields && editForm.products.some(p => !p.paymentAccount)) { MessagePlugin.warning('请选择收款账户'); return; }
+      if (editForm.products.some(p => shouldShowProductPaymentFields(editForm.orderSource, editForm.orderType, editForm.orderAttribute, p.brand) && (!p.unitPrice || p.unitPrice <= 0))) { MessagePlugin.warning('请填写单价'); return; }
+      if (editForm.products.some(p => shouldShowProductPaymentFields(editForm.orderSource, editForm.orderType, editForm.orderAttribute, p.brand) && !p.paymentAccount)) { MessagePlugin.warning('请选择收款账户'); return; }
       const editHasTransfer = editForm.products.some(p => p.productName === '部分转租赁2' || p.productName === '全部转租赁2');
       if (editHasTransfer && editForm.transferProducts.some(t => !t.paidPeriod || t.paidPeriod <= 0)) { MessagePlugin.warning('转租赁2请填写已交租期'); return; }
       if (editHasTransfer && editForm.transferProducts.some(t => !t.paidRent || t.paidRent <= 0)) { MessagePlugin.warning('转租赁2请填写已交租金'); return; }
@@ -924,14 +1065,14 @@ export function Orders() {
       },
     },
     {
-      colKey: 'op', title: '操作', width: 280, fixed: 'right' as const,
+      colKey: 'op', title: '操作', width: 330, fixed: 'right' as const,
       cell: ({ row }: { row: OrderRecord }) => (
         <div className="flex gap-1 flex-wrap">
           <Button variant="text" theme="primary" size="small"
             onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleDetail(row); }}>
             详情
           </Button>
-          {isExpressApplicableStatus(row.status) && row.expressApplyStatus !== 'cancelled' && (
+          {false && isExpressApplicableStatus(row.status) && row.expressApplyStatus !== 'cancelled' && (
             <Button variant="text" theme="primary" size="small"
               loading={applyingExpressId === row._id}
               disabled={!!applyingExpressId && applyingExpressId !== row._id}
@@ -939,7 +1080,7 @@ export function Orders() {
               申请快递
             </Button>
           )}
-          {!row.trackingNumber && !['applied', 'cancelled'].includes(row.expressApplyStatus || '') && (
+          {false && !row.trackingNumber && !['applied', 'cancelled'].includes(row.expressApplyStatus || '') && (
             <Button variant="text" theme="primary" size="small"
               loading={queryingSfResultId === row._id}
               disabled={!!queryingSfResultId && queryingSfResultId !== row._id}
@@ -965,6 +1106,12 @@ export function Orders() {
               发货
             </Button>
           )}
+          {shouldShowAfterSaleInboundConfirm(row) && (
+            <Button variant="text" theme="primary" size="small"
+              onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleAfterSaleInboundOpen(row); }}>
+              售后回库确认
+            </Button>
+          )}
           <Button variant="text" theme="danger" size="small"
             onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleDeleteConfirm(row); }}>
             删除
@@ -972,9 +1119,21 @@ export function Orders() {
         </div>
       ),
     },
-  ], [handleDetail, handleApplyExpress, handleQuerySfOrderResult, handleCancelSfExpress, handleEditOpen, handleShipOpen, handleDeleteConfirm, applyingExpressId, queryingSfResultId, cancelingSfId]);
+  ], [handleDetail, handleApplyExpress, handleQuerySfOrderResult, handleCancelSfExpress, handleEditOpen, handleShipOpen, handleAfterSaleInboundOpen, handleDeleteConfirm, applyingExpressId, queryingSfResultId, cancelingSfId]);
 
   const displayRecords = orders.getPageRecords(orders.currentPage);
+  const hasLoadedNextPage = orders.currentPage * PAGE_SIZE < orders.records.length;
+  const canGoNextPage = hasLoadedNextPage || orders.hasMore;
+  const handlePrevPage = useCallback(() => {
+    orders.setCurrentPage(orders.currentPage - 1);
+  }, [orders]);
+  const handleNextPage = useCallback(() => {
+    if (hasLoadedNextPage) {
+      orders.setCurrentPage(orders.currentPage + 1);
+      return;
+    }
+    orders.fetchRecords(orders.cursor);
+  }, [hasLoadedNextPage, orders]);
 
   return (
     <div className="space-y-4">
@@ -1068,12 +1227,12 @@ export function Orders() {
         {/* 分页 */}
         <div className="flex justify-center items-center gap-2 py-4 border-t border-gray-100">
           <Button size="small" variant="outline" disabled={orders.currentPage <= 1}
-            onClick={() => orders.setCurrentPage(orders.currentPage - 1)}>
+            onClick={handlePrevPage}>
             上一页
           </Button>
           <span className="text-sm text-gray-500">第 {orders.currentPage} 页</span>
-          <Button size="small" variant="outline" disabled={!orders.hasMore}
-            onClick={() => orders.fetchRecords(orders.cursor)}>
+          <Button size="small" variant="outline" disabled={!canGoNextPage || orders.loading}
+            onClick={handleNextPage}>
             下一页
           </Button>
           <span className="text-sm text-gray-400">共 {orders.totalRecords} 条</span>
@@ -1098,9 +1257,9 @@ export function Orders() {
             <DetailRow label="货品名称" value={getProductLabel(currentRecord.productName)} />
             <DetailRow label="规格" value={currentRecord.specification} />
             <DetailRow label="数量" value={currentRecord.quantity} />
-            {shouldShowProductPaymentFields(currentRecord.orderSource, currentRecord.orderType, currentRecord.orderAttribute) && <DetailRow label="单价" value={currentRecord.unitPrice ? `¥${currentRecord.unitPrice}` : '-'} />}
-            {shouldShowProductPaymentFields(currentRecord.orderSource, currentRecord.orderType, currentRecord.orderAttribute) && <DetailRow label="金额" value={currentRecord.amount ? `¥${currentRecord.amount}` : '-'} />}
-            {shouldShowProductPaymentFields(currentRecord.orderSource, currentRecord.orderType, currentRecord.orderAttribute) && <DetailRow label="收款账户" value={currentRecord.paymentAccount} />}
+            {shouldShowProductPaymentFields(currentRecord.orderSource, currentRecord.orderType, currentRecord.orderAttribute, currentRecord.brand) && <DetailRow label="单价" value={currentRecord.unitPrice ? `¥${currentRecord.unitPrice}` : '-'} />}
+            {shouldShowProductPaymentFields(currentRecord.orderSource, currentRecord.orderType, currentRecord.orderAttribute, currentRecord.brand) && <DetailRow label="金额" value={currentRecord.amount ? `¥${currentRecord.amount}` : '-'} />}
+            {shouldShowProductPaymentFields(currentRecord.orderSource, currentRecord.orderType, currentRecord.orderAttribute, currentRecord.brand) && <DetailRow label="收款账户" value={currentRecord.paymentAccount} />}
             <DetailRow label="收货人名称" value={currentRecord.consignee} />
             <DetailRow label="收货人电话" value={currentRecord.consigneePhone} />
             <DetailRow label="收货人地址" value={currentRecord.consigneeAddress} />
@@ -1173,23 +1332,36 @@ export function Orders() {
           ) : (
             <div className="max-h-[420px] overflow-auto space-y-2">
               {shipRecords.map((record, index) => (
-                <button
+                <div
                   key={record._id || index}
-                  type="button"
-                  className="w-full text-left border border-gray-200 rounded-lg p-3 hover:border-blue-400 hover:bg-blue-50/40 disabled:cursor-not-allowed disabled:opacity-60"
-                  disabled={shipUpdating}
-                  onClick={() => handleSelectShipRecord(record)}
+                  className="w-full border border-gray-200 rounded-lg p-3 hover:border-blue-400 hover:bg-blue-50/40"
                 >
-                  <div className="text-sm text-gray-800">
-                    <span className="text-gray-400">发货时间：</span>{formatDate(record.outboundDate, false) || '-'}
+                  <div className="grid grid-cols-1 gap-1 text-sm text-gray-800">
+                    <div><span className="text-gray-400">发货时间：</span>{formatDate(record.outboundDate, false) || '-'}</div>
+                    <div><span className="text-gray-400">客户名称：</span>{record.customerName || '-'}</div>
+                    <div><span className="text-gray-400">发货单号：</span>{record.trackingNumber || '-'}</div>
+                    <div><span className="text-gray-400">手机型号：</span>{formatPhoneModels(record.phoneModels)}</div>
+                    <div><span className="text-gray-400">发货数量：</span>{getOutboundPhoneTotal(record) || '-'}</div>
                   </div>
-                  <div className="text-sm text-gray-800 mt-1">
-                    <span className="text-gray-400">客户名称：</span>{record.customerName || '-'}
+                  <div className="flex justify-end gap-2 mt-3">
+                    <Button
+                      size="small"
+                      variant="outline"
+                      disabled={shipUpdating}
+                      onClick={() => handlePreviewShipPhotos(record)}
+                    >
+                      查看照片
+                    </Button>
+                    <Button
+                      size="small"
+                      theme="primary"
+                      disabled={shipUpdating}
+                      onClick={() => handleSelectShipRecord(record)}
+                    >
+                      选择
+                    </Button>
                   </div>
-                  <div className="text-sm text-gray-800 mt-1">
-                    <span className="text-gray-400">发货单号：</span>{record.trackingNumber || '-'}
-                  </div>
-                </button>
+                </div>
               ))}
             </div>
           )}
@@ -1217,6 +1389,13 @@ export function Orders() {
             <div><span className="text-gray-400">发货时间：</span><span className="text-gray-800">{selectedShipRecord ? formatDate(selectedShipRecord.outboundDate, false) : '-'}</span></div>
             <div><span className="text-gray-400">发货客户：</span><span className="text-gray-800">{selectedShipRecord?.customerName || '-'}</span></div>
             <div><span className="text-gray-400">快递单号：</span><span className="font-medium text-gray-900">{selectedShipRecord?.trackingNumber || '-'}</span></div>
+            <div><span className="text-gray-400">手机型号：</span><span className="text-gray-800">{formatPhoneModels(selectedShipRecord?.phoneModels)}</span></div>
+            <div><span className="text-gray-400">发货数量：</span><span className="text-gray-800">{getOutboundPhoneTotal(selectedShipRecord) || '-'}</span></div>
+            {selectedShipRecord && (
+              <Button size="small" variant="outline" onClick={() => handlePreviewShipPhotos(selectedShipRecord)}>
+                查看发货照片
+              </Button>
+            )}
           </div>
           <div>
             <label className="block text-xs text-gray-500 mb-1">邮寄结算方式 <span className="text-red-500">*</span></label>
@@ -1229,6 +1408,132 @@ export function Orders() {
           </div>
           <div className="rounded-lg border border-blue-100 bg-blue-50/60 p-3 text-blue-700">
             确认后将订单状态改为“已发货”，邮寄结算方式设为“{getDictLabel(SHIPPING_FEE_MAP, shipShippingFee)}”，并写入该快递单号。
+          </div>
+        </div>
+      </Dialog>
+
+      {/* 发货照片预览弹窗 */}
+      <Dialog
+        header="发货照片"
+        visible={shipPhotoVisible}
+        onClose={() => { setShipPhotoVisible(false); setShipPhotoTarget(null); setShipPhotoUrls([]); }}
+        width="720px"
+        footer={<Button onClick={() => { setShipPhotoVisible(false); setShipPhotoTarget(null); setShipPhotoUrls([]); }}>关闭</Button>}
+      >
+        <div className="space-y-3">
+          <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+            <div><span className="text-gray-400">发货客户：</span>{shipPhotoTarget?.customerName || '-'}</div>
+            <div className="mt-1"><span className="text-gray-400">手机型号：</span>{formatPhoneModels(shipPhotoTarget?.phoneModels)}</div>
+            <div className="mt-1"><span className="text-gray-400">发货数量：</span>{getOutboundPhoneTotal(shipPhotoTarget) || '-'}</div>
+          </div>
+          {shipPhotoLoading ? (
+            <div className="py-8 text-center text-gray-400">正在加载发货照片...</div>
+          ) : !shipPhotoTarget?.phonePhotos || shipPhotoTarget.phonePhotos.length === 0 ? (
+            <div className="py-8 text-center text-gray-400">该发货记录暂无照片</div>
+          ) : (
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3 max-h-[520px] overflow-auto">
+              {shipPhotoTarget.phonePhotos.map((photo, index) => {
+                const url = shipPhotoUrls.find(item => item.fileID === photo)?.tempFileURL || '';
+                return (
+                  <div key={photo || index} className="border border-gray-200 rounded-lg overflow-hidden bg-white">
+                    {url ? (
+                      <button
+                        type="button"
+                        className="block w-full cursor-pointer"
+                        onClick={() => window.open(url, '_blank', 'noopener,noreferrer')}
+                      >
+                        <img src={url} alt={`发货照片 ${index + 1}`} className="w-full h-40 object-cover" />
+                      </button>
+                    ) : (
+                      <div className="h-40 flex items-center justify-center text-xs text-gray-400">照片加载失败</div>
+                    )}
+                    <div className="px-2 py-1 text-xs text-gray-400 truncate">照片 {index + 1}</div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </Dialog>
+
+      {/* 售后回库确认弹窗 */}
+      <Dialog
+        header="售后回库确认"
+        visible={afterSaleInboundVisible}
+        onClose={() => { if (!afterSaleInboundUpdatingId) resetAfterSaleInboundDialog(); }}
+        width="720px"
+        footer={<Button disabled={!!afterSaleInboundUpdatingId} onClick={resetAfterSaleInboundDialog}>关闭</Button>}
+      >
+        <div className="space-y-4">
+          <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+            <div><span className="text-gray-400">订单客户：</span>{afterSaleInboundTarget?.customerName || '-'}</div>
+            <div className="mt-1"><span className="text-gray-400">订单类型：</span>{afterSaleInboundTarget ? getDictLabel(ORDER_TYPE_MAP, afterSaleInboundTarget.orderType) : '-'}</div>
+            <div className="mt-1"><span className="text-gray-400">当前归还状态：</span>{afterSaleInboundTarget?.returnStatus ? getDictLabel(RETURN_STATUS_MAP, afterSaleInboundTarget.returnStatus) : '-'}</div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-[1fr_1fr_auto] gap-3 items-end">
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">客户名称</label>
+              <Input
+                placeholder="使用当前客户名称查询"
+                value={afterSaleInboundCustomerName}
+                onChange={val => setAfterSaleInboundCustomerName(val as string)}
+                onEnter={handleAfterSaleInboundSearch}
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">快递单号</label>
+              <Input
+                placeholder="输入客户寄回快递单号"
+                value={afterSaleInboundTrackingNumber}
+                onChange={val => setAfterSaleInboundTrackingNumber(val as string)}
+                onEnter={handleAfterSaleInboundSearch}
+              />
+            </div>
+            <Button theme="primary" icon={<Search size={16} />} loading={afterSaleInboundLoading} onClick={handleAfterSaleInboundSearch}>
+              查询
+            </Button>
+          </div>
+
+          {afterSaleInboundLoading ? (
+            <div className="py-8 text-center text-gray-400">正在查询入库记录...</div>
+          ) : afterSaleInboundRecords.length === 0 ? (
+            <div className="py-8 text-center text-gray-400">暂无匹配的入库记录</div>
+          ) : (
+            <div className="max-h-[420px] overflow-auto space-y-2">
+              {afterSaleInboundRecords.map((record, index) => (
+                <div
+                  key={record._id || index}
+                  className="w-full border border-gray-200 rounded-lg p-3 hover:border-blue-400 hover:bg-blue-50/40"
+                >
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-1 text-sm text-gray-800">
+                    <div><span className="text-gray-400">入库日期：</span>{formatDate(record.inboundDate, false) || '-'}</div>
+                    <div><span className="text-gray-400">客户名称：</span>{record.customerName || '-'}</div>
+                    <div><span className="text-gray-400">渠道类型：</span>{getChannelTypeText(record.type)}</div>
+                    <div><span className="text-gray-400">渠道名称：</span>{record.shopName || '-'}</div>
+                    <div><span className="text-gray-400">快递单号：</span><span className="font-medium text-gray-900">{record.trackingNumber || '-'}</span></div>
+                    <div><span className="text-gray-400">入库数量：</span>{getTotalQuantity(record) || '-'}</div>
+                    <div className="md:col-span-2"><span className="text-gray-400">手机型号：</span>{formatPhoneModels(record.phoneModels)}</div>
+                    {record.remark && <div className="md:col-span-2"><span className="text-gray-400">备注：</span>{record.remark}</div>}
+                  </div>
+                  <div className="flex justify-end mt-3">
+                    <Button
+                      size="small"
+                      theme="primary"
+                      loading={afterSaleInboundUpdatingId === record._id}
+                      disabled={!!afterSaleInboundUpdatingId && afterSaleInboundUpdatingId !== record._id}
+                      onClick={() => handleConfirmAfterSaleInboundRecord(record)}
+                    >
+                      确认此记录
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="rounded-lg border border-blue-100 bg-blue-50/60 p-3 text-sm text-blue-700">
+            确认后将订单归还状态改为“产品已退回入库”，并把客服备注改为所选入库记录的快递单号。
           </div>
         </div>
       </Dialog>
@@ -1551,7 +1856,8 @@ function AddOrderWizard({
     onChange(prev => {
       const products = [...prev.products];
       products[index] = { ...products[index], ...patch };
-      return applyVirtualProductStatus(prev, products);
+      const cleanedProducts = clearHiddenProductPaymentFields({ ...prev, products });
+      return applyVirtualProductStatus(prev, cleanedProducts);
     });
   }, [onChange]);
   const addProduct = useCallback(() => {
@@ -1628,8 +1934,6 @@ function AddOrderWizard({
     }
     return cache;
   }, [form.transferProducts.map(t => `${t.brand}|${t.productName}`).join(',')]);
-  const shouldShowPaymentFields = shouldShowProductPaymentFields(form.orderSource, form.orderType, form.orderAttribute);
-
   // 订单类型选项（根据订单来源过滤）
   const filteredOrderTypeOptions = useMemo(() => {
     if (!form.orderSource || !ORDER_SOURCE_ORDER_TYPE_MAP[form.orderSource]) {
@@ -1746,9 +2050,7 @@ function AddOrderWizard({
                       updated.orderType = '';
                     }
                   }
-                  if (!shouldShowProductPaymentFields(updated.orderSource, updated.orderType, updated.orderAttribute)) {
-                    updated.products = clearProductPaymentFields(prev.products);
-                  }
+                  updated.products = clearHiddenProductPaymentFields({ ...updated, products: prev.products });
                   return updated;
                 });
               }} options={ORDER_SOURCE_OPTIONS} />
@@ -1759,9 +2061,7 @@ function AddOrderWizard({
                 const newAttribute = val as string;
                 onChange(prev => {
                   const updated = { ...prev, orderAttribute: newAttribute };
-                  if (!shouldShowProductPaymentFields(updated.orderSource, updated.orderType, updated.orderAttribute)) {
-                    updated.products = clearProductPaymentFields(prev.products);
-                  }
+                  updated.products = clearHiddenProductPaymentFields({ ...updated, products: prev.products });
                   return updated;
                 });
               }} options={ORDER_ATTRIBUTE_OPTIONS} />
@@ -1782,9 +2082,7 @@ function AddOrderWizard({
                       return p;
                     });
                   }
-                  if (!shouldShowProductPaymentFields(updated.orderSource, updated.orderType, updated.orderAttribute)) {
-                    updated.products = clearProductPaymentFields(updated.products || prev.products);
-                  }
+                  updated.products = clearHiddenProductPaymentFields({ ...updated, products: updated.products || prev.products });
                   return updated;
                 });
               }} options={filteredOrderTypeOptions} />
@@ -1822,60 +2120,65 @@ function AddOrderWizard({
             <Button size="small" variant="outline" icon={<Plus size={14} />} onClick={addProduct}>添加货品</Button>
           </div>
           {form.products.map((product, idx) => (
-            <div key={idx} className={`${idx > 0 ? 'mt-3 pt-3 border-t border-gray-200' : ''} mb-3`}>
-              {form.products.length > 1 && (
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs text-gray-400">货品 {idx + 1}</span>
-                  <Button size="small" variant="text" theme="danger" icon={<Minus size={14} />} onClick={() => removeProduct(idx)}>删除</Button>
-                </div>
-              )}
-              <div className="grid grid-cols-3 gap-3">
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">品牌 <span className="text-red-500">*</span></label>
-                  <Select placeholder="请选择品牌" value={product.brand || ''}
-                    onChange={val => updateProduct(idx, { brand: val as string, productName: '', specification: '' })}
-                    options={BRAND_OPTIONS} filterable />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">货品名称 <span className="text-red-500">*</span></label>
-                  <Select placeholder="请先选择品牌" value={product.productName || ''}
-                    onChange={val => updateProduct(idx, { productName: val as string, specification: '' })}
-                    options={productOptionsMap[product.brand] || [PLACEHOLDER_OPTION]} filterable />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">规格 <span className="text-red-500">*</span></label>
-                  <Select placeholder="请先选择货品" value={product.specification || ''}
-                    onChange={val => updateProduct(idx, { specification: val as string })}
-                    options={specOptionsMap[`${product.brand}|${product.productName}`] || [PLACEHOLDER_OPTION]} />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">数量 <span className="text-red-500">*</span></label>
-                  <Input type="number" placeholder="数量"
-                    value={product.quantity ? String(product.quantity) : ''} onChange={val => { const q = Math.max(0, Number(val)); updateProduct(idx, { quantity: q, amount: q * product.unitPrice }); }} />
-                </div>
-                {shouldShowPaymentFields && (
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">单价 <span className="text-red-500">*</span></label>
-                    <Input type="number" placeholder="单价"
-                      value={product.unitPrice ? String(product.unitPrice) : ''} onChange={val => { const p = Math.max(0, Number(val)); updateProduct(idx, { unitPrice: p, amount: product.quantity * p }); }} />
+            (() => {
+              const shouldShowPaymentFields = shouldShowProductPaymentFields(form.orderSource, form.orderType, form.orderAttribute, product.brand);
+              return (
+                <div key={idx} className={`${idx > 0 ? 'mt-3 pt-3 border-t border-gray-200' : ''} mb-3`}>
+                  {form.products.length > 1 && (
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs text-gray-400">货品 {idx + 1}</span>
+                      <Button size="small" variant="text" theme="danger" icon={<Minus size={14} />} onClick={() => removeProduct(idx)}>删除</Button>
+                    </div>
+                  )}
+                  <div className="grid grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-xs text-gray-500 mb-1">品牌 <span className="text-red-500">*</span></label>
+                      <Select placeholder="请选择品牌" value={product.brand || ''}
+                        onChange={val => updateProduct(idx, { brand: val as string, productName: '', specification: '' })}
+                        options={BRAND_OPTIONS} filterable />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-gray-500 mb-1">货品名称 <span className="text-red-500">*</span></label>
+                      <Select placeholder="请先选择品牌" value={product.productName || ''}
+                        onChange={val => updateProduct(idx, { productName: val as string, specification: '' })}
+                        options={productOptionsMap[product.brand] || [PLACEHOLDER_OPTION]} filterable />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-gray-500 mb-1">规格 <span className="text-red-500">*</span></label>
+                      <Select placeholder="请先选择货品" value={product.specification || ''}
+                        onChange={val => updateProduct(idx, { specification: val as string })}
+                        options={specOptionsMap[`${product.brand}|${product.productName}`] || [PLACEHOLDER_OPTION]} />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-gray-500 mb-1">数量 <span className="text-red-500">*</span></label>
+                      <Input type="number" placeholder="数量"
+                        value={product.quantity ? String(product.quantity) : ''} onChange={val => { const q = Math.max(0, Number(val)); updateProduct(idx, { quantity: q, amount: q * product.unitPrice }); }} />
+                    </div>
+                    {shouldShowPaymentFields && (
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">单价 <span className="text-red-500">*</span></label>
+                        <Input type="number" placeholder="单价"
+                          value={product.unitPrice ? String(product.unitPrice) : ''} onChange={val => { const p = Math.max(0, Number(val)); updateProduct(idx, { unitPrice: p, amount: product.quantity * p }); }} />
+                      </div>
+                    )}
+                    {shouldShowPaymentFields && (
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">金额</label>
+                        <Input type="number" placeholder="自动计算"
+                          value={product.amount ? String(product.amount) : ''} readOnly />
+                      </div>
+                    )}
+                    {shouldShowPaymentFields && (
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">收款账户 <span className="text-red-500">*</span></label>
+                        <Select placeholder="请选择" value={product.paymentAccount || ''}
+                          onChange={val => updateProduct(idx, { paymentAccount: val as string })} options={PAYMENT_ACCOUNT_OPTIONS} />
+                      </div>
+                    )}
                   </div>
-                )}
-                {shouldShowPaymentFields && (
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">金额</label>
-                    <Input type="number" placeholder="自动计算"
-                      value={product.amount ? String(product.amount) : ''} readOnly />
-                  </div>
-                )}
-                {shouldShowPaymentFields && (
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">收款账户 <span className="text-red-500">*</span></label>
-                    <Select placeholder="请选择" value={product.paymentAccount || ''}
-                      onChange={val => updateProduct(idx, { paymentAccount: val as string })} options={PAYMENT_ACCOUNT_OPTIONS} />
-                  </div>
-                )}
-              </div>
-            </div>
+                </div>
+              );
+            })()
           ))}
 
           {/* 条件显示的转租赁字段 */}
@@ -2103,12 +2406,15 @@ function AddOrderWizard({
               {form.channelCategory === 'platform' && <PreviewItem label="网店订单号" value={form.onlineOrderNumber} />}
             </PreviewSection>
             <PreviewSection title="货品信息">
-              {form.products.map((p, i) => (
-                <div key={i} className="text-xs text-gray-600 ml-2 border-l-2 border-blue-200 pl-2 mb-1">
-                  货品{i + 1}：{p.brand ? getBrandLabel(p.brand) : '-'} / {p.productName ? getProductLabel(p.productName) : '-'} / {p.specification || '-'}，
-                  数量 {p.quantity || 0}{shouldShowPaymentFields ? `，单价 ¥${p.unitPrice || 0}，金额 ¥${p.amount || 0}，收款账户 ${p.paymentAccount || '-'}` : ''}
-                </div>
-              ))}
+              {form.products.map((p, i) => {
+                const shouldShowPaymentFields = shouldShowProductPaymentFields(form.orderSource, form.orderType, form.orderAttribute, p.brand);
+                return (
+                  <div key={i} className="text-xs text-gray-600 ml-2 border-l-2 border-blue-200 pl-2 mb-1">
+                    货品{i + 1}：{p.brand ? getBrandLabel(p.brand) : '-'} / {p.productName ? getProductLabel(p.productName) : '-'} / {p.specification || '-'}，
+                    数量 {p.quantity || 0}{shouldShowPaymentFields ? `，单价 ¥${p.unitPrice || 0}，金额 ¥${p.amount || 0}，收款账户 ${p.paymentAccount || '-'}` : ''}
+                  </div>
+                );
+              })}
             </PreviewSection>
             {hasTransferProduct && form.transferProducts.length > 0 && (
               <PreviewSection title="转租赁2 信息">
