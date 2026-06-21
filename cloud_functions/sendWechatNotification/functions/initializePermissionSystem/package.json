@@ -1,0 +1,10 @@
+{
+  "name": "initializePermissionSystem",
+  "version": "1.0.0",
+  "description": "初始化权限系统",
+  "main": "index.js",
+  "dependencies": {
+    "@cloudbase/node-sdk": "^3.16.0",
+    "wx-server-sdk": "~2.6.3"
+  }
+}

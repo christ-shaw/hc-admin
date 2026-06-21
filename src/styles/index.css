@@ -16,6 +16,15 @@
   }
 }
 
+@keyframes dashboardMessageRoll {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(-50%);
+  }
+}
+
 @layer base {
   html,
   :host {
@@ -55,5 +64,14 @@
   .order-row-unreceived td {
     background-color: #fef2f2 !important;
     color: #dc2626 !important;
+  }
+
+  .dashboard-message-roll {
+    animation: dashboardMessageRoll var(--message-roll-duration, 24s) linear infinite;
+    will-change: transform;
+  }
+
+  .dashboard-message-roll:hover {
+    animation-play-state: paused;
   }
 }

@@ -63,18 +63,42 @@ export async function getSession() {
 
 /** 用户名密码登录 */
 export async function signIn(username: string, password: string) {
-  return auth.signInWithPassword({ username, password });
+  const result = await auth.signInWithPassword({ username, password });
+  if (!(result as any).error) {
+    window.dispatchEvent(new CustomEvent(AUTH_STATE_CHANGED_EVENT));
+  }
+  return result;
 }
 
 /** 登出 */
 export async function signOut() {
-  return auth.signOut();
+  const result = await auth.signOut();
+  window.dispatchEvent(new CustomEvent(AUTH_STATE_CHANGED_EVENT));
+  return result;
 }
 
 /** 获取当前用户信息 */
 export async function getCurrentUser() {
   const { data } = await auth.getUser();
   return data?.user || null;
+}
+
+/** 提供给权限云函数的当前用户展示资料，真正身份仍由云函数侧登录态校验 */
+export function getPermissionCurrentUserPayload(user: any) {
+  if (!user) return null;
+  const metadata = user.user_metadata || user.userMetadata || user.metadata || {};
+  return {
+    id: user.id || user.uid || '',
+    username: metadata.username || user.username || user.userName || '',
+    nickName: metadata.nickName || metadata.nickname || user.nickName || user.nickname || '',
+    email: user.email || '',
+    phone: user.phone || user.phoneNumber || '',
+  };
+}
+
+export async function getCurrentPermissionUserPayload() {
+  const user = await getCurrentUser();
+  return getPermissionCurrentUserPayload(user);
 }
 
 /** 获取当前操作人名称（优先昵称，其次用户名，最后用户ID） */
@@ -89,6 +113,7 @@ export async function getCurrentOperatorName(): Promise<string> {
 
 /** 认证过期事件名 */
 export const AUTH_EXPIRED_EVENT = 'auth:expired';
+export const AUTH_STATE_CHANGED_EVENT = 'auth:state-changed';
 
 /** 判断是否为认证相关错误 */
 function isAuthError(err: any): boolean {
@@ -119,6 +144,14 @@ export function onAuthExpired(handler: () => void) {
 /** 注销认证过期事件监听 */
 export function offAuthExpired(handler: () => void) {
   window.removeEventListener(AUTH_EXPIRED_EVENT, handler);
+}
+
+export function onAuthStateChanged(handler: () => void) {
+  window.addEventListener(AUTH_STATE_CHANGED_EVENT, handler);
+}
+
+export function offAuthStateChanged(handler: () => void) {
+  window.removeEventListener(AUTH_STATE_CHANGED_EVENT, handler);
 }
 
 /** 调用云函数（带认证错误检测） */

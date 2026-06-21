@@ -44,6 +44,48 @@
       "runtime": "Nodejs18.15"
     },
     {
+      "name": "getUserRole",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
+      "name": "initializePermissionSystem",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
+      "name": "manageRoles",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
+      "name": "manageUserRoles",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
+      "name": "manageLoginLogs",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
+      "name": "generateDailyShipmentStats",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15",
+      "triggers": [
+        {
+          "name": "dailyShipmentStatsTimer",
+          "type": "timer",
+          "config": "0 0 0 * * * *"
+        }
+      ]
+    },
+    {
+      "name": "queryDailyShipmentStats",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
       "name": "queryOrders",
       "handler": "index.main",
       "runtime": "Nodejs18.15"

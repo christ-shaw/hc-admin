@@ -1,4 +1,5 @@
 import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
+import { useLocation } from 'react-router-dom';
 import { Table, Button, Input, Select, Tag, Dialog, MessagePlugin, Textarea } from 'tdesign-react';
 import { Search, RotateCcw, Upload, Download, Plus, Pencil, Trash2, Minus, X, ChevronRight, ChevronLeft, FileDown, Check } from 'lucide-react';
 import { OrderRecord, OrderFilters, InboundRecord, OutboundRecord, PhoneModelItem, ORDER_TYPE_MAP, ORDER_SOURCE_MAP, ORDER_ATTRIBUTE_MAP, SALES_CHANNEL_MAP, ORDER_STATUS_MAP, CHANNEL_CATEGORY_MAP, SHIPPING_FEE_MAP, ProductItem, TransferProductItem, OrderAttachment, dictToOptions, getDictLabel } from '../types';
@@ -259,6 +260,7 @@ function buildEditFormFromRecord(record: OrderRecord): OrderFormData {
 
 export function Orders() {
   const orders = useOrders();
+  const location = useLocation();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [filters, setFilters] = useState<OrderFilters>({});
@@ -319,8 +321,19 @@ export function Orders() {
   const [exporting, setExporting] = useState(false);
 
   useEffect(() => {
-    orders.fetchRecords();
-  }, []);
+    const state = location.state as { filter?: OrderFilters } | null;
+    const stateFilter = state?.filter || {};
+    const initialFilters: OrderFilters = {};
+
+    if (stateFilter.onlineOrderNumber) {
+      initialFilters.onlineOrderNumber = stateFilter.onlineOrderNumber.trim();
+    } else if (stateFilter.customerName) {
+      initialFilters.customerName = stateFilter.customerName.trim();
+    }
+
+    setFilters(initialFilters);
+    orders.fetchRecords(null, initialFilters);
+  }, [location.state]);
 
   const handleSearch = () => {
     orders.resetFilters();
@@ -822,9 +835,9 @@ export function Orders() {
       });
 
       const records = (result.data || []).sort((a, b) => {
-        const aScore = Number(a.customerName === trimmedCustomerName) + Number(a.trackingNumber === trimmedTrackingNumber);
-        const bScore = Number(b.customerName === trimmedCustomerName) + Number(b.trackingNumber === trimmedTrackingNumber);
-        return bScore - aScore;
+        const aTime = new Date(a.inboundDate || a.createTime?.$date || 0).getTime();
+        const bTime = new Date(b.inboundDate || b.createTime?.$date || 0).getTime();
+        return bTime - aTime;
       });
       setAfterSaleInboundRecords(records);
       if (records.length === 0) {

@@ -2,7 +2,26 @@ import { useState, FormEvent } from 'react';
 import { Input, Button, MessagePlugin } from 'tdesign-react';
 import { Package } from 'lucide-react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { signIn } from '../lib/cloudbase';
+import { signIn, callFunction, getCurrentPermissionUserPayload } from '../lib/cloudbase';
+
+/** 记录登录日志（成功/失败都记录） */
+async function recordLogin(username: string, success: boolean, failReason?: string) {
+  try {
+    const currentUser = success ? await getCurrentPermissionUserPayload().catch(() => null) : null;
+    await callFunction('manageLoginLogs', {
+      data: {
+        action: 'record',
+        username,
+        success,
+        failReason,
+        userAgent: navigator.userAgent || '',
+        currentUser,
+      },
+    });
+  } catch {
+    // 记录日志失败不影响登录流程
+  }
+}
 
 export function Login() {
   const navigate = useNavigate();
@@ -21,17 +40,22 @@ export function Login() {
     setLoading(false);
 
     if (error) {
+      void recordLogin(username, false, '用户名或密码错误');
       MessagePlugin.error('登录失败：用户名或密码错误');
       return;
     }
+    void recordLogin(username, true);
     MessagePlugin.success('登录成功');
-    const from = (location.state as any)?.from?.pathname || '/';
+    const rawFrom = (location.state as any)?.from?.pathname || '/';
+    // 避免跳回禁止访问页或登录页本身
+    const from = ['/forbidden', '/login'].includes(rawFrom) ? '/' : rawFrom;
     navigate(from, { replace: true });
   };
 
   return (
-    <div className="min-h-screen bg-gray-900 flex items-center justify-center p-4">
-      <form onSubmit={handleLogin} className="w-full max-w-[400px] bg-white rounded-2xl shadow p-8">
+    <div className="relative min-h-screen overflow-hidden bg-[linear-gradient(135deg,#0f172a_0%,#1d4ed8_48%,#14b8a6_100%)] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(255,255,255,0.24),transparent_28%),radial-gradient(circle_at_80%_10%,rgba(191,219,254,0.26),transparent_24%),radial-gradient(circle_at_50%_90%,rgba(20,184,166,0.2),transparent_30%)]" />
+      <form onSubmit={handleLogin} className="relative z-10 w-full max-w-[400px] rounded-2xl border border-white/30 bg-white/95 p-8 shadow-2xl backdrop-blur">
         <div className="text-center mb-8">
           <div className="w-14 h-14 bg-primary rounded-xl flex items-center justify-center mx-auto mb-4">
             <Package size={28} className="text-white" />

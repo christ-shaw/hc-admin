@@ -1,0 +1,10 @@
+{
+  "name": "getUserRole",
+  "version": "1.0.0",
+  "description": "获取当前登录用户角色与权限",
+  "main": "index.js",
+  "dependencies": {
+    "@cloudbase/node-sdk": "^3.16.0",
+    "wx-server-sdk": "~2.6.3"
+  }
+}

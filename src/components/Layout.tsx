@@ -16,17 +16,19 @@ import {
   ShoppingCart,
   Receipt,
   Building2,
+  Bell,
   ChevronDown,
   ChevronRight,
   Settings,
 } from 'lucide-react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { getCurrentUser, signOut, callFunction } from '../lib/cloudbase';
+import { usePermission } from '../contexts/PermissionContext';
 
 const { Header, Content, Aside } = TLayout;
 
 const navItems = [
-  { path: '/', label: '仪表盘', Icon: LayoutDashboard },
+  { path: '/', label: '首页', Icon: LayoutDashboard },
   { path: '/inbound', label: '入库记录', Icon: ArrowDownCircle },
   { path: '/outbound', label: '出库记录', Icon: ArrowUpCircle },
   { path: '/inventory', label: '库存管理', Icon: Warehouse },
@@ -44,14 +46,30 @@ const navItems = [
   { path: '/settings', label: '系统设置', Icon: Settings },
 ];
 
+type NavItem = typeof navItems[number];
+
+interface OrderMessageRecord {
+  salesperson?: string;
+  paymentAccount?: string;
+  orderType?: string;
+  returnStatus?: string;
+}
+
+function getUserDisplayName(user: { id?: string; user_metadata?: { username?: string; nickName?: string } } | null) {
+  return user?.user_metadata?.nickName || user?.user_metadata?.username || user?.id?.slice(0, 8) || '';
+}
+
 export function AppLayout({ children }: { children: React.ReactNode }) {
   const navigate = useNavigate();
   const location = useLocation();
+  const { status: permissionStatus, canInitialize, canAccessPage } = usePermission();
   const [collapsed, setCollapsed] = useState(false);
   const sidebarToggleLabel = collapsed ? '展开侧边栏' : '收起侧边栏';
   const [expandedMenus, setExpandedMenus] = useState<string[]>(['发票']);
   const [currentUser, setCurrentUser] = useState<{ id?: string; user_metadata?: { username?: string; nickName?: string } } | null>(null);
   const [pendingCount, setPendingCount] = useState(0);
+  const [hasUserMessages, setHasUserMessages] = useState(false);
+  const currentUserName = getUserDisplayName(currentUser);
 
   useEffect(() => {
     getCurrentUser().then(user => {
@@ -77,6 +95,38 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
     return () => clearInterval(timer);
   }, [fetchPendingCount]);
 
+  /** 获取当前登录人的订单消息提示 */
+  const fetchUserMessageStatus = useCallback(async () => {
+    const username = getUserDisplayName(currentUser);
+    if (!username) {
+      setHasUserMessages(false);
+      return;
+    }
+
+    try {
+      const result = await callFunction<{ data?: OrderMessageRecord[] }>('queryOrders', {
+        data: { limit: 100, cursor: null },
+      });
+      const orders = result.data || [];
+      const hasMessages = orders.some(order => {
+        if (order.salesperson !== username) return false;
+        const needReturn = ['postRentalShip', 'postRentalReturn'].includes(order.orderType || '') && order.returnStatus !== 'returned';
+        const needPayment = order.paymentAccount === '未收款';
+        return needReturn || needPayment;
+      });
+      setHasUserMessages(hasMessages);
+    } catch {
+      // 静默失败，不影响主界面
+      setHasUserMessages(false);
+    }
+  }, [currentUser]);
+
+  useEffect(() => {
+    fetchUserMessageStatus();
+    const timer = setInterval(fetchUserMessageStatus, 60000);
+    return () => clearInterval(timer);
+  }, [fetchUserMessageStatus]);
+
   const toggleMenu = (label: string) => {
     setExpandedMenus(prev =>
       prev.includes(label) ? prev.filter(l => l !== label) : [...prev, label]
@@ -91,6 +141,26 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
     MessagePlugin.success('已退出登录');
     navigate('/login', { replace: true });
   };
+
+  const visibleNavItems = navItems
+    .map((item): NavItem | null => {
+      if (permissionStatus === 'loading') return null;
+
+      if (permissionStatus === 'uninitialized') {
+        return canInitialize && 'path' in item && item.path === '/settings' ? item : null;
+      }
+
+      if (permissionStatus !== 'ready') return null;
+
+      if ('children' in item && item.children) {
+        const children = item.children.filter(child => canAccessPage(child.path));
+        if (children.length === 0) return null;
+        return { ...item, children } as NavItem;
+      }
+
+      return 'path' in item && canAccessPage(item.path) ? item : null;
+    })
+    .filter((item): item is NavItem => !!item);
 
   return (
     <TLayout className="h-screen">
@@ -114,7 +184,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
 
           {/* 导航列表 */}
           <nav className="flex-1 pt-4 px-2 space-y-1">
-            {navItems.map((item) => {
+            {visibleNavItems.map((item) => {
               // 带子菜单的分组
               if ('children' in item && item.children) {
                 const groupActive = isGroupActive(item.children);
@@ -206,11 +276,22 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
 
           {/* 用户信息 + 退出 */}
           <div className="flex items-center gap-3">
+            <button
+              onClick={() => navigate('/')}
+              className="relative flex h-8 w-8 items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 hover:text-primary"
+              title="消息提醒"
+              aria-label="消息提醒"
+            >
+              <Bell size={17} />
+              {hasUserMessages && (
+                <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500" />
+              )}
+            </button>
             <div className="flex items-center gap-2 text-sm text-gray-600">
               <User size={16} className="text-gray-400" />
               <span className="text-gray-500">用户名:</span>
               <span className="font-medium text-gray-800">
-                {currentUser?.user_metadata?.nickName || currentUser?.user_metadata?.username || currentUser?.id?.slice(0, 8) || '--'}
+                {currentUserName || '--'}
               </span>
             </div>
             <button
@@ -224,8 +305,15 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
         </Header>
 
         {/* 内容区 */}
-        <Content className="!bg-gray-50 !p-6 overflow-auto">
-          {children}
+        <Content className="!bg-gray-50 overflow-auto">
+          <div className="flex min-h-full flex-col p-6">
+            <div className="flex-1">
+              {children}
+            </div>
+            <footer className="mt-8 py-4 text-center text-sm text-gray-400">
+              Copyright 2026 Hongcheng. All Rights Reserved
+            </footer>
+          </div>
         </Content>
       </TLayout>
     </TLayout>
