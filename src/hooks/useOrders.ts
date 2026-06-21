@@ -32,6 +32,32 @@ interface CancelSfExpressResult extends ApplyExpressResult {
   resStatus?: string | number;
 }
 
+interface GenerateOutboundResult {
+  success: boolean;
+  errMsg?: string;
+  data?: {
+    outboundId?: string;
+    outboundNumber?: string;
+    outboundStatus?: 'pending' | 'completed' | 'cancelled';
+  };
+  outbound?: {
+    outboundId?: string;
+    outboundNumber?: string;
+    outboundStatus?: 'pending' | 'completed' | 'cancelled';
+  };
+}
+
+interface CancelOutboundResult {
+  success: boolean;
+  errMsg?: string;
+  data?: {
+    outboundId?: string;
+    outboundNumber?: string;
+    outboundStatus?: 'cancelled';
+    orderUpdated?: boolean;
+  };
+}
+
 interface OrderState {
   records: OrderRecord[];
   cursor: string | null;
@@ -150,6 +176,59 @@ export function useOrders() {
     } catch (err) {
       console.error('更新订单失败:', err);
       return false;
+    }
+  }, []);
+
+  /** 手动生成订单关联出库单 */
+  const generateOutbound = useCallback(async (_id: string): Promise<GenerateOutboundResult> => {
+    try {
+      const result = await callFunction<GenerateOutboundResult>('generateOutboundRecord', {
+        data: { orderId: _id },
+      });
+
+      if (result.success) {
+        const outbound = result.data || result.outbound || {};
+        setState(prev => ({
+          ...prev,
+          records: prev.records.map(r => r._id === _id ? {
+            ...r,
+            linkedOutboundId: outbound.outboundId || r.linkedOutboundId,
+            linkedOutboundNumber: outbound.outboundNumber || r.linkedOutboundNumber,
+            outboundSyncStatus: outbound.outboundStatus === 'completed' ? 'completed' : 'pending',
+          } : r),
+        }));
+      }
+
+      return result;
+    } catch (err) {
+      console.error('生成出库单失败:', err);
+      return { success: false, errMsg: String(err) };
+    }
+  }, []);
+
+  /** 取消订单关联的待出库单 */
+  const cancelOutbound = useCallback(async (_id: string, reason?: string): Promise<CancelOutboundResult> => {
+    try {
+      const result = await callFunction<CancelOutboundResult>('cancelOutbound', {
+        data: { orderId: _id, reason },
+      });
+
+      if (result.success) {
+        setState(prev => ({
+          ...prev,
+          records: prev.records.map(r => r._id === _id ? {
+            ...r,
+            linkedOutboundId: '',
+            linkedOutboundNumber: '',
+            outboundSyncStatus: 'none',
+          } : r),
+        }));
+      }
+
+      return result;
+    } catch (err) {
+      console.error('取消出库失败:', err);
+      return { success: false, errMsg: String(err) };
     }
   }, []);
 
@@ -343,6 +422,8 @@ export function useOrders() {
     importOrders,
     deleteOrder,
     updateOrder,
+    generateOutbound,
+    cancelOutbound,
     applySfExpress,
     querySfOrderResult,
     cancelSfExpress,

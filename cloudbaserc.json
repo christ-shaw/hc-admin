@@ -106,6 +106,21 @@
       "runtime": "Nodejs18.15"
     },
     {
+      "name": "generateOutboundRecord",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
+      "name": "completeOutbound",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
+      "name": "cancelOutbound",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
       "name": "sendWechatNotification",
       "handler": "index.main",
       "runtime": "Nodejs18.15"

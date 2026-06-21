@@ -53,12 +53,26 @@ export interface InboundRecord {
 /** 出库记录 */
 export interface OutboundRecord {
   _id: string;
+  outboundNumber?: string;
+  outboundStatus?: 'pending' | 'completed' | 'cancelled';
   customerName: string;
+  consignee?: string;
+  consigneePhone?: string;
+  consigneeAddress?: string;
   outboundDate: string;
+  completedDate?: string;
+  completedBy?: string;
+  cancelledDate?: string;
+  cancelledBy?: string;
+  cancelReason?: string;
   trackingNumber?: string;
   phoneModels: PhoneModelItem[];
   phonePhotos?: string[];
   hasIssue?: boolean;
+  linkedOrderId?: string;
+  linkedOrderSerialNumber?: number;
+  source?: 'order' | 'manual';
+  linkedOrderStatus?: 'active' | 'deleted' | 'missing';
   remark?: string;
   createTime?: { $date: string };
 }
@@ -107,9 +121,12 @@ export interface InboundFilters {
 
 /** 出库筛选条件 */
 export interface OutboundFilters {
+  outboundNumber?: string;
+  outboundStatus?: 'pending' | 'completed' | 'cancelled' | '';
   customerName?: string;
   trackingNumber?: string;
   model?: string;
+  source?: 'order' | 'manual' | '';
   startDate?: string;
   endDate?: string;
 }
@@ -181,6 +198,9 @@ export interface OrderRecord {
   attachments: OrderAttachment[];   // 订单附件
   returnStatus?: string;            // 归还状态（租后发货/租后退货时使用）
   returnTrackingNumbers?: string;   // 归还物流单号（多个逗号分隔，归还状态=运输途中时必填）
+  linkedOutboundId?: string;        // 关联的出库单 _id
+  linkedOutboundNumber?: string;    // 关联的出库编号
+  outboundSyncStatus?: 'none' | 'pending' | 'completed'; // 出库同步状态
   createTime?: { $date: string };
 }
 

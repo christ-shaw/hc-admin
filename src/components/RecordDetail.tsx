@@ -1,9 +1,15 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Dialog, Tag, Loading } from 'tdesign-react';
+import { Dialog, Tag, Loading, Tabs } from 'tdesign-react';
 import { InboundRecord, OutboundRecord, CHANNEL_TYPE_MAP } from '../types';
 import { formatDate, getTotalQuantity } from '../utils/format';
 import { useStorage } from '../hooks/useStorage';
 import { useLogs } from '../hooks/useLogs';
+import {
+  getOutboundSourceText,
+  getOutboundStatusText,
+  getOutboundStatusTheme,
+  resolveOutboundStatus,
+} from '../utils/outboundLinkage';
 
 interface RecordDetailProps {
   visible: boolean;
@@ -24,8 +30,13 @@ export function RecordDetail({ visible, record, type, onClose, onEdit, onDelete 
   const [historyData, setHistoryData] = useState<Array<Record<string, unknown>>>([]);
   const [previewVisible, setPreviewVisible] = useState(false);
   const [previewSrc, setPreviewSrc] = useState('');
+  const [activeTab, setActiveTab] = useState('basic');
 
   const isInbound = type === 'inbound';
+
+  useEffect(() => {
+    setActiveTab('basic');
+  }, [record?._id, type]);
 
   // 当 record 变化时，重置并加载图片
   useEffect(() => {
@@ -82,6 +93,8 @@ export function RecordDetail({ visible, record, type, onClose, onEdit, onDelete 
 
   const packagePhotos = isInbound ? (record as InboundRecord).packagePhotos || [] : [];
   const phonePhotos = record.phonePhotos || [];
+  const outboundRecord = record as OutboundRecord;
+  const outboundStatus = resolveOutboundStatus(outboundRecord);
 
   return (
     <>
@@ -89,7 +102,7 @@ export function RecordDetail({ visible, record, type, onClose, onEdit, onDelete 
         header="记录详情"
         visible={visible}
         onClose={onClose}
-        width="600px"
+        width={isInbound ? '600px' : '720px'}
         footer={
           <div className="flex gap-2">
             <button onClick={loadHistory} className="text-primary text-sm hover:underline cursor-pointer">
@@ -105,66 +118,93 @@ export function RecordDetail({ visible, record, type, onClose, onEdit, onDelete 
           </div>
         }
       >
-        <div className="space-y-3">
-          <DetailItem label="客户名称" value={record.customerName} />
-          <DetailItem label="日期" value={isInbound ? formatDate((record as InboundRecord).inboundDate) : formatDate((record as OutboundRecord).outboundDate)} />
-          {isInbound && (
-            <>
-              <DetailItem label="渠道类型" value={CHANNEL_TYPE_MAP[(record as InboundRecord).type] || (record as InboundRecord).type || '-'} />
-              <DetailItem label="渠道名称" value={(record as InboundRecord).shopName || '-'} />
-            </>
-          )}
-          <DetailItem label="快递单号" value={(isInbound ? (record as InboundRecord).trackingNumber : (record as OutboundRecord).trackingNumber) || '-'} />
-          <DetailItem label="手机型号" value={
-            <div className="space-y-1">
-              {record.phoneModels?.map((m, i) => (
-                <div key={i} className="flex gap-2 text-sm">
-                  <span>{m.model}</span>
-                  <Tag theme="primary" variant="light">x{m.quantity}</Tag>
-                </div>
-              )) || '-'}
-            </div>
-          } />
-          <DetailItem label="手机总数" value={String(getTotalQuantity(record))} />
-          <DetailItem label="异常状态" value={
-            record.hasIssue
-              ? <Tag theme="danger" variant="light">有异常</Tag>
-              : <Tag theme="success" variant="light">正常</Tag>
-          } />
-          {record.remark && <DetailItem label="备注" value={record.remark} />}
+        {isInbound ? (
+          <div className="space-y-3">
+            <DetailItem label="客户名称" value={record.customerName} />
+            <DetailItem label="日期" value={formatDate((record as InboundRecord).inboundDate)} />
+            <DetailItem label="渠道类型" value={CHANNEL_TYPE_MAP[(record as InboundRecord).type] || (record as InboundRecord).type || '-'} />
+            <DetailItem label="渠道名称" value={(record as InboundRecord).shopName || '-'} />
+            <DetailItem label="快递单号" value={(record as InboundRecord).trackingNumber || '-'} />
+            <GoodsDetail record={record} />
+            <DetailItem label="手机总数" value={String(getTotalQuantity(record))} />
+            <IssueDetail record={record} />
+            {record.remark && <DetailItem label="备注" value={record.remark} />}
+            <PhotoSection
+              title="包裹照片"
+              photos={packagePhotos}
+              imageUrls={imageUrls}
+              imagesLoading={imagesLoading}
+              onPreview={(src) => { setPreviewSrc(src); setPreviewVisible(true); }}
+            />
+            <PhotoSection
+              title="手机照片"
+              photos={phonePhotos}
+              imageUrls={imageUrls}
+              imagesLoading={imagesLoading}
+              onPreview={(src) => { setPreviewSrc(src); setPreviewVisible(true); }}
+            />
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <Tabs
+              value={activeTab}
+              onChange={(val) => setActiveTab(val as string)}
+              list={[
+                { value: 'basic', label: '基本信息' },
+                { value: 'goods', label: '货品明细' },
+                { value: 'order', label: '关联订单' },
+              ]}
+            />
 
-          {/* 包裹照片 */}
-          {isInbound && packagePhotos.length > 0 && (
-            <div>
-              <span className="text-sm text-gray-500">包裹照片：</span>
-              {imagesLoading && Object.keys(imageUrls).length === 0 ? (
-                <div className="flex items-center gap-2 py-4"><Loading size="small" /><span className="text-xs text-gray-400">加载中...</span></div>
-              ) : (
-                <div className="grid grid-cols-4 gap-2 mt-2">
-                  {packagePhotos.map((photo, i) => (
-                    <PhotoItem key={`pkg-${i}`} photo={photo} imageUrls={imageUrls} onPreview={(src) => { setPreviewSrc(src); setPreviewVisible(true); }} />
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
+            {activeTab === 'basic' && (
+              <div className="space-y-2">
+                <DetailItem label="出库编号" value={outboundRecord.outboundNumber || '-'} />
+                <DetailItem label="出库状态" value={
+                  <Tag theme={getOutboundStatusTheme(outboundStatus)} variant="light">
+                    {getOutboundStatusText(outboundStatus)}
+                  </Tag>
+                } />
+                <DetailItem label="出库日期" value={formatDate(outboundRecord.outboundDate)} />
+                <DetailItem label="完成日期" value={outboundRecord.completedDate ? formatDate(outboundRecord.completedDate) : '-'} />
+                <DetailItem label="来源" value={getOutboundSourceText(outboundRecord.source)} />
+                <DetailItem label="操作人" value={outboundRecord.completedBy || '-'} />
+                <DetailItem label="客户名称" value={outboundRecord.customerName || '-'} />
+                <DetailItem label="收货人" value={outboundRecord.consignee || '-'} />
+                <DetailItem label="收货电话" value={outboundRecord.consigneePhone || '-'} />
+                <DetailItem label="收货地址" value={outboundRecord.consigneeAddress || '-'} />
+                <DetailItem label="物流单号" value={outboundRecord.trackingNumber || '-'} />
+              </div>
+            )}
 
-          {/* 手机照片 */}
-          {phonePhotos.length > 0 && (
-            <div>
-              <span className="text-sm text-gray-500">手机照片：</span>
-              {imagesLoading && Object.keys(imageUrls).length === 0 ? (
-                <div className="flex items-center gap-2 py-4"><Loading size="small" /><span className="text-xs text-gray-400">加载中...</span></div>
-              ) : (
-                <div className="grid grid-cols-4 gap-2 mt-2">
-                  {phonePhotos.map((photo, i) => (
-                    <PhotoItem key={`phone-${i}`} photo={photo} imageUrls={imageUrls} onPreview={(src) => { setPreviewSrc(src); setPreviewVisible(true); }} />
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
+            {activeTab === 'goods' && (
+              <div className="space-y-3">
+                <GoodsDetail record={record} />
+                <DetailItem label="手机总数" value={String(getTotalQuantity(record))} />
+                <IssueDetail record={record} />
+                {record.remark && <DetailItem label="备注" value={record.remark} />}
+                <PhotoSection
+                  title="手机照片"
+                  photos={phonePhotos}
+                  imageUrls={imageUrls}
+                  imagesLoading={imagesLoading}
+                  onPreview={(src) => { setPreviewSrc(src); setPreviewVisible(true); }}
+                />
+              </div>
+            )}
+
+            {activeTab === 'order' && (
+              <div className="space-y-2">
+                <DetailItem label="订单序号" value={outboundRecord.linkedOrderSerialNumber ? `#${outboundRecord.linkedOrderSerialNumber}` : '-'} />
+                <DetailItem label="订单ID" value={outboundRecord.linkedOrderId || '-'} />
+                <DetailItem label="关联状态" value={outboundRecord.linkedOrderStatus || (outboundRecord.linkedOrderId ? 'active' : '-')} />
+                <DetailItem label="客户名称" value={outboundRecord.customerName || '-'} />
+                <DetailItem label="收货人" value={outboundRecord.consignee || '-'} />
+                <DetailItem label="收货电话" value={outboundRecord.consigneePhone || '-'} />
+                <DetailItem label="收货地址" value={outboundRecord.consigneeAddress || '-'} />
+              </div>
+            )}
+          </div>
+        )}
       </Dialog>
 
       {/* 修改历史弹窗 */}
@@ -247,6 +287,62 @@ function DetailItem({ label, value }: { label: string; value: React.ReactNode })
     <div className="flex py-2 border-b border-gray-50">
       <span className="w-24 text-sm text-gray-500 flex-shrink-0">{label}</span>
       <div className="text-sm text-gray-800">{value}</div>
+    </div>
+  );
+}
+
+function GoodsDetail({ record }: { record: InboundRecord | OutboundRecord }) {
+  return (
+    <DetailItem label="手机型号" value={
+      <div className="space-y-1">
+        {record.phoneModels?.length ? record.phoneModels.map((m, i) => (
+          <div key={i} className="flex gap-2 text-sm">
+            <span>{m.model || '-'}</span>
+            <Tag theme="primary" variant="light">x{m.quantity || 0}</Tag>
+          </div>
+        )) : '-'}
+      </div>
+    } />
+  );
+}
+
+function IssueDetail({ record }: { record: InboundRecord | OutboundRecord }) {
+  return (
+    <DetailItem label="异常状态" value={
+      record.hasIssue
+        ? <Tag theme="danger" variant="light">有异常</Tag>
+        : <Tag theme="success" variant="light">正常</Tag>
+    } />
+  );
+}
+
+function PhotoSection({
+  title,
+  photos,
+  imageUrls,
+  imagesLoading,
+  onPreview,
+}: {
+  title: string;
+  photos: string[];
+  imageUrls: Record<string, string>;
+  imagesLoading: boolean;
+  onPreview: (src: string) => void;
+}) {
+  if (photos.length === 0) return null;
+
+  return (
+    <div>
+      <span className="text-sm text-gray-500">{title}：</span>
+      {imagesLoading && Object.keys(imageUrls).length === 0 ? (
+        <div className="flex items-center gap-2 py-4"><Loading size="small" /><span className="text-xs text-gray-400">加载中...</span></div>
+      ) : (
+        <div className="grid grid-cols-4 gap-2 mt-2">
+          {photos.map((photo, i) => (
+            <PhotoItem key={`${title}-${i}`} photo={photo} imageUrls={imageUrls} onPreview={onPreview} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

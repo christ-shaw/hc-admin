@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Table, Button, Input, MessagePlugin, Dialog } from 'tdesign-react';
+import { Table, Button, Input, MessagePlugin, Dialog, Select, Tag } from 'tdesign-react';
 import { Search, RotateCcw } from 'lucide-react';
 import { OutboundRecord, OutboundFilters } from '../types';
 import { useOutbound } from '../hooks/useOutbound';
@@ -9,6 +9,19 @@ import { formatDate, getTotalQuantity } from '../utils/format';
 import { getCurrentOperatorName } from '../lib/cloudbase';
 import { RecordDetail } from '../components/RecordDetail';
 import { RecordEdit } from '../components/RecordEdit';
+import {
+  getOutboundSourceText,
+  getOutboundStatusText,
+  getOutboundStatusTheme,
+  resolveOutboundStatus,
+} from '../utils/outboundLinkage';
+
+const OUTBOUND_STATUS_OPTIONS = [
+  { label: '全部', value: '' },
+  { label: '待出库', value: 'pending' },
+  { label: '已出库', value: 'completed' },
+  { label: '已取消', value: 'cancelled' },
+];
 
 export function OutboundList() {
   const outbound = useOutbound();
@@ -29,6 +42,7 @@ export function OutboundList() {
     outbound.resetFilters();
     const searchFilters: OutboundFilters = { ...filters };
     // trim 字符串字段，避免前后空格导致查不到
+    if (searchFilters.outboundNumber) searchFilters.outboundNumber = searchFilters.outboundNumber.trim();
     if (searchFilters.customerName) searchFilters.customerName = searchFilters.customerName.trim();
     if (searchFilters.trackingNumber) searchFilters.trackingNumber = searchFilters.trackingNumber.trim();
     if (searchFilters.model) searchFilters.model = searchFilters.model.trim();
@@ -79,8 +93,36 @@ export function OutboundList() {
   };
 
   const columns = [
+    {
+      colKey: 'outboundNumber',
+      title: '出库编号',
+      width: 150,
+      ellipsis: true,
+      cell: ({ row }: { row: OutboundRecord }) => row.outboundNumber || '-',
+    },
+    {
+      colKey: 'outboundStatus',
+      title: '出库状态',
+      width: 100,
+      cell: ({ row }: { row: OutboundRecord }) => {
+        const status = resolveOutboundStatus(row);
+        return <Tag theme={getOutboundStatusTheme(status)} variant="light">{getOutboundStatusText(status)}</Tag>;
+      },
+    },
     { colKey: 'outboundDate', title: '出库日期', width: 110, cell: ({ row }: { row: OutboundRecord }) => formatDate(row.outboundDate, false) },
     { colKey: 'customerName', title: '客户名称', width: 140, ellipsis: true },
+    {
+      colKey: 'linkedOrderSerialNumber',
+      title: '关联订单',
+      width: 100,
+      cell: ({ row }: { row: OutboundRecord }) => row.linkedOrderSerialNumber ? `#${row.linkedOrderSerialNumber}` : '-',
+    },
+    {
+      colKey: 'source',
+      title: '来源',
+      width: 90,
+      cell: ({ row }: { row: OutboundRecord }) => getOutboundSourceText(row.source),
+    },
     { colKey: 'trackingNumber', title: '快递单号', width: 140, cell: ({ row }: { row: OutboundRecord }) => row.trackingNumber || '-' },
     { colKey: 'phoneModels', title: '手机型号', width: 200, cell: ({ row }: { row: OutboundRecord }) =>
       row.phoneModels?.map(m => `${m.model} x${m.quantity}`).join(', ') || '-'
@@ -110,7 +152,9 @@ export function OutboundList() {
 
       {/* 筛选栏 */}
       <div className="glass-card p-4">
-        <div className="grid grid-cols-2 md:grid-cols-6 gap-3 items-end">
+        <div className="grid grid-cols-2 md:grid-cols-8 gap-3 items-end">
+          <Input placeholder="出库编号" value={filters.outboundNumber || ''} onChange={(val) => setFilters(prev => ({ ...prev, outboundNumber: val as string }))} />
+          <Select placeholder="出库状态" value={filters.outboundStatus || ''} onChange={(val) => setFilters(prev => ({ ...prev, outboundStatus: val as OutboundFilters['outboundStatus'] }))} options={OUTBOUND_STATUS_OPTIONS} />
           <Input placeholder="客户名称" value={filters.customerName || ''} onChange={(val) => setFilters(prev => ({ ...prev, customerName: val as string }))} />
           <Input placeholder="快递单号" value={filters.trackingNumber || ''} onChange={(val) => setFilters(prev => ({ ...prev, trackingNumber: val as string }))} />
           <Input placeholder="手机型号" value={filters.model || ''} onChange={(val) => setFilters(prev => ({ ...prev, model: val as string }))} />

@@ -5,6 +5,7 @@ import { Search, RotateCcw, Upload, Download, Plus, Pencil, Trash2, Minus, X, Ch
 import { OrderRecord, OrderFilters, InboundRecord, OutboundRecord, PhoneModelItem, ORDER_TYPE_MAP, ORDER_SOURCE_MAP, ORDER_ATTRIBUTE_MAP, SALES_CHANNEL_MAP, ORDER_STATUS_MAP, CHANNEL_CATEGORY_MAP, SHIPPING_FEE_MAP, ProductItem, TransferProductItem, OrderAttachment, dictToOptions, getDictLabel } from '../types';
 import { useOrders } from '../hooks/useOrders';
 import { formatDate, getChannelTypeText, getTotalQuantity } from '../utils/format';
+import { OUTBOUND_SYNC_STATUS_MAP, getOutboundSyncStatusTheme, resolveOutboundStatus, resolveOutboundSyncStatus } from '../utils/outboundLinkage';
 import { parseOrderExcel, exportOrderExcel } from '../utils/orderExcel';
 import { BRANDS, getBrandLabel, getProductLabel, getProductsByBrand, getSpecsByProduct, PAYMENT_ACCOUNTS, SALESPERSONS } from '../data/dict';
 import { parseConsigneeInfo, callFunction, getCloudFileURLs, getCurrentOperatorName, uploadToCloudStorage } from '../lib/cloudbase';
@@ -195,6 +196,27 @@ function shouldShowAfterSaleInboundConfirm(record: OrderRecord): boolean {
   return needsReturnConfirm && record.returnStatus !== 'returned';
 }
 
+function requiresPhysicalShipment(record: OrderRecord): boolean {
+  if (record.status === 'noShip') return false;
+  if (record.brand === '虚拟产品') return false;
+
+  const virtualProducts = ORDER_TYPE_VIRTUAL_PRODUCTS[record.orderType] || [];
+  if (virtualProducts.includes(record.productName)) return false;
+
+  return true;
+}
+
+function getGenerateOutboundBlockedReason(record: OrderRecord): string {
+  if (record.linkedOutboundId || record.linkedOutboundNumber) return '该订单已有关联出库单';
+  if (!isPendingShipmentStatus(record.status)) return '仅待发货订单可生成出库单';
+  if (!requiresPhysicalShipment(record)) return '该订单无需实物出库';
+  return '';
+}
+
+function canCancelOutbound(record: OrderRecord): boolean {
+  return !!(record.linkedOutboundId || record.linkedOutboundNumber) && record.outboundSyncStatus !== 'completed';
+}
+
 function clearHiddenProductPaymentFields(form: Pick<OrderFormData, 'orderSource' | 'orderType' | 'orderAttribute' | 'products'>): ProductItem[] {
   return form.products.map(product => {
     if (shouldShowProductPaymentFields(form.orderSource, form.orderType, form.orderAttribute, product.brand)) return product;
@@ -272,6 +294,8 @@ export function Orders() {
   const [applyingExpressId, setApplyingExpressId] = useState<string | null>(null);
   const [queryingSfResultId, setQueryingSfResultId] = useState<string | null>(null);
   const [cancelingSfId, setCancelingSfId] = useState<string | null>(null);
+  const [generatingOutboundId, setGeneratingOutboundId] = useState<string | null>(null);
+  const [cancelingOutboundId, setCancelingOutboundId] = useState<string | null>(null);
   const [addVisible, setAddVisible] = useState(false);
   const [addForm, setAddForm] = useState<OrderFormData>(EMPTY_ORDER);
   const [saving, setSaving] = useState(false);
@@ -415,6 +439,54 @@ export function Orders() {
       setCancelingSfId(null);
     }
   }, [cancelingSfId, orders]);
+
+  const handleGenerateOutbound = useCallback(async (record: OrderRecord) => {
+    if (!record._id || generatingOutboundId) return;
+
+    const blockedReason = getGenerateOutboundBlockedReason(record);
+    if (blockedReason) {
+      MessagePlugin.warning(blockedReason);
+      return;
+    }
+
+    if (!window.confirm(`确认根据订单 #${record.serialNumber || '-'} 生成待出库单吗？`)) return;
+
+    setGeneratingOutboundId(record._id);
+    try {
+      const result = await orders.generateOutbound(record._id);
+      if (result.success) {
+        const outbound = result.data || result.outbound || {};
+        MessagePlugin.success(`出库单生成成功${outbound.outboundNumber ? `：${outbound.outboundNumber}` : ''}`);
+      } else {
+        MessagePlugin.error(result.errMsg || '生成出库单失败');
+      }
+    } finally {
+      setGeneratingOutboundId(null);
+    }
+  }, [generatingOutboundId, orders]);
+
+  const handleCancelOutbound = useCallback(async (record: OrderRecord) => {
+    if (!record._id || cancelingOutboundId) return;
+
+    if (!canCancelOutbound(record)) {
+      MessagePlugin.warning('该订单当前没有可取消的待出库单');
+      return;
+    }
+
+    if (!window.confirm(`确认取消订单 #${record.serialNumber || '-'} 的待出库单吗？`)) return;
+
+    setCancelingOutboundId(record._id);
+    try {
+      const result = await orders.cancelOutbound(record._id, '订单页面手动取消出库');
+      if (result.success) {
+        MessagePlugin.success('已取消出库');
+      } else {
+        MessagePlugin.error(result.errMsg || '取消出库失败');
+      }
+    } finally {
+      setCancelingOutboundId(null);
+    }
+  }, [cancelingOutboundId, orders]);
 
   /** 导入 Excel */
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -710,13 +782,14 @@ export function Orders() {
       data: {
         type: 'outbound',
         customerName: keyword,
+        outboundStatus: 'completed',
         limit: 20,
         cursor: null,
       },
     });
 
     return (result.data || [])
-      .filter(item => item.trackingNumber)
+      .filter(item => item.trackingNumber && resolveOutboundStatus(item) === 'completed')
       .sort((a, b) => Number(b.customerName === keyword) - Number(a.customerName === keyword));
   }, []);
 
@@ -1078,8 +1151,17 @@ export function Orders() {
       },
     },
     {
-      colKey: 'op', title: '操作', width: 330, fixed: 'right' as const,
-      cell: ({ row }: { row: OrderRecord }) => (
+      colKey: 'outboundSyncStatus', title: '出库状态', width: 90,
+      cell: ({ row }: { row: OrderRecord }) => {
+        const status = resolveOutboundSyncStatus(row);
+        return <Tag theme={getOutboundSyncStatusTheme(status)} variant="light">{OUTBOUND_SYNC_STATUS_MAP[status]}</Tag>;
+      },
+    },
+    {
+      colKey: 'op', title: '操作', width: 390, fixed: 'right' as const,
+      cell: ({ row }: { row: OrderRecord }) => {
+        const hasOutbound = !!(row.linkedOutboundId || row.linkedOutboundNumber);
+        return (
         <div className="flex gap-1 flex-wrap">
           <Button variant="text" theme="primary" size="small"
             onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleDetail(row); }}>
@@ -1113,6 +1195,28 @@ export function Orders() {
             onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleEditOpen(row); }}>
             编辑
           </Button>
+          <Button
+            variant="text"
+            theme="primary"
+            size="small"
+            loading={generatingOutboundId === row._id}
+            disabled={hasOutbound || (!!generatingOutboundId && generatingOutboundId !== row._id)}
+            onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleGenerateOutbound(row); }}
+          >
+            {hasOutbound ? '已生成' : '生成出库'}
+          </Button>
+          {canCancelOutbound(row) && (
+            <Button
+              variant="text"
+              theme="danger"
+              size="small"
+              loading={cancelingOutboundId === row._id}
+              disabled={!!cancelingOutboundId && cancelingOutboundId !== row._id}
+              onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleCancelOutbound(row); }}
+            >
+              取消出库
+            </Button>
+          )}
           {isPendingShipmentStatus(row.status) && (
             <Button variant="text" theme="primary" size="small"
               onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleShipOpen(row); }}>
@@ -1130,9 +1234,10 @@ export function Orders() {
             删除
           </Button>
         </div>
-      ),
+        );
+      },
     },
-  ], [handleDetail, handleApplyExpress, handleQuerySfOrderResult, handleCancelSfExpress, handleEditOpen, handleShipOpen, handleAfterSaleInboundOpen, handleDeleteConfirm, applyingExpressId, queryingSfResultId, cancelingSfId]);
+  ], [handleDetail, handleApplyExpress, handleQuerySfOrderResult, handleCancelSfExpress, handleEditOpen, handleGenerateOutbound, handleCancelOutbound, handleShipOpen, handleAfterSaleInboundOpen, handleDeleteConfirm, applyingExpressId, queryingSfResultId, cancelingSfId, generatingOutboundId, cancelingOutboundId]);
 
   const displayRecords = orders.getPageRecords(orders.currentPage);
   const hasLoadedNextPage = orders.currentPage * PAGE_SIZE < orders.records.length;
@@ -1282,6 +1387,17 @@ export function Orders() {
               <Tag theme={STATUS_TAG_THEME[currentRecord.status] || 'default'} variant="light">
                 {getDictLabel(ORDER_STATUS_MAP, currentRecord.status) || '--'}
               </Tag>
+            } />
+            <DetailRow label="关联出库编号" value={currentRecord.linkedOutboundNumber || (currentRecord.linkedOutboundId ? currentRecord.linkedOutboundId : '-')} />
+            <DetailRow label="出库同步状态" value={
+              (() => {
+                const outboundStatus = resolveOutboundSyncStatus(currentRecord);
+                return (
+                  <Tag theme={getOutboundSyncStatusTheme(outboundStatus)} variant="light">
+                    {OUTBOUND_SYNC_STATUS_MAP[outboundStatus]}
+                  </Tag>
+                );
+              })()
             } />
             <DetailRow label="客服备注" value={currentRecord.customerRemark} />
             {/* 归还状态（租后发货/租后退货） */}
