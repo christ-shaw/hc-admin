@@ -311,7 +311,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
               {children}
             </div>
             <footer className="mt-8 py-4 text-center text-sm text-gray-400">
-              Copyright 2026 Hongcheng. All Rights Reserved
+              Copyright 2026 Yuntu. All Rights Reserved
             </footer>
           </div>
         </Content>
