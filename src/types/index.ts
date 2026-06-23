@@ -4,6 +4,7 @@ import type { InvoiceStatus } from '../data/dict';
 export {
   CHANNEL_TYPE_MAP,
   ORDER_STATUS_MAP,
+  RETURN_STATUS_MAP,
   ORDER_SOURCE_MAP,
   ORDER_ATTRIBUTE_MAP,
   ORDER_TYPE_MAP,

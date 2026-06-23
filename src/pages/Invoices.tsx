@@ -1,11 +1,11 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useMemo, useState, useRef } from 'react';
 import { Table, Button, Input, Select, Tag, Dialog, MessagePlugin } from 'tdesign-react';
 import { Search, RotateCcw, Plus, Eye, Download, Upload, X, ChevronRight, ChevronLeft, Check } from 'lucide-react';
-import { InvoiceRecord, InvoiceFilters, INVOICE_STATUS_MAP, CompanyTemplate, InvoiceFile, dictToOptions, getDictLabel } from '../types';
+import { InvoiceRecord, InvoiceFilters, CompanyTemplate, InvoiceFile, dictToOptions, getDictLabel } from '../types';
 import { useInvoices } from '../hooks/useInvoices';
 import { callFunction, getCurrentOperatorName, uploadToCloudStorage, getCloudFileURLs } from '../lib/cloudbase';
 import { formatDate } from '../utils/format';
-import { SHOP_NAMES, INVOICE_CATEGORIES } from '../data/dict';
+import { DICT_CODES, useDictionaries } from '../contexts/DictionaryContext';
 
 const STATUS_TAG_THEME: Record<string, 'success' | 'warning' | 'danger' | 'default'> = {
   paid: 'success',
@@ -49,6 +49,11 @@ const EMPTY_INVOICE: Omit<InvoiceRecord, '_id' | 'createTime'> = {
 
 export function Invoices() {
   const invoices = useInvoices();
+  const dictionaries = useDictionaries();
+  const INVOICE_STATUS_MAP = dictionaries.getMap(DICT_CODES.invoiceStatus);
+  const invoiceStatusOptions = useMemo(() => dictToOptions(INVOICE_STATUS_MAP), [INVOICE_STATUS_MAP]);
+  const invoiceCategoryOptions = dictionaries.getOptions(DICT_CODES.invoiceCategory);
+  const shopNameOptions = dictionaries.getOptions(DICT_CODES.shopName);
 
   const [filters, setFilters] = useState<InvoiceFilters>({});
   const [detailVisible, setDetailVisible] = useState(false);
@@ -587,7 +592,7 @@ export function Invoices() {
             <label className="block text-xs text-gray-500 mb-1">开票状态</label>
             <Select placeholder="全部" value={filters.status || undefined}
               onChange={(val) => setFilters(prev => ({ ...prev, status: val as string }))}
-              options={[{ label: '全部', value: '' }, ...dictToOptions(INVOICE_STATUS_MAP)]}
+              options={[{ label: '全部', value: '' }, ...invoiceStatusOptions]}
               popupProps={{ attach: 'body' }} />
           </div>
           <div className="flex items-end gap-2">
@@ -738,7 +743,7 @@ export function Invoices() {
                 <label className="block text-xs text-gray-500 mb-1">店铺名字 <span className="text-red-500">*</span></label>
                 <Select placeholder="请选择店铺" value={addForm.shopName || undefined}
                   onChange={val => setAddForm(prev => ({ ...prev, shopName: val as string }))}
-                  options={SHOP_NAMES.map(v => ({ label: v, value: v }))}
+                  options={shopNameOptions}
                   popupProps={{ attach: 'body' }}
                   size="large" />
               </div>
@@ -822,7 +827,7 @@ export function Invoices() {
                       // 切换类目时重置相关字段
                       ...(val !== '二手手机' ? { phoneModel: '', phoneQuantity: 0, unitPrice: 0, invoiceAmount: 0 } : {}),
                     }))}
-                    options={Array.from(INVOICE_CATEGORIES).map(v => ({ label: v, value: v }))}
+                    options={invoiceCategoryOptions}
                     popupProps={{ attach: 'body', zIndex: 6000 }}
                     size="large" />
                 </div>
@@ -981,6 +986,9 @@ export function Invoices() {
           editAttachFiles={editAttachFiles}
           onEditAttachFilesChange={setEditAttachFiles}
           editAttachInputRef={editAttachInputRef}
+          invoiceCategoryOptions={invoiceCategoryOptions}
+          shopNameOptions={shopNameOptions}
+          invoiceStatusOptions={invoiceStatusOptions}
         />
       </Dialog>
 
@@ -1126,7 +1134,7 @@ export function Invoices() {
 }
 
 /** 发票表单字段（新增/编辑共用） */
-function InvoiceFormFields({ form, onChange, isEdit = false, onCompanyNameChange, companySuggestions, showSuggestions, onSelectCompany, suggestionsRef, editExistingAttachments, onRemoveExistingAttachment, editAttachFiles, onEditAttachFilesChange, editAttachInputRef }: {
+function InvoiceFormFields({ form, onChange, isEdit = false, onCompanyNameChange, companySuggestions, showSuggestions, onSelectCompany, suggestionsRef, editExistingAttachments, onRemoveExistingAttachment, editAttachFiles, onEditAttachFilesChange, editAttachInputRef, invoiceCategoryOptions, shopNameOptions, invoiceStatusOptions }: {
   form: Omit<InvoiceRecord, '_id' | 'createTime'>;
   onChange: React.Dispatch<React.SetStateAction<Omit<InvoiceRecord, '_id' | 'createTime'>>>;
   isEdit?: boolean;
@@ -1140,6 +1148,9 @@ function InvoiceFormFields({ form, onChange, isEdit = false, onCompanyNameChange
   editAttachFiles?: File[];
   onEditAttachFilesChange?: React.Dispatch<React.SetStateAction<File[]>>;
   editAttachInputRef?: React.RefObject<HTMLInputElement>;
+  invoiceCategoryOptions: Array<{ label: string; value: string }>;
+  shopNameOptions: Array<{ label: string; value: string }>;
+  invoiceStatusOptions: Array<{ label: string; value: string }>;
 }) {
   return (
     <div className="space-y-4 max-h-[70vh] overflow-auto px-1">
@@ -1222,14 +1233,14 @@ function InvoiceFormFields({ form, onChange, isEdit = false, onCompanyNameChange
                 invoiceCategory: val as string,
                 ...(val !== '二手手机' ? { phoneModel: '', phoneQuantity: 0, unitPrice: 0, invoiceAmount: 0 } : {}),
               }))}
-              options={Array.from(INVOICE_CATEGORIES).map(v => ({ label: v, value: v }))}
+              options={invoiceCategoryOptions}
               popupProps={{ attach: 'body', zIndex: 6000 }} />
           </div>
           <div>
             <label className="block text-xs text-gray-500 mb-1">店铺名字 <span className="text-red-500">*</span></label>
             <Select placeholder="请选择店铺" value={form.shopName || undefined}
               onChange={val => onChange(prev => ({ ...prev, shopName: val as string }))}
-              options={SHOP_NAMES.map(v => ({ label: v, value: v }))}
+              options={shopNameOptions}
               popupProps={{ attach: 'body' }} />
           </div>
 
@@ -1294,7 +1305,7 @@ function InvoiceFormFields({ form, onChange, isEdit = false, onCompanyNameChange
               <label className="block text-xs text-gray-500 mb-1">状态</label>
               <Select placeholder="请选择" value={form.status || undefined}
                 onChange={val => onChange(prev => ({ ...prev, status: val as InvoiceRecord['status'] }))}
-                options={dictToOptions(INVOICE_STATUS_MAP)}
+                options={invoiceStatusOptions}
                 popupProps={{ attach: 'body' }} />
             </div>
             {form.status === 'paid' && (

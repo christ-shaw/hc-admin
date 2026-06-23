@@ -60,6 +60,7 @@ const ACTION_PERMISSION_OPTIONS = [
   { label: '公司维护', value: 'companies:write' },
   { label: '设置查看', value: 'settings:read' },
   { label: '设置修改', value: 'settings:update' },
+  { label: '数据字典管理', value: 'settings:dict_manage' },
   { label: '角色管理', value: 'settings:role_manage' },
   { label: '用户角色管理', value: 'settings:user_role_manage' },
 ];

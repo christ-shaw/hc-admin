@@ -27,6 +27,12 @@ export const ORDER_STATUS_MAP = {
   unknown: '--',
 } as const;
 
+export const RETURN_STATUS_MAP = {
+  returned: '产品已退回入库',
+  inTransit: '产品运输途中',
+  notReturned: '客户未退回',
+} as const;
+
 /** 从 ORDER_STATUS_MAP 导出的状态枚举值类型 */
 export type OrderStatus = keyof typeof ORDER_STATUS_MAP;
 
@@ -104,9 +110,11 @@ export const SALESPERSONS = ['XX', 'YY', 'LL', 'ZZ', 'HH'];
 export const PAYMENT_ACCOUNTS = [
   'XX微信',
   'YY微信',
+  'ZZ微信',
   'XX支付宝',
   'YY支付宝',
   'ZKP支付宝',
+  'XXY支付宝',
   'MAJINGLONG微信',
   '倬石公户',
   '租机乐公户',
@@ -133,12 +141,103 @@ export const SHIPPING_FEE_MAP = {
 export type ShippingFee = keyof typeof SHIPPING_FEE_MAP;
 
 /* ================================================================
- * 6. 产品三级级联数据（品牌 → 货品名称 → 规格）
+ * 6. 普通数据字典种子（不包含产品三级级联）
+ * ================================================================ */
+export const DICT_CODES = {
+  channelType: 'channel_type',
+  orderStatus: 'order_status',
+  returnStatus: 'return_status',
+  orderSource: 'order_source',
+  orderAttribute: 'order_attribute',
+  orderType: 'order_type',
+  salesChannel: 'sales_channel',
+  channelCategory: 'channel_category',
+  invoiceStatus: 'invoice_status',
+  invoiceCategory: 'invoice_category',
+  salesperson: 'salesperson',
+  paymentAccount: 'payment_account',
+  shopName: 'shop_name',
+  shippingFee: 'shipping_fee',
+} as const;
+
+export type DictGroupCode = typeof DICT_CODES[keyof typeof DICT_CODES];
+
+export interface DictionarySeedItem {
+  value: string;
+  label: string;
+  enabled?: boolean;
+  sort?: number;
+  systemItem?: boolean;
+}
+
+export interface DictionarySeedGroup {
+  code: DictGroupCode;
+  name: string;
+  category: 'inbound' | 'order' | 'invoice' | 'common';
+  editable: boolean;
+  sort: number;
+  items: DictionarySeedItem[];
+}
+
+function mapToSeedItems(dict: Record<string, string>): DictionarySeedItem[] {
+  return Object.entries(dict).map(([value, label], index) => ({
+    value,
+    label,
+    enabled: true,
+    sort: (index + 1) * 10,
+    systemItem: true,
+  }));
+}
+
+function listToSeedItems(values: readonly string[]): DictionarySeedItem[] {
+  return values.map((value, index) => ({
+    value,
+    label: value,
+    enabled: true,
+    sort: (index + 1) * 10,
+    systemItem: true,
+  }));
+}
+
+export const DEFAULT_DICTIONARY_GROUPS: DictionarySeedGroup[] = [
+  { code: DICT_CODES.channelType, name: '渠道类型', category: 'inbound', editable: true, sort: 10, items: mapToSeedItems(CHANNEL_TYPE_MAP) },
+  { code: DICT_CODES.orderStatus, name: '订单状态', category: 'order', editable: true, sort: 20, items: mapToSeedItems(ORDER_STATUS_MAP) },
+  { code: DICT_CODES.returnStatus, name: '归还状态', category: 'order', editable: true, sort: 30, items: mapToSeedItems(RETURN_STATUS_MAP) },
+  { code: DICT_CODES.orderSource, name: '订单来源', category: 'order', editable: true, sort: 40, items: mapToSeedItems(ORDER_SOURCE_MAP) },
+  { code: DICT_CODES.orderAttribute, name: '订单属性', category: 'order', editable: true, sort: 50, items: mapToSeedItems(ORDER_ATTRIBUTE_MAP) },
+  { code: DICT_CODES.orderType, name: '订单类型', category: 'order', editable: true, sort: 60, items: mapToSeedItems(ORDER_TYPE_MAP) },
+  { code: DICT_CODES.salesChannel, name: '销售渠道', category: 'order', editable: true, sort: 70, items: mapToSeedItems(SALES_CHANNEL_MAP) },
+  { code: DICT_CODES.channelCategory, name: '渠道类别', category: 'order', editable: true, sort: 80, items: mapToSeedItems(CHANNEL_CATEGORY_MAP) },
+  { code: DICT_CODES.invoiceStatus, name: '发票状态', category: 'invoice', editable: true, sort: 90, items: mapToSeedItems(INVOICE_STATUS_MAP) },
+  { code: DICT_CODES.invoiceCategory, name: '发票类目', category: 'invoice', editable: true, sort: 100, items: listToSeedItems(INVOICE_CATEGORIES) },
+  { code: DICT_CODES.salesperson, name: '业务员', category: 'common', editable: true, sort: 110, items: listToSeedItems(SALESPERSONS) },
+  { code: DICT_CODES.paymentAccount, name: '收款账户', category: 'common', editable: true, sort: 120, items: listToSeedItems(PAYMENT_ACCOUNTS) },
+  { code: DICT_CODES.shopName, name: '店铺名称', category: 'common', editable: true, sort: 130, items: listToSeedItems(SHOP_NAMES) },
+  { code: DICT_CODES.shippingFee, name: '邮费类型', category: 'common', editable: true, sort: 140, items: mapToSeedItems(SHIPPING_FEE_MAP) },
+];
+
+export const DEFAULT_DICTIONARY_GROUP_MAP = Object.fromEntries(
+  DEFAULT_DICTIONARY_GROUPS.map(group => [group.code, group])
+) as Record<DictGroupCode, DictionarySeedGroup>;
+
+export function getDefaultDictionaryItems(groupCode: DictGroupCode): DictionarySeedItem[] {
+  return DEFAULT_DICTIONARY_GROUP_MAP[groupCode]?.items || [];
+}
+
+export function getDefaultDictionaryMap(groupCode: DictGroupCode): Record<string, string> {
+  return Object.fromEntries(getDefaultDictionaryItems(groupCode).map(item => [item.value, item.label]));
+}
+
+/* ================================================================
+ * 7. 产品三级级联数据（品牌 → 货品名称 → 规格）
  *    由订单明细表6月份.xlsx「产品资料」工作表生成
  * ================================================================ */
 export const PRODUCT_DICT: Record<string, Record<string, string[]>> = {
   '大疆': {
     '大疆pocket3全能版相机': ['默认'],
+  },
+  '配件': {
+    '配件': ['默认'],
   },
   '谷歌': {
     '谷歌2': ['默认'],

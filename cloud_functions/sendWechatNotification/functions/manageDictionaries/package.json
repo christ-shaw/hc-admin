@@ -1,0 +1,10 @@
+{
+  "name": "manageDictionaries",
+  "version": "1.0.0",
+  "description": "普通数据字典管理",
+  "main": "index.js",
+  "dependencies": {
+    "@cloudbase/node-sdk": "^3.16.0",
+    "wx-server-sdk": "~2.6.3"
+  }
+}

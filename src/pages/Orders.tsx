@@ -2,23 +2,17 @@ import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
 import { Table, Button, Input, Select, Tag, Dialog, MessagePlugin, Textarea } from 'tdesign-react';
 import { Search, RotateCcw, Upload, Download, Plus, Pencil, Trash2, Minus, X, ChevronRight, ChevronLeft, FileDown, Check } from 'lucide-react';
-import { OrderRecord, OrderFilters, InboundRecord, OutboundRecord, PhoneModelItem, ORDER_TYPE_MAP, ORDER_SOURCE_MAP, ORDER_ATTRIBUTE_MAP, SALES_CHANNEL_MAP, ORDER_STATUS_MAP, CHANNEL_CATEGORY_MAP, SHIPPING_FEE_MAP, ProductItem, TransferProductItem, OrderAttachment, dictToOptions, getDictLabel } from '../types';
+import { OrderRecord, OrderFilters, InboundRecord, OutboundRecord, PhoneModelItem, ProductItem, TransferProductItem, OrderAttachment, dictToOptions, getDictLabel } from '../types';
 import { useOrders } from '../hooks/useOrders';
-import { formatDate, getChannelTypeText, getTotalQuantity } from '../utils/format';
+import { formatDate, getTotalQuantity } from '../utils/format';
 import { parseOrderExcel, exportOrderExcel } from '../utils/orderExcel';
-import { BRANDS, getBrandLabel, getProductLabel, getProductsByBrand, getSpecsByProduct, PAYMENT_ACCOUNTS, SALESPERSONS } from '../data/dict';
+import { BRANDS, getBrandLabel, getProductLabel, getProductsByBrand, getSpecsByProduct } from '../data/dict';
 import { parseConsigneeInfo, callFunction, getCloudFileURLs, getCurrentOperatorName, uploadToCloudStorage } from '../lib/cloudbase';
 import { PAGE_SIZE } from '../utils/constants';
+import { DICT_CODES, useDictionaries } from '../contexts/DictionaryContext';
 
 /** ========== 预计算静态 options（模块级常量，避免每次渲染重建） ========== */
 const PLACEHOLDER_OPTION = { label: '请选择', value: '' };
-
-const ORDER_SOURCE_OPTIONS = [PLACEHOLDER_OPTION, ...dictToOptions(ORDER_SOURCE_MAP)];
-const ORDER_ATTRIBUTE_OPTIONS = [PLACEHOLDER_OPTION, ...dictToOptions(ORDER_ATTRIBUTE_MAP)];
-const ORDER_TYPE_OPTIONS = [PLACEHOLDER_OPTION, ...dictToOptions(ORDER_TYPE_MAP)];
-const SALES_CHANNEL_OPTIONS = [PLACEHOLDER_OPTION, ...dictToOptions(SALES_CHANNEL_MAP)];
-const CHANNEL_CATEGORY_OPTIONS = [PLACEHOLDER_OPTION, ...dictToOptions(CHANNEL_CATEGORY_MAP)];
-const SALESPERSON_OPTIONS = [PLACEHOLDER_OPTION, ...SALESPERSONS.map(v => ({ label: v, value: v }))];
 
 /** 平台渠道的 salesChannel key 集合（人人租系列 + 云途/汇租机/租机乐/倬石电子/云界互联/极客矩阵/极速闪租） */
 const PLATFORM_CHANNELS = new Set(['aRrz', 'fRrz', 'lRrz', 'jRrz', 'gRrz', 'yuntu', '云途', 'huizuji', 'zujile', '租机乐', 'zhuoshi', 'yunjie', 'jikejuzhen', 'jisushanzu']);
@@ -42,25 +36,7 @@ const ORDER_SOURCE_ORDER_TYPE_MAP: Partial<Record<string, string[]>> = {
   service: ['postRentalShip', 'postRentalReturn', 'postRentalPayment', 'deposit'],
 };
 
-/** 归还状态字典（租后发货/租后退货时使用） */
-const RETURN_STATUS_MAP = {
-  returned: '产品已退回入库',
-  inTransit: '产品运输途中',
-  notReturned: '客户未退回',
-} as const;
-const RETURN_STATUS_OPTIONS = [PLACEHOLDER_OPTION, ...dictToOptions(RETURN_STATUS_MAP)];
-
-const PAYMENT_ACCOUNT_OPTIONS = [PLACEHOLDER_OPTION, ...PAYMENT_ACCOUNTS.map(v => ({ label: v, value: v }))];
-const ORDER_STATUS_OPTIONS = dictToOptions(ORDER_STATUS_MAP);
-
-const SHIPPING_FEE_OPTIONS = [PLACEHOLDER_OPTION, ...dictToOptions(SHIPPING_FEE_MAP)];
-const SHIP_CONFIRM_SHIPPING_FEE_OPTIONS = [
-  { label: '包邮', value: 'prepaid' },
-  { label: '到付', value: 'cod' },
-];
 const BRAND_OPTIONS = [PLACEHOLDER_OPTION, ...BRANDS.map(v => ({ label: getBrandLabel(v), value: v }))];
-const FILTER_SALESPERSON_OPTIONS = [{ label: '全部', value: '' }, ...SALESPERSONS.map(v => ({ label: v, value: v }))];
-const FILTER_ORDER_STATUS_OPTIONS = [{ label: '全部', value: '' }, ...dictToOptions(ORDER_STATUS_MAP)];
 
 /** 货品条目默认值 */
 const EMPTY_PRODUCT: ProductItem = {
@@ -106,6 +82,26 @@ interface OrderFormData {
   attachments: OrderAttachment[];
   returnStatus: string;
   returnTrackingNumbers: string;
+}
+
+interface OrderWizardDictionaries {
+  ORDER_SOURCE_MAP: Record<string, string>;
+  ORDER_ATTRIBUTE_MAP: Record<string, string>;
+  ORDER_TYPE_MAP: Record<string, string>;
+  SALES_CHANNEL_MAP: Record<string, string>;
+  CHANNEL_CATEGORY_MAP: Record<string, string>;
+  ORDER_STATUS_MAP: Record<string, string>;
+  RETURN_STATUS_MAP: Record<string, string>;
+  SHIPPING_FEE_MAP: Record<string, string>;
+  ORDER_SOURCE_OPTIONS: Array<{ label: string; value: string }>;
+  ORDER_ATTRIBUTE_OPTIONS: Array<{ label: string; value: string }>;
+  ORDER_TYPE_OPTIONS: Array<{ label: string; value: string }>;
+  SALES_CHANNEL_OPTIONS: Array<{ label: string; value: string }>;
+  SALESPERSON_OPTIONS: Array<{ label: string; value: string }>;
+  PAYMENT_ACCOUNT_OPTIONS: Array<{ label: string; value: string }>;
+  ORDER_STATUS_OPTIONS: Array<{ label: string; value: string }>;
+  RETURN_STATUS_OPTIONS: Array<{ label: string; value: string }>;
+  SHIPPING_FEE_OPTIONS: Array<{ label: string; value: string }>;
 }
 
 const EMPTY_ORDER: OrderFormData = {
@@ -261,7 +257,71 @@ function buildEditFormFromRecord(record: OrderRecord): OrderFormData {
 export function Orders() {
   const orders = useOrders();
   const location = useLocation();
+  const dictionaries = useDictionaries();
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const ORDER_SOURCE_MAP = dictionaries.getMap(DICT_CODES.orderSource);
+  const ORDER_ATTRIBUTE_MAP = dictionaries.getMap(DICT_CODES.orderAttribute);
+  const ORDER_TYPE_MAP = dictionaries.getMap(DICT_CODES.orderType);
+  const SALES_CHANNEL_MAP = dictionaries.getMap(DICT_CODES.salesChannel);
+  const CHANNEL_CATEGORY_MAP = dictionaries.getMap(DICT_CODES.channelCategory);
+  const ORDER_STATUS_MAP = dictionaries.getMap(DICT_CODES.orderStatus);
+  const RETURN_STATUS_MAP = dictionaries.getMap(DICT_CODES.returnStatus);
+  const SHIPPING_FEE_MAP = dictionaries.getMap(DICT_CODES.shippingFee);
+  const SALESPERSONS = dictionaries.getItems(DICT_CODES.salesperson).map(item => item.value);
+
+  const ORDER_SOURCE_OPTIONS = useMemo(() => [PLACEHOLDER_OPTION, ...dictToOptions(ORDER_SOURCE_MAP)], [ORDER_SOURCE_MAP]);
+  const ORDER_ATTRIBUTE_OPTIONS = useMemo(() => [PLACEHOLDER_OPTION, ...dictToOptions(ORDER_ATTRIBUTE_MAP)], [ORDER_ATTRIBUTE_MAP]);
+  const ORDER_TYPE_OPTIONS = useMemo(() => [PLACEHOLDER_OPTION, ...dictToOptions(ORDER_TYPE_MAP)], [ORDER_TYPE_MAP]);
+  const SALES_CHANNEL_OPTIONS = useMemo(() => [PLACEHOLDER_OPTION, ...dictToOptions(SALES_CHANNEL_MAP)], [SALES_CHANNEL_MAP]);
+  const SALESPERSON_OPTIONS = useMemo(() => [PLACEHOLDER_OPTION, ...SALESPERSONS.map(v => ({ label: dictionaries.getLabel(DICT_CODES.salesperson, v), value: v }))], [SALESPERSONS, dictionaries]);
+  const PAYMENT_ACCOUNT_OPTIONS = useMemo(() => [PLACEHOLDER_OPTION, ...dictionaries.getOptions(DICT_CODES.paymentAccount)], [dictionaries]);
+  const ORDER_STATUS_OPTIONS = useMemo(() => dictToOptions(ORDER_STATUS_MAP), [ORDER_STATUS_MAP]);
+  const RETURN_STATUS_OPTIONS = useMemo(() => [PLACEHOLDER_OPTION, ...dictToOptions(RETURN_STATUS_MAP)], [RETURN_STATUS_MAP]);
+  const SHIPPING_FEE_OPTIONS = useMemo(() => [PLACEHOLDER_OPTION, ...dictToOptions(SHIPPING_FEE_MAP)], [SHIPPING_FEE_MAP]);
+  const FILTER_SALESPERSON_OPTIONS = useMemo(() => [{ label: '全部', value: '' }, ...SALESPERSONS.map(v => ({ label: dictionaries.getLabel(DICT_CODES.salesperson, v), value: v }))], [SALESPERSONS, dictionaries]);
+  const FILTER_ORDER_STATUS_OPTIONS = useMemo(() => [{ label: '全部', value: '' }, ...dictToOptions(ORDER_STATUS_MAP)], [ORDER_STATUS_MAP]);
+  const SHIP_CONFIRM_SHIPPING_FEE_OPTIONS = useMemo(
+    () => dictToOptions(SHIPPING_FEE_MAP).filter(option => option.value === 'prepaid' || option.value === 'cod'),
+    [SHIPPING_FEE_MAP]
+  );
+  const wizardDictionaries = useMemo<OrderWizardDictionaries>(() => ({
+    ORDER_SOURCE_MAP,
+    ORDER_ATTRIBUTE_MAP,
+    ORDER_TYPE_MAP,
+    SALES_CHANNEL_MAP,
+    CHANNEL_CATEGORY_MAP,
+    ORDER_STATUS_MAP,
+    RETURN_STATUS_MAP,
+    SHIPPING_FEE_MAP,
+    ORDER_SOURCE_OPTIONS,
+    ORDER_ATTRIBUTE_OPTIONS,
+    ORDER_TYPE_OPTIONS,
+    SALES_CHANNEL_OPTIONS,
+    SALESPERSON_OPTIONS,
+    PAYMENT_ACCOUNT_OPTIONS,
+    ORDER_STATUS_OPTIONS,
+    RETURN_STATUS_OPTIONS,
+    SHIPPING_FEE_OPTIONS,
+  }), [
+    ORDER_SOURCE_MAP,
+    ORDER_ATTRIBUTE_MAP,
+    ORDER_TYPE_MAP,
+    SALES_CHANNEL_MAP,
+    CHANNEL_CATEGORY_MAP,
+    ORDER_STATUS_MAP,
+    RETURN_STATUS_MAP,
+    SHIPPING_FEE_MAP,
+    ORDER_SOURCE_OPTIONS,
+    ORDER_ATTRIBUTE_OPTIONS,
+    ORDER_TYPE_OPTIONS,
+    SALES_CHANNEL_OPTIONS,
+    SALESPERSON_OPTIONS,
+    PAYMENT_ACCOUNT_OPTIONS,
+    ORDER_STATUS_OPTIONS,
+    RETURN_STATUS_OPTIONS,
+    SHIPPING_FEE_OPTIONS,
+  ]);
 
   const [filters, setFilters] = useState<OrderFilters>({});
   const [detailVisible, setDetailVisible] = useState(false);
@@ -1132,7 +1192,7 @@ export function Orders() {
         </div>
       ),
     },
-  ], [handleDetail, handleApplyExpress, handleQuerySfOrderResult, handleCancelSfExpress, handleEditOpen, handleShipOpen, handleAfterSaleInboundOpen, handleDeleteConfirm, applyingExpressId, queryingSfResultId, cancelingSfId]);
+  ], [handleDetail, handleApplyExpress, handleQuerySfOrderResult, handleCancelSfExpress, handleEditOpen, handleShipOpen, handleAfterSaleInboundOpen, handleDeleteConfirm, applyingExpressId, queryingSfResultId, cancelingSfId, ORDER_TYPE_MAP, SALES_CHANNEL_MAP, ORDER_ATTRIBUTE_MAP, ORDER_STATUS_MAP]);
 
   const displayRecords = orders.getPageRecords(orders.currentPage);
   const hasLoadedNextPage = orders.currentPage * PAGE_SIZE < orders.records.length;
@@ -1522,7 +1582,7 @@ export function Orders() {
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-1 text-sm text-gray-800">
                     <div><span className="text-gray-400">入库日期：</span>{formatDate(record.inboundDate, false) || '-'}</div>
                     <div><span className="text-gray-400">客户名称：</span>{record.customerName || '-'}</div>
-                    <div><span className="text-gray-400">渠道类型：</span>{getChannelTypeText(record.type)}</div>
+                    <div><span className="text-gray-400">渠道类型：</span>{dictionaries.getLabel(DICT_CODES.channelType, record.type)}</div>
                     <div><span className="text-gray-400">渠道名称：</span>{record.shopName || '-'}</div>
                     <div><span className="text-gray-400">快递单号：</span><span className="font-medium text-gray-900">{record.trackingNumber || '-'}</span></div>
                     <div><span className="text-gray-400">入库数量：</span>{getTotalQuantity(record) || '-'}</div>
@@ -1620,6 +1680,7 @@ export function Orders() {
           attachInputRef={addAttachInputRef}
           onChange={setAddForm}
           onAttachFilesChange={setAddAttachFiles}
+          dictionaries={wizardDictionaries}
         />
       </Dialog>
 
@@ -1655,6 +1716,7 @@ export function Orders() {
           attachInputRef={editAttachInputRef}
           onChange={setEditForm}
           onAttachFilesChange={setEditAttachFiles}
+          dictionaries={wizardDictionaries}
         />
       </Dialog>
 
@@ -1850,7 +1912,7 @@ export function Orders() {
 
 /** 新增订单 6 步向导 */
 function AddOrderWizard({
-  step, form, attachFiles, attachInputRef, onChange, onAttachFilesChange, mode = 'add',
+  step, form, attachFiles, attachInputRef, onChange, onAttachFilesChange, dictionaries, mode = 'add',
 }: {
   step: number;
   form: OrderFormData;
@@ -1858,8 +1920,28 @@ function AddOrderWizard({
   attachInputRef: React.RefObject<HTMLInputElement>;
   onChange: React.Dispatch<React.SetStateAction<OrderFormData>>;
   onAttachFilesChange: React.Dispatch<React.SetStateAction<File[]>>;
+  dictionaries: OrderWizardDictionaries;
   mode?: 'add' | 'edit';
 }) {
+  const {
+    ORDER_SOURCE_MAP,
+    ORDER_ATTRIBUTE_MAP,
+    ORDER_TYPE_MAP,
+    SALES_CHANNEL_MAP,
+    CHANNEL_CATEGORY_MAP,
+    ORDER_STATUS_MAP,
+    RETURN_STATUS_MAP,
+    SHIPPING_FEE_MAP,
+    ORDER_SOURCE_OPTIONS,
+    ORDER_ATTRIBUTE_OPTIONS,
+    ORDER_TYPE_OPTIONS,
+    SALES_CHANNEL_OPTIONS,
+    SALESPERSON_OPTIONS,
+    PAYMENT_ACCOUNT_OPTIONS,
+    ORDER_STATUS_OPTIONS,
+    RETURN_STATUS_OPTIONS,
+    SHIPPING_FEE_OPTIONS,
+  } = dictionaries;
   const [pasteText, setPasteText] = useState('');
   const [parsing, setParsing] = useState(false);
   const updateField = useCallback(<K extends keyof OrderFormData>(key: K, val: OrderFormData[K]) => {
@@ -1954,7 +2036,7 @@ function AddOrderWizard({
     }
     const allowed = new Set(ORDER_SOURCE_ORDER_TYPE_MAP[form.orderSource]!);
     return ORDER_TYPE_OPTIONS.filter(o => !o.value || allowed.has(o.value));
-  }, [form.orderSource]);
+  }, [form.orderSource, ORDER_TYPE_OPTIONS]);
 
   // 是否有货品名称为「部分转租赁2」或「全部转租赁2」
   const hasTransferProduct = useMemo(() => {

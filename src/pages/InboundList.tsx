@@ -1,19 +1,22 @@
 import { useEffect, useState } from 'react';
 import { Table, Button, Input, Select, MessagePlugin, Dialog } from 'tdesign-react';
 import { Search, RotateCcw } from 'lucide-react';
-import { InboundRecord, InboundFilters, CHANNEL_TYPE_MAP } from '../types';
+import { InboundRecord, InboundFilters } from '../types';
 import { useInbound } from '../hooks/useInbound';
 import { useLogs } from '../hooks/useLogs';
 import { useStorage } from '../hooks/useStorage';
-import { formatDate, getTotalQuantity, getChannelTypeText } from '../utils/format';
+import { formatDate, getTotalQuantity } from '../utils/format';
 import { getCurrentOperatorName } from '../lib/cloudbase';
 import { RecordDetail } from '../components/RecordDetail';
 import { RecordEdit } from '../components/RecordEdit';
+import { DICT_CODES, useDictionaries } from '../contexts/DictionaryContext';
 
 export function InboundList() {
   const inbound = useInbound();
   const logs = useLogs();
   const { notifyRecordChange } = useStorage();
+  const dictionaries = useDictionaries();
+  const channelTypeOptions = dictionaries.getOptions(DICT_CODES.channelType, { label: '全部', value: '' });
 
   const [detailVisible, setDetailVisible] = useState(false);
   const [editVisible, setEditVisible] = useState(false);
@@ -86,7 +89,7 @@ export function InboundList() {
   const columns = [
     { colKey: 'inboundDate', title: '入库日期', width: 110, cell: ({ row }: { row: InboundRecord }) => formatDate(row.inboundDate, false) },
     { colKey: 'customerName', title: '客户名称', width: 120, ellipsis: true },
-    { colKey: 'type', title: '渠道类型', width: 90, cell: ({ row }: { row: InboundRecord }) => getChannelTypeText(row.type) },
+    { colKey: 'type', title: '渠道类型', width: 90, cell: ({ row }: { row: InboundRecord }) => dictionaries.getLabel(DICT_CODES.channelType, row.type) || '-' },
     { colKey: 'shopName', title: '渠道名称', width: 100, ellipsis: true },
     { colKey: 'trackingNumber', title: '快递单号', width: 120, ellipsis: true },
     { colKey: 'phoneModels', title: '手机型号', width: 180, cell: ({ row }: { row: InboundRecord }) =>
@@ -123,7 +126,7 @@ export function InboundList() {
             placeholder="渠道类型"
             value={channelTypeFilter}
             onChange={(val) => setChannelTypeFilter(val as string)}
-            options={[{ label: '全部', value: '' }, ...Object.entries(CHANNEL_TYPE_MAP).map(([value, label]) => ({ label, value }))]}
+            options={channelTypeOptions}
           />
           <Input placeholder="渠道名称" value={filters.shopName || ''} onChange={(val) => setFilters(prev => ({ ...prev, shopName: val as string }))} />
           <Input placeholder="快递单号" value={filters.trackingNumber || ''} onChange={(val) => setFilters(prev => ({ ...prev, trackingNumber: val as string }))} />

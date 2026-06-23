@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
 import { Dialog, Input, Select, Button, MessagePlugin } from 'tdesign-react';
 import { Plus, Trash2 } from 'lucide-react';
-import { InboundRecord, OutboundRecord, CHANNEL_TYPE_MAP } from '../types';
+import { InboundRecord, OutboundRecord } from '../types';
 import { usePhoneModels } from '../hooks/usePhoneModels';
+import { DICT_CODES, useDictionaries } from '../contexts/DictionaryContext';
 
 interface RecordEditProps {
   visible: boolean;
@@ -14,6 +15,8 @@ interface RecordEditProps {
 
 export function RecordEdit({ visible, record, type, onClose, onSave }: RecordEditProps) {
   const { loadAllModels } = usePhoneModels();
+  const dictionaries = useDictionaries();
+  const channelTypeOptions = dictionaries.getOptions(DICT_CODES.channelType);
   const [modelOptions, setModelOptions] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
 
@@ -128,7 +131,7 @@ export function RecordEdit({ visible, record, type, onClose, onSave }: RecordEdi
               <Select
                 value={channelType}
                 onChange={(val) => setChannelType(val as string)}
-                options={Object.entries(CHANNEL_TYPE_MAP).map(([value, label]) => ({ label, value }))}
+                options={channelTypeOptions}
                 placeholder="请选择渠道类型"
               />
             </div>
