@@ -30,18 +30,25 @@ export function usePhoneModels() {
   const [brands, setBrands] = useState<PhoneBrand[]>([]);
   const [allModels, setAllModels] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState('');
 
   const loadBrands = useCallback(async () => {
     setLoading(true);
+    setLoadError('');
     try {
-      const result = await callFunction<{ success: boolean; data: PhoneBrand[] }>(PRODUCT_MODEL_FUNCTION, {
+      const result = await callFunction<{ success: boolean; data?: PhoneBrand[]; errMsg?: string }>(PRODUCT_MODEL_FUNCTION, {
         action: 'getBrands',
       });
       if (result.success) {
         setBrands(normalizeBrands(result.data || []));
+      } else {
+        setBrands([]);
+        setLoadError(result.errMsg || '加载型号字典失败');
       }
     } catch (err) {
       console.error('加载手机品牌失败:', err);
+      setBrands([]);
+      setLoadError(err instanceof Error ? err.message : '加载型号字典失败');
     } finally {
       setLoading(false);
     }
@@ -265,6 +272,7 @@ export function usePhoneModels() {
     brands,
     allModels,
     loading,
+    loadError,
     loadBrands,
     loadAllModels,
     loadModelsByBrand,

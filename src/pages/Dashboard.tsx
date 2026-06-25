@@ -121,6 +121,24 @@ const buildOrderLabel = (order: OrderRecord) => {
 
 const buildOwnerLabel = (order: OrderRecord) => `责任人 ${order.salesperson || '-'}`;
 
+function hasUnreceivedPayment(order: OrderRecord) {
+  if (order.paymentAccount === '未收款') return true;
+  const value = order.paymentSplits;
+  const splits = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? (() => {
+          try {
+            const parsed = JSON.parse(value);
+            return Array.isArray(parsed) ? parsed : [];
+          } catch {
+            return [];
+          }
+        })()
+      : [];
+  return splits.some(split => split?.account === '未收款');
+}
+
 async function fetchOrdersForDynamicMessages() {
   const orders: OrderRecord[] = [];
   let cursor: string | null = null;
@@ -225,7 +243,7 @@ export function Dashboard() {
         }));
 
       const paymentMessages = orders
-        .filter(order => order.paymentAccount === '未收款')
+        .filter(hasUnreceivedPayment)
         .map((order): DynamicMessage => ({
           id: `${order._id}-payment`,
           type: 'payment',

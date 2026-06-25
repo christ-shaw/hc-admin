@@ -150,6 +150,12 @@ export interface PhoneBrand {
   models?: string[];
 }
 
+/** 收款拆分明细 */
+export interface PaymentSplit {
+  account: string;
+  amount: number;
+}
+
 /** 订单记录 —— 对齐 Excel「订单明细」工作表 25 列 */
 export interface OrderRecord {
   _id: string;
@@ -170,6 +176,7 @@ export interface OrderRecord {
   unitPrice: number;                // 单价
   amount: number;                   // 金额
   paymentAccount: string;           // 收款账户
+  paymentSplits?: PaymentSplit[] | string; // 多账户收款明细（兼容旧数据）
   trackingNumber: string;           // 物流单号
   expressProvider?: string;         // 快递服务商
   sfEnv?: string;                   // 顺丰环境
@@ -223,6 +230,7 @@ export interface ProductItem {
   unitPrice: number;
   amount: number;
   paymentAccount: string;
+  paymentSplits?: PaymentSplit[];
 }
 
 /** 订单筛选条件 */

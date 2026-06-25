@@ -2,12 +2,12 @@ import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
 import { Table, Button, Input, Select, Tag, Dialog, MessagePlugin, Textarea } from 'tdesign-react';
 import { Search, RotateCcw, Upload, Download, Plus, Pencil, Trash2, Minus, X, ChevronRight, ChevronLeft, FileDown, Check } from 'lucide-react';
-import { OrderRecord, OrderFilters, InboundRecord, OutboundRecord, PhoneBrand, PhoneModelItem, ProductItem, TransferProductItem, OrderAttachment, dictToOptions, getDictLabel } from '../types';
+import { OrderRecord, OrderFilters, InboundRecord, OutboundRecord, PhoneBrand, PhoneModelItem, ProductItem, TransferProductItem, OrderAttachment, PaymentSplit, dictToOptions, getDictLabel } from '../types';
 import { useOrders } from '../hooks/useOrders';
 import { usePhoneModels } from '../hooks/usePhoneModels';
 import { formatDate, getTotalQuantity } from '../utils/format';
 import { parseOrderExcel, exportOrderExcel } from '../utils/orderExcel';
-import { BRANDS, getBrandLabel, getProductLabel, getProductsByBrand, getSpecsByProduct } from '../data/dict';
+import { getBrandLabel, getProductLabel } from '../data/dict';
 import { parseConsigneeInfo, callFunction, getCloudFileURLs, getCurrentOperatorName, uploadToCloudStorage } from '../lib/cloudbase';
 import { PAGE_SIZE } from '../utils/constants';
 import { DICT_CODES, useDictionaries } from '../contexts/DictionaryContext';
@@ -37,8 +37,6 @@ const ORDER_SOURCE_ORDER_TYPE_MAP: Partial<Record<string, string[]>> = {
   service: ['postRentalShip', 'postRentalReturn', 'postRentalPayment', 'deposit'],
 };
 
-const STATIC_BRAND_OPTIONS = [PLACEHOLDER_OPTION, ...BRANDS.map(v => ({ label: getBrandLabel(v), value: v }))];
-
 /** 货品条目默认值 */
 const EMPTY_PRODUCT: ProductItem = {
   brand: '',
@@ -48,6 +46,7 @@ const EMPTY_PRODUCT: ProductItem = {
   unitPrice: 0,
   amount: 0,
   paymentAccount: '',
+  paymentSplits: [],
 };
 
 /** 转租赁2货品条目默认值 */
@@ -200,8 +199,84 @@ function clearHiddenProductPaymentFields(form: Pick<OrderFormData, 'orderSource'
       unitPrice: 0,
       amount: 0,
       paymentAccount: '',
+      paymentSplits: [],
     };
   });
+}
+
+function parsePaymentSplits(value: OrderRecord['paymentSplits'] | ProductItem['paymentSplits']): PaymentSplit[] {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function normalizePaymentSplits(source: Pick<ProductItem, 'paymentAccount' | 'amount' | 'paymentSplits'>): PaymentSplit[] {
+  const splits = parsePaymentSplits(source.paymentSplits)
+    .map(split => ({ account: String(split.account || '').trim(), amount: Math.max(0, Number(split.amount) || 0) }))
+    .filter(split => split.account || split.amount > 0);
+  if (splits.length > 0) return splits;
+  return source.paymentAccount ? [{ account: source.paymentAccount, amount: Math.max(0, Number(source.amount) || 0) }] : [];
+}
+
+function getEditablePaymentSplits(product: ProductItem): PaymentSplit[] {
+  const rawSplits = parsePaymentSplits(product.paymentSplits)
+    .map(split => ({
+      account: String(split.account || ''),
+      amount: Math.max(0, Number(split.amount) || 0),
+    }));
+  if (rawSplits.length > 0) return rawSplits;
+  if (product.paymentAccount) return [{ account: product.paymentAccount, amount: Math.max(0, Number(product.amount) || 0) }];
+  return [{ account: '', amount: Math.max(0, Number(product.amount) || 0) }];
+}
+
+function getPaymentAccountValue(splits: PaymentSplit[]): string {
+  const accounts = splits.map(split => split.account).filter(Boolean);
+  if (accounts.length === 0) return '';
+  return Array.from(new Set(accounts)).join('、');
+}
+
+function getPaymentSplitTotal(product: ProductItem): number {
+  return normalizePaymentSplits(product).reduce((sum, split) => sum + (Number(split.amount) || 0), 0);
+}
+
+function isPaymentSplitValid(product: ProductItem): boolean {
+  const splits = normalizePaymentSplits(product);
+  if (splits.length === 0 || splits.some(split => !split.account || split.amount <= 0)) return false;
+  return Math.abs(getPaymentSplitTotal(product) - (Number(product.amount) || 0)) < 0.01;
+}
+
+function formatPaymentSplits(source: Pick<OrderRecord, 'paymentAccount' | 'amount' | 'paymentSplits'>): string {
+  const splits = normalizePaymentSplits(source as ProductItem);
+  if (splits.length === 0) return source.paymentAccount || '-';
+  if (splits.length === 1) return splits[0].account || source.paymentAccount || '-';
+  return splits.map(split => `${split.account || '-'} ¥${split.amount || 0}`).join('；');
+}
+
+function hasUnreceivedPayment(record: OrderRecord): boolean {
+  return record.paymentAccount === '未收款' || normalizePaymentSplits(record as unknown as ProductItem).some(split => split.account === '未收款');
+}
+
+function serializeProductForSave(product: ProductItem): ProductItem {
+  const paymentSplits = normalizePaymentSplits(product);
+  return {
+    ...product,
+    paymentSplits,
+    paymentAccount: getPaymentAccountValue(paymentSplits),
+  };
+}
+
+function syncSinglePaymentSplitAmount(product: ProductItem, amount: number): PaymentSplit[] {
+  const splits = normalizePaymentSplits(product);
+  if (splits.length > 1) return splits;
+  return [{ account: splits[0]?.account || product.paymentAccount || '', amount }];
 }
 
 function buildEditFormFromRecord(record: OrderRecord): OrderFormData {
@@ -248,6 +323,7 @@ function buildEditFormFromRecord(record: OrderRecord): OrderFormData {
       unitPrice: record.unitPrice,
       amount: record.amount,
       paymentAccount: record.paymentAccount,
+      paymentSplits: normalizePaymentSplits(record as unknown as ProductItem),
     }],
     attachments: record.attachments || [],
     returnStatus: record.returnStatus || '',
@@ -634,7 +710,7 @@ export function Orders() {
       if (addForm.products.some(p => !p.specification)) { MessagePlugin.warning('请选择规格'); return; }
       if (addForm.products.some(p => !p.quantity || p.quantity <= 0)) { MessagePlugin.warning('请填写数量'); return; }
       if (addForm.products.some(p => shouldShowProductPaymentFields(addForm.orderSource, addForm.orderType, addForm.orderAttribute, p.brand) && (!p.unitPrice || p.unitPrice <= 0))) { MessagePlugin.warning('请填写单价'); return; }
-      if (addForm.products.some(p => shouldShowProductPaymentFields(addForm.orderSource, addForm.orderType, addForm.orderAttribute, p.brand) && !p.paymentAccount)) { MessagePlugin.warning('请选择收款账户'); return; }
+      if (addForm.products.some(p => shouldShowProductPaymentFields(addForm.orderSource, addForm.orderType, addForm.orderAttribute, p.brand) && !isPaymentSplitValid(p))) { MessagePlugin.warning('请填写收款账户，并确保收款金额合计等于货品金额'); return; }
       if (addForm.products.some(p => p.productName === '部分转租赁2' || p.productName === '全部转租赁2') && addForm.transferProducts.some(t => !t.paidPeriod || t.paidPeriod <= 0)) { MessagePlugin.warning('转租赁2请填写已交租期'); return; }
       if (addForm.products.some(p => p.productName === '部分转租赁2' || p.productName === '全部转租赁2') && addForm.transferProducts.some(t => !t.paidRent || t.paidRent <= 0)) { MessagePlugin.warning('转租赁2请填写已交租金'); return; }
     }
@@ -665,7 +741,7 @@ export function Orders() {
         addForm.transferProducts.some(t => t.brand || t.productName || t.specification || t.paidPeriod || t.paidRent) ||
         addAttachFiles.length > 0) return true;
     // 检查货品是否有数据
-    return addForm.products.some(p => p.brand || p.productName || p.specification || p.quantity || p.unitPrice || p.paymentAccount);
+    return addForm.products.some(p => p.brand || p.productName || p.specification || p.quantity || p.unitPrice || p.paymentAccount || normalizePaymentSplits(p).length > 0);
   };
 
   const handleRequestCloseAdd = () => {
@@ -725,7 +801,7 @@ export function Orders() {
         channelCategory: addForm.channelCategory,
         onlineOrderNumber: addForm.onlineOrderNumber,
         customerName: addForm.customerName,
-        ...product,
+        ...serializeProductForSave(product),
         trackingNumber: shipmentFields.trackingNumber,
         consignee: addForm.consignee,
         consigneePhone: addForm.consigneePhone,
@@ -996,7 +1072,7 @@ export function Orders() {
       if (editForm.products.some(p => !p.specification)) { MessagePlugin.warning('请选择规格'); return; }
       if (editForm.products.some(p => !p.quantity || p.quantity <= 0)) { MessagePlugin.warning('请填写数量'); return; }
       if (editForm.products.some(p => shouldShowProductPaymentFields(editForm.orderSource, editForm.orderType, editForm.orderAttribute, p.brand) && (!p.unitPrice || p.unitPrice <= 0))) { MessagePlugin.warning('请填写单价'); return; }
-      if (editForm.products.some(p => shouldShowProductPaymentFields(editForm.orderSource, editForm.orderType, editForm.orderAttribute, p.brand) && !p.paymentAccount)) { MessagePlugin.warning('请选择收款账户'); return; }
+      if (editForm.products.some(p => shouldShowProductPaymentFields(editForm.orderSource, editForm.orderType, editForm.orderAttribute, p.brand) && !isPaymentSplitValid(p))) { MessagePlugin.warning('请填写收款账户，并确保收款金额合计等于货品金额'); return; }
       const editHasTransfer = editForm.products.some(p => p.productName === '部分转租赁2' || p.productName === '全部转租赁2');
       if (editHasTransfer && editForm.transferProducts.some(t => !t.paidPeriod || t.paidPeriod <= 0)) { MessagePlugin.warning('转租赁2请填写已交租期'); return; }
       if (editHasTransfer && editForm.transferProducts.some(t => !t.paidRent || t.paidRent <= 0)) { MessagePlugin.warning('转租赁2请填写已交租金'); return; }
@@ -1044,7 +1120,7 @@ export function Orders() {
         channelCategory: editForm.channelCategory,
         onlineOrderNumber: editForm.onlineOrderNumber,
         customerName: editForm.customerName,
-        ...product,
+        ...serializeProductForSave(product),
         trackingNumber: shipmentFields.trackingNumber,
         consignee: editForm.consignee,
         consigneePhone: editForm.consigneePhone,
@@ -1299,7 +1375,7 @@ export function Orders() {
           hover
           stripe
           rowClassName={({ row }: { row: OrderRecord }) => {
-            const isUnreceived = row.paymentAccount === '未收款';
+            const isUnreceived = hasUnreceivedPayment(row);
             const isUnreturned = row.returnStatus === 'notReturned' || row.returnStatus === 'inTransit';
             return (isUnreceived || isUnreturned) ? 'order-row-unreceived' : '';
           }}
@@ -1339,7 +1415,7 @@ export function Orders() {
             <DetailRow label="数量" value={currentRecord.quantity} />
             {shouldShowProductPaymentFields(currentRecord.orderSource, currentRecord.orderType, currentRecord.orderAttribute, currentRecord.brand) && <DetailRow label="单价" value={currentRecord.unitPrice ? `¥${currentRecord.unitPrice}` : '-'} />}
             {shouldShowProductPaymentFields(currentRecord.orderSource, currentRecord.orderType, currentRecord.orderAttribute, currentRecord.brand) && <DetailRow label="金额" value={currentRecord.amount ? `¥${currentRecord.amount}` : '-'} />}
-            {shouldShowProductPaymentFields(currentRecord.orderSource, currentRecord.orderType, currentRecord.orderAttribute, currentRecord.brand) && <DetailRow label="收款账户" value={currentRecord.paymentAccount} />}
+            {shouldShowProductPaymentFields(currentRecord.orderSource, currentRecord.orderType, currentRecord.orderAttribute, currentRecord.brand) && <DetailRow label="收款账户" value={formatPaymentSplits(currentRecord)} />}
             <DetailRow label="收货人名称" value={currentRecord.consignee} />
             <DetailRow label="收货人电话" value={currentRecord.consigneePhone} />
             <DetailRow label="收货人地址" value={currentRecord.consigneeAddress} />
@@ -1689,6 +1765,8 @@ export function Orders() {
           onAttachFilesChange={setAddAttachFiles}
           dictionaries={wizardDictionaries}
           productModelBrands={productModels.brands}
+          productModelLoading={productModels.loading}
+          productModelLoadError={productModels.loadError}
         />
       </Dialog>
 
@@ -1726,6 +1804,8 @@ export function Orders() {
           onAttachFilesChange={setEditAttachFiles}
           dictionaries={wizardDictionaries}
           productModelBrands={productModels.brands}
+          productModelLoading={productModels.loading}
+          productModelLoadError={productModels.loadError}
         />
       </Dialog>
 
@@ -1921,7 +2001,7 @@ export function Orders() {
 
 /** 新增订单 6 步向导 */
 function AddOrderWizard({
-  step, form, attachFiles, attachInputRef, onChange, onAttachFilesChange, dictionaries, productModelBrands, mode = 'add',
+  step, form, attachFiles, attachInputRef, onChange, onAttachFilesChange, dictionaries, productModelBrands, productModelLoading = false, productModelLoadError = '', mode = 'add',
 }: {
   step: number;
   form: OrderFormData;
@@ -1931,6 +2011,8 @@ function AddOrderWizard({
   onAttachFilesChange: React.Dispatch<React.SetStateAction<File[]>>;
   dictionaries: OrderWizardDictionaries;
   productModelBrands: PhoneBrand[];
+  productModelLoading?: boolean;
+  productModelLoadError?: string;
   mode?: 'add' | 'edit';
 }) {
   const {
@@ -1961,9 +2043,7 @@ function AddOrderWizard({
         .map(brand => [brand.brand, brand])
     ) as Record<string, PhoneBrand>;
   }, [productModelBrands]);
-  const hasRuntimeProductCatalog = productModelBrands.some(brand => brand.enabled !== false && (brand.products?.length || brand.models?.length));
   const brandOptions = useMemo(() => {
-    if (!hasRuntimeProductCatalog) return STATIC_BRAND_OPTIONS;
     return [
       PLACEHOLDER_OPTION,
       ...productModelBrands
@@ -1971,7 +2051,7 @@ function AddOrderWizard({
         .sort((a, b) => (a.sort || 0) - (b.sort || 0) || a.brand.localeCompare(b.brand, 'zh-CN'))
         .map(brand => ({ label: getBrandLabel(brand.brand), value: brand.brand })),
     ];
-  }, [hasRuntimeProductCatalog, productModelBrands]);
+  }, [productModelBrands]);
   const getCatalogProductsByBrand = useCallback((brand: string) => {
     const runtimeBrand = runtimeProductBrandMap[brand];
     if (runtimeBrand) {
@@ -1980,7 +2060,7 @@ function AddOrderWizard({
         .sort((a, b) => (a.sort || 0) - (b.sort || 0) || a.name.localeCompare(b.name, 'zh-CN'))
         .map(product => product.name);
     }
-    return getProductsByBrand(brand);
+    return [];
   }, [runtimeProductBrandMap]);
   const getCatalogSpecsByProduct = useCallback((brand: string, productName: string) => {
     const runtimeProduct = runtimeProductBrandMap[brand]?.products?.find(product => product.name === productName);
@@ -1990,7 +2070,7 @@ function AddOrderWizard({
         .sort((a, b) => (a.sort || 0) - (b.sort || 0) || a.name.localeCompare(b.name, 'zh-CN'))
         .map(spec => spec.name);
     }
-    return getSpecsByProduct(brand, productName);
+    return [];
   }, [runtimeProductBrandMap]);
   const updateField = useCallback(<K extends keyof OrderFormData>(key: K, val: OrderFormData[K]) => {
     onChange(prev => ({ ...prev, [key]: val }));
@@ -2012,6 +2092,25 @@ function AddOrderWizard({
       return applyVirtualProductStatus(prev, prev.products.filter((_, i) => i !== index));
     });
   }, [onChange]);
+  const updateProductPaymentSplits = useCallback((index: number, splits: PaymentSplit[]) => {
+    const cleanedSplits = splits.map(split => ({
+      account: split.account,
+      amount: Math.max(0, Number(split.amount) || 0),
+    }));
+    updateProduct(index, {
+      paymentSplits: cleanedSplits,
+      paymentAccount: getPaymentAccountValue(cleanedSplits),
+    });
+  }, [updateProduct]);
+  const addProductPaymentSplit = useCallback((index: number) => {
+    const product = form.products[index];
+    updateProductPaymentSplits(index, [...getEditablePaymentSplits(product), { account: '', amount: 0 }]);
+  }, [form.products, updateProductPaymentSplits]);
+  const removeProductPaymentSplit = useCallback((index: number, splitIndex: number) => {
+    const product = form.products[index];
+    const nextSplits = getEditablePaymentSplits(product).filter((_, i) => i !== splitIndex);
+    updateProductPaymentSplits(index, nextSplits.length > 0 ? nextSplits : [{ account: '', amount: product.amount || 0 }]);
+  }, [form.products, updateProductPaymentSplits]);
 
   // 转租赁2货品 CRUD
   const updateTransferProduct = useCallback((index: number, patch: Partial<TransferProductItem>) => {
@@ -2156,18 +2255,18 @@ function AddOrderWizard({
       {step === 1 && (
         <div className="py-4">
           <h4 className="text-sm font-medium text-gray-600 mb-4">填写基础信息</h4>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
+          <div className="order-basic-form-grid grid grid-cols-2 gap-3">
+            <div className="order-basic-form-field">
               <label className="block text-xs text-gray-500 mb-1">日期 <span className="text-red-500">*</span></label>
-              <input type="date" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500"
+              <input type="date" className="order-basic-date-input w-full px-3 border border-gray-300 text-sm focus:outline-none focus:border-blue-500"
                 value={form.date} onChange={e => updateField('date', e.target.value)} />
             </div>
-            <div>
+            <div className="order-basic-form-field">
               <label className="block text-xs text-gray-500 mb-1">客户名称 <span className="text-red-500">*</span></label>
               <Input placeholder="请输入客户名称"
                 value={form.customerName} onChange={val => updateField('customerName', val as string)} />
             </div>
-            <div>
+            <div className="order-basic-form-field">
               <label className="block text-xs text-gray-500 mb-1">销售人员 <span className="text-red-500">*</span></label>
               <Select placeholder="请选择" value={form.salesperson || ''} onChange={val => updateField('salesperson', val as string)} options={SALESPERSON_OPTIONS} />
             </div>
@@ -2258,6 +2357,15 @@ function AddOrderWizard({
       {/* ========== Step 3：货品信息 ========== */}
       {step === 3 && (
         <div className="py-4 max-h-[55vh] overflow-auto px-1">
+          {(productModelLoading || productModelLoadError || brandOptions.length <= 1) && (
+            <div className={`mb-3 rounded border px-3 py-2 text-sm ${
+              productModelLoadError ? 'border-red-200 bg-red-50 text-red-600' : 'border-amber-200 bg-amber-50 text-amber-700'
+            }`}>
+              {productModelLoading
+                ? '正在加载云端型号字典...'
+                : productModelLoadError || '云端型号字典暂无数据，请先在型号管理中初始化或维护品牌、货品和规格'}
+            </div>
+          )}
           <div className="flex items-center justify-between mb-2">
             <h4 className="text-sm font-medium text-gray-600">填写货品信息</h4>
             <Button size="small" variant="outline" icon={<Plus size={14} />} onClick={addProduct}>添加货品</Button>
@@ -2278,7 +2386,7 @@ function AddOrderWizard({
                       <label className="block text-xs text-gray-500 mb-1">品牌 <span className="text-red-500">*</span></label>
                       <Select placeholder="请选择品牌" value={product.brand || ''}
                         onChange={val => updateProduct(idx, { brand: val as string, productName: '', specification: '' })}
-                        options={brandOptions} filterable />
+                        options={brandOptions} filterable disabled={productModelLoading || !!productModelLoadError || brandOptions.length <= 1} />
                     </div>
                     <div>
                       <label className="block text-xs text-gray-500 mb-1">货品名称 <span className="text-red-500">*</span></label>
@@ -2295,13 +2403,21 @@ function AddOrderWizard({
                     <div>
                       <label className="block text-xs text-gray-500 mb-1">数量 <span className="text-red-500">*</span></label>
                       <Input type="number" placeholder="数量"
-                        value={product.quantity ? String(product.quantity) : ''} onChange={val => { const q = Math.max(0, Number(val)); updateProduct(idx, { quantity: q, amount: q * product.unitPrice }); }} />
+                        value={product.quantity ? String(product.quantity) : ''} onChange={val => {
+                          const q = Math.max(0, Number(val));
+                          const amount = q * product.unitPrice;
+                          updateProduct(idx, { quantity: q, amount, paymentSplits: syncSinglePaymentSplitAmount(product, amount) });
+                        }} />
                     </div>
                     {shouldShowPaymentFields && (
                       <div>
                         <label className="block text-xs text-gray-500 mb-1">单价 <span className="text-red-500">*</span></label>
                         <Input type="number" placeholder="单价"
-                          value={product.unitPrice ? String(product.unitPrice) : ''} onChange={val => { const p = Math.max(0, Number(val)); updateProduct(idx, { unitPrice: p, amount: product.quantity * p }); }} />
+                          value={product.unitPrice ? String(product.unitPrice) : ''} onChange={val => {
+                            const p = Math.max(0, Number(val));
+                            const amount = product.quantity * p;
+                            updateProduct(idx, { unitPrice: p, amount, paymentSplits: syncSinglePaymentSplitAmount(product, amount) });
+                          }} />
                       </div>
                     )}
                     {shouldShowPaymentFields && (
@@ -2312,10 +2428,38 @@ function AddOrderWizard({
                       </div>
                     )}
                     {shouldShowPaymentFields && (
-                      <div>
-                        <label className="block text-xs text-gray-500 mb-1">收款账户 <span className="text-red-500">*</span></label>
-                        <Select placeholder="请选择" value={product.paymentAccount || ''}
-                          onChange={val => updateProduct(idx, { paymentAccount: val as string })} options={PAYMENT_ACCOUNT_OPTIONS} />
+                      <div className="grid grid-cols-1 gap-2 md:col-span-3">
+                        <div className="flex items-center justify-between">
+                          <label className="block text-xs text-gray-500">收款账户 <span className="text-red-500">*</span></label>
+                          <Button size="small" variant="outline" icon={<Plus size={14} />} onClick={() => addProductPaymentSplit(idx)}>添加收款</Button>
+                        </div>
+                        {getEditablePaymentSplits(product).map((split, splitIndex) => {
+                          const splits = getEditablePaymentSplits(product);
+                          const splitTotal = splits.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+                          const diff = (product.amount || 0) - splitTotal;
+                          return (
+                            <div key={splitIndex} className="grid grid-cols-[1fr_160px_36px] items-center gap-2">
+                              <Select placeholder="请选择收款账户" value={split.account || ''}
+                                onChange={val => {
+                                  const nextSplits = [...splits];
+                                  nextSplits[splitIndex] = { ...nextSplits[splitIndex], account: val as string };
+                                  updateProductPaymentSplits(idx, nextSplits);
+                                }} options={PAYMENT_ACCOUNT_OPTIONS} />
+                              <Input type="number" placeholder="金额" value={split.amount ? String(split.amount) : ''}
+                                onChange={val => {
+                                  const nextSplits = [...splits];
+                                  nextSplits[splitIndex] = { ...nextSplits[splitIndex], amount: Math.max(0, Number(val) || 0) };
+                                  updateProductPaymentSplits(idx, nextSplits);
+                                }} />
+                              <Button size="small" variant="text" theme="danger" icon={<Minus size={14} />} disabled={splits.length <= 1} onClick={() => removeProductPaymentSplit(idx, splitIndex)} />
+                              {splitIndex === splits.length - 1 && (
+                                <div className={`col-span-3 text-xs ${Math.abs(diff) < 0.01 ? 'text-gray-400' : 'text-red-500'}`}>
+                                  收款合计 ¥{splitTotal || 0}，货品金额 ¥{product.amount || 0}{Math.abs(diff) >= 0.01 ? `，差额 ¥${diff}` : ''}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -2344,7 +2488,7 @@ function AddOrderWizard({
                       <label className="block text-xs text-gray-500 mb-1">品牌 <span className="text-red-500">*</span></label>
                       <Select placeholder="请选择品牌" value={tp.brand || ''}
                         onChange={val => updateTransferProduct(tIdx, { brand: val as string, productName: '', specification: '' })}
-                        options={brandOptions} filterable />
+                        options={brandOptions} filterable disabled={productModelLoading || !!productModelLoadError || brandOptions.length <= 1} />
                     </div>
                     <div>
                       <label className="block text-xs text-gray-500 mb-1">货品名称 <span className="text-red-500">*</span></label>
@@ -2554,7 +2698,7 @@ function AddOrderWizard({
                 return (
                   <div key={i} className="text-xs text-gray-600 ml-2 border-l-2 border-blue-200 pl-2 mb-1">
                     货品{i + 1}：{p.brand ? getBrandLabel(p.brand) : '-'} / {p.productName ? getProductLabel(p.productName) : '-'} / {p.specification || '-'}，
-                    数量 {p.quantity || 0}{shouldShowPaymentFields ? `，单价 ¥${p.unitPrice || 0}，金额 ¥${p.amount || 0}，收款账户 ${p.paymentAccount || '-'}` : ''}
+                    数量 {p.quantity || 0}{shouldShowPaymentFields ? `，单价 ¥${p.unitPrice || 0}，金额 ¥${p.amount || 0}，收款账户 ${formatPaymentSplits(p as unknown as OrderRecord)}` : ''}
                   </div>
                 );
               })}
