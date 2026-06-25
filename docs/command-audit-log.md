@@ -1,0 +1,135 @@
+# 命令审计日志
+
+从 2026-06-23 起，后续由 Codex 执行的关键命令记录在此文件，便于回溯和审核。
+
+## 2026-06-23
+
+- `git status --short --branch`
+- `rg -n "phoneModels|manageProductModels|product_models|phone_models" src cloud_functions cloudbaserc.json -g '!node_modules'`
+- `find cloud_functions/sendWechatNotification/functions -maxdepth 2 -type f -path '*phoneModels*' -o -path '*manageProductModels*'`
+- `rg -n "phoneModels|manageProductModels|product_models|phone_models" src cloud_functions cloudbaserc.json 云函数文档.md -g '!node_modules'`
+- `find cloud_functions/sendWechatNotification/functions -maxdepth 3 -type f -path '*phoneModels*' -o -path '*manageProductModels*'`
+- `sed -n '1,35p' 云函数文档.md`
+- `sed -n '1620,1685p' 云函数文档.md`
+- `rg -n "phoneModels|manageProductModels|product_models|phone_models" src cloud_functions cloudbaserc.json 云函数文档.md -g '!node_modules'`
+- `find cloud_functions/sendWechatNotification/functions -maxdepth 3 -type f -path '*phoneModels*' -o -path '*manageProductModels*'`
+- `node --check cloud_functions/sendWechatNotification/functions/manageProductModels/index.js`
+- `npm run build`
+- `git diff --check`
+- `cloudbase hosting:deploy dist / -e cloud1-8gvbotkt966e5e19`
+- `git status --short --branch`
+- `npm run build`
+- `git diff --check`
+- `cloudbase db nosql execute --command '[{"TableName":"product_models","CommandType":"DELETE","Command":"{\"delete\":\"product_models\",\"deletes\":[{\"q\":{\"brand\":\"无\"},\"limit\":0}]}"}]' --json`
+- `cloudbase db nosql execute --command '[{"TableName":"product_models","CommandType":"QUERY","Command":"{\"find\":\"product_models\",\"filter\":{\"brand\":{\"$in\":[\"无\",\"虚拟产品\"]}},\"limit\":10}"}]' --json`
+- `git status --short --branch`
+- `rg -n "动态|消息|待处理|pending|提醒|Dashboard|queryOrders|returnStatus|未收款|postRental" src cloud_functions -g '!node_modules'`
+- `sed -n '1,260p' src/pages/Dashboard.tsx`
+- `sed -n '1,170p' src/components/Layout.tsx`
+- `sed -n '1,220p' src/hooks/useStats.ts`
+- `sed -n '1,220p' cloud_functions/sendWechatNotification/functions/queryOrders/index.js`
+- `sed -n '260,360p' src/pages/Dashboard.tsx`
+- `rg -n "limit: 100|DYNAMIC_MESSAGE|ORDER_MESSAGE|messageCounts|fetchOrdersForDynamicMessages" src/pages/Dashboard.tsx src/components/Layout.tsx`
+- `npm run build`
+- `git diff --check`
+- `cloudbase hosting:deploy dist / -e cloud1-8gvbotkt966e5e19`
+- `git status --short --branch`
+- `git status --short --branch`
+- `cloudbase functions:deploy manageProductModels --force`
+- `cloudbase hosting:deploy dist / -e cloud1-8gvbotkt966e5e19`
+- `git status --short --branch`
+- `git status --short --branch`
+- `rg -n "'无'|'虚拟产品'|ORDER_TYPE_VIRTUAL_PRODUCTS|p.brand === '无'|p.brand === '虚拟产品'" src/pages/Orders.tsx src/data/dict.ts src/data/productDict.ts`
+- `sed -n '520,625p' src/data/dict.ts`
+- `cloudbase db nosql execute --command '[{"TableName":"product_models","CommandType":"QUERY","Command":"{\"find\":\"product_models\",\"filter\":{\"brand\":{\"$in\":[\"无\",\"虚拟产品\"]}},\"limit\":10}"}]' --json`
+- `sed -n '490,520p' src/data/dict.ts`
+- `git status --short --branch`
+- `rg -n "'无'|'虚拟产品'|ORDER_TYPE_VIRTUAL_PRODUCTS|isVirtualProductOrder|shouldShowProductPaymentFields" src/pages/Orders.tsx src/data/dict.ts src/data/productDict.ts`
+- `cloudbase db nosql execute --command '[{"TableName":"product_models","CommandType":"QUERY","Command":"{\"find\":\"product_models\",\"filter\":{\"brand\":{\"$in\":[\"无\",\"虚拟产品\"]}},\"limit\":10}"}]' --json`
+- `cloudbase db nosql execute --command "$(cat tmp/merge-virtual-product-command.json)" --json`
+- `node -e "JSON.parse(require('fs').readFileSync('tmp/merge-virtual-product-command.json','utf8')); console.log('ok')"`
+- `node --check cloud_functions/sendWechatNotification/functions/manageProductModels/index.js`
+- `npm run build`
+- `git diff --check`
+- `git status --short --branch`
+- `cloudbase functions:deploy manageProductModels --force`
+- `cloudbase fn detail manageProductModels --json`
+- `git status --short --branch`
+- `rg -n "PRODUCT_DICT|BRANDS|getProductsByBrand|getSpecsByProduct|manageProductModels|productName|specification" src/pages/Orders.tsx src/data/dict.ts src/hooks/usePhoneModels.ts src/data/productDict.ts`
+- `sed -n '1,50p' src/pages/Orders.tsx`
+- `sed -n '1970,2040p' src/pages/Orders.tsx`
+- `sed -n '620,705p' src/data/dict.ts`
+- `rg -n "AddOrderWizard|wizardDictionaries|<AddOrderWizard|function AddOrderWizard|interface AddOrderWizard" src/pages/Orders.tsx`
+- `sed -n '540,720p' src/pages/Orders.tsx`
+- `sed -n '1880,2060p' src/pages/Orders.tsx`
+- `sed -n '2200,2320p' src/pages/Orders.tsx`
+- `sed -n '1660,1730p' src/pages/Orders.tsx`
+- `sed -n '240,330p' src/pages/Orders.tsx`
+- `rg -n "BRAND_OPTIONS|STATIC_BRAND_OPTIONS|brandOptions|manageProductModels|getCatalogProductsByBrand|getCatalogSpecsByProduct" src/pages/Orders.tsx cloud_functions/sendWechatNotification/functions/manageProductModels/index.js 云函数文档.md`
+- `node --check cloud_functions/sendWechatNotification/functions/manageProductModels/index.js`
+- `npm run build`
+- `git diff --check`
+- `git status --short --branch`
+- `sed -n '1,220p' cloudbaserc.json`
+- `cat package.json`
+- `npm run build`
+- `cloudbase hosting:deploy dist / -e cloud1-8gvbotkt966e5e19`
+- `git status --short --branch`
+- `git add docs/command-audit-log.md`
+- `git commit -m "docs: add command audit log"`
+- `git push`
+- `git status --short --branch`
+- `rg --files | rg 'product.*dict|Product.*Dict|PhoneModels|phoneModels|model'`
+- `rg -n "PhoneModels|型号管理|productDict|PRODUCT|BRANDS|PHONE" src cloud_functions -g '!node_modules'`
+- `sed -n '1,260p' src/pages/PhoneModels.tsx`
+- `sed -n '1,260p' src/hooks/usePhoneModels.ts`
+- `sed -n '220,740p' src/data/dict.ts`
+- `rg -n "phoneModels|brands|models|loadAllModels|addModels|addBrand" cloud_functions src -g '!node_modules'`
+- `find cloud_functions -maxdepth 4 -type d -name '*phone*' -o -name '*model*'`
+- `sed -n '110,150p' src/types/index.ts`
+- `sed -n '130,230p' src/components/RecordEdit.tsx`
+- `git status --short --branch`
+- `rg -n "PRODUCT_DICT|BRANDS|getProductsByBrand|getSpecsByProduct|PhoneBrand" src cloud_functions cloudbaserc.json -g '!node_modules'`
+- `sed -n '1,180p' src/components/Layout.tsx`
+- `sed -n '1,90p' src/components/RoleManageTab.tsx`
+- `sed -n '1,140p' cloudbaserc.json`
+- `sed -n '1,220p' src/contexts/PermissionContext.tsx`
+- `sed -n '1,120p' src/lib/cloudbase.ts`
+- `sed -n '1,220p' cloud_functions/sendWechatNotification/functions/manageDictionaries/permissionAuth.js`
+- `sed -n '1,260p' cloud_functions/sendWechatNotification/functions/manageDictionaries/index.js`
+- `rg -n "<Dialog|Dialog" src/components src/pages -g '!node_modules'`
+- `node --check cloud_functions/sendWechatNotification/functions/phoneModels/index.js`
+- `npm run build`
+- `git diff --check`
+- `git status --short --branch`
+- `ls -a`
+- `cat .gitignore`
+- `git status --short --branch`
+- `git diff --stat`
+- `git status --short --branch`
+- `rg -n "phoneModels|phonemodels|PhoneModels|型号管理|product_models" 云函数文档.md docs cloud_functions/sendWechatNotification/functions cloudbaserc.json src -g '!node_modules'`
+- `cloudbase fn list --json`
+- `cloudbase fn detail phoneModels --json`
+- `cloudbase fn code download phoneModels`
+- `sed -n '640,720p' 云函数文档.md`
+- `sed -n '1450,1645p' 云函数文档.md`
+- `cloudbase fn code -h`
+- `cloudbase fn code download phoneModels tmp/remote-phoneModels`
+- `find tmp/remote-phoneModels -maxdepth 3 -type f | sort`
+- `sed -n '1,260p' tmp/remote-phoneModels/index.js`
+- `cloudbase db nosql execute --command '[{"TableName":"phone_models","CommandType":"COMMAND","Command":"{\"count\":\"phone_models\",\"query\":{}}"},{"TableName":"phone_models","CommandType":"QUERY","Command":"{\"find\":\"phone_models\",\"filter\":{},\"limit\":3}"}]' --json`
+- `rg -n "product_models|phone_models" cloud_functions/sendWechatNotification/functions/phoneModels src/data/productDict.ts src/hooks/usePhoneModels.ts src/pages/PhoneModels.tsx`
+- `node --check cloud_functions/sendWechatNotification/functions/phoneModels/index.js`
+- `npm run build`
+- `git diff --check`
+- `git status --short --branch`
+- `npm run build`
+- `git diff --check`
+- `cloudbase hosting:deploy dist / -e cloud1-8gvbotkt966e5e19`
+- `git status --short --branch`
+- `git status --short --branch`
+- `rg -n "重连|重新连接|connect|reconnect|retry|Retry|callFunction|cloudbase|init|auth|login|manageProductModels|loadBrands|loadModelsByBrand|loadSpecs|createOrder" src cloud_functions -g '!node_modules'`
+- `sed -n '1,260p' src/lib/cloudbase.ts`
+- `sed -n '1,140p' src/components/AuthGuard.tsx`
+- `sed -n '1,220p' src/contexts/PermissionContext.tsx`
+- `rg -n "codex|Codex|reconnect|retry|重连|重新连接" .codex .agents package.json README.md docs -g '!node_modules'`

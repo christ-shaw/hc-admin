@@ -1,8 +1,11 @@
 import { useCallback } from 'react';
 import { callFunction } from '../lib/cloudbase';
-import { CHANNEL_TYPE_MAP, RECORD_TYPE_MAP, LOG_ACTION_MAP } from '../data/dict';
+import { RECORD_TYPE_MAP, LOG_ACTION_MAP } from '../data/dict';
+import { DICT_CODES, useDictionaries } from '../contexts/DictionaryContext';
 
 export function useStorage() {
+  const dictionaries = useDictionaries();
+
   const getRealImageUrl = useCallback(async (fileID: string): Promise<string> => {
     if (!fileID) return '';
 
@@ -31,7 +34,7 @@ export function useStorage() {
         detailContent = `客户: ${(record.customerName as string) || '未知'}`;
       } else {
         const date = (record.inboundDate || record.outboundDate || '') as string;
-        const channelType = CHANNEL_TYPE_MAP[record.type as string] || (record.type as string) || '';
+        const channelType = dictionaries.getLabel(DICT_CODES.channelType, record.type as string) || '';
         const shopName = (record.shopName as string) || '';
 
         detailContent = `客户: ${(record.customerName as string) || '未知'}\n日期: ${date}\n渠道: ${channelType}\n店铺: ${shopName}`;
@@ -61,7 +64,7 @@ export function useStorage() {
     } catch (err) {
       console.error('企业微信推送异常:', err);
     }
-  }, []);
+  }, [dictionaries]);
 
   return { getRealImageUrl, notifyRecordChange };
 }

@@ -4,6 +4,7 @@ import type { InvoiceStatus } from '../data/dict';
 export {
   CHANNEL_TYPE_MAP,
   ORDER_STATUS_MAP,
+  RETURN_STATUS_MAP,
   ORDER_SOURCE_MAP,
   ORDER_ATTRIBUTE_MAP,
   ORDER_TYPE_MAP,
@@ -141,9 +142,35 @@ export interface LogFilters {
 }
 
 /** 手机品牌 */
+export interface PhoneModelSpec {
+  name: string;
+  enabled?: boolean;
+  sort?: number;
+  systemItem?: boolean;
+}
+
+export interface PhoneProduct {
+  name: string;
+  enabled?: boolean;
+  sort?: number;
+  systemItem?: boolean;
+  specs: PhoneModelSpec[];
+}
+
 export interface PhoneBrand {
+  _id?: string;
   brand: string;
-  models: string[];
+  enabled?: boolean;
+  sort?: number;
+  systemBrand?: boolean;
+  products?: PhoneProduct[];
+  models?: string[];
+}
+
+/** 收款拆分明细 */
+export interface PaymentSplit {
+  account: string;
+  amount: number;
 }
 
 /** 订单记录 —— 对齐 Excel「订单明细」工作表 25 列 */
@@ -166,6 +193,7 @@ export interface OrderRecord {
   unitPrice: number;                // 单价
   amount: number;                   // 金额
   paymentAccount: string;           // 收款账户
+  paymentSplits?: PaymentSplit[] | string; // 多账户收款明细（兼容旧数据）
   trackingNumber: string;           // 物流单号
   expressProvider?: string;         // 快递服务商
   sfEnv?: string;                   // 顺丰环境
@@ -222,6 +250,7 @@ export interface ProductItem {
   unitPrice: number;
   amount: number;
   paymentAccount: string;
+  paymentSplits?: PaymentSplit[];
 }
 
 /** 订单筛选条件 */

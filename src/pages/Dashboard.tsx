@@ -59,6 +59,16 @@ interface DailyShipmentStats {
   totalOutboundPhones: number;
 }
 
+interface QueryOrdersResult {
+  data?: OrderRecord[];
+  cursor?: string | null;
+  hasMore?: boolean;
+}
+
+const DYNAMIC_MESSAGE_PAGE_SIZE = 100;
+const DYNAMIC_MESSAGE_MAX_SCAN = 10000;
+const DYNAMIC_MESSAGE_DISPLAY_LIMIT = 20;
+
 const RETURN_STATUS_LABELS: Record<string, string> = {
   returned: '产品已退回入库',
   inTransit: '产品运输途中',
@@ -111,6 +121,42 @@ const buildOrderLabel = (order: OrderRecord) => {
 
 const buildOwnerLabel = (order: OrderRecord) => `责任人 ${order.salesperson || '-'}`;
 
+function hasUnreceivedPayment(order: OrderRecord) {
+  if (order.paymentAccount === '未收款') return true;
+  const value = order.paymentSplits;
+  const splits = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? (() => {
+          try {
+            const parsed = JSON.parse(value);
+            return Array.isArray(parsed) ? parsed : [];
+          } catch {
+            return [];
+          }
+        })()
+      : [];
+  return splits.some(split => split?.account === '未收款');
+}
+
+async function fetchOrdersForDynamicMessages() {
+  const orders: OrderRecord[] = [];
+  let cursor: string | null = null;
+  let hasMore = true;
+
+  while (hasMore && orders.length < DYNAMIC_MESSAGE_MAX_SCAN) {
+    const result: QueryOrdersResult = await callFunction<QueryOrdersResult>('queryOrders', {
+      data: { limit: DYNAMIC_MESSAGE_PAGE_SIZE, cursor },
+    });
+    const pageData = result.data || [];
+    orders.push(...pageData);
+    cursor = result.cursor || null;
+    hasMore = !!result.hasMore && !!cursor && pageData.length > 0;
+  }
+
+  return orders;
+}
+
 export function Dashboard() {
   const navigate = useNavigate();
   const [stats, setStats] = useState<QuickStat[]>(DEFAULT_STATS);
@@ -120,6 +166,7 @@ export function Dashboard() {
   const [dailyStatsLoading, setDailyStatsLoading] = useState(false);
   const [dailyStatsRange, setDailyStatsRange] = useState('');
   const [messages, setMessages] = useState<DynamicMessage[]>([]);
+  const [messageCounts, setMessageCounts] = useState({ return: 0, payment: 0 });
   const [messagesLoading, setMessagesLoading] = useState(false);
 
   const loadDailyShipmentStats = async () => {
@@ -180,11 +227,7 @@ export function Dashboard() {
   const loadDynamicMessages = async () => {
     setMessagesLoading(true);
     try {
-      const result = await callFunction<{ data?: OrderRecord[] }>('queryOrders', {
-        data: { limit: 100, cursor: null },
-      });
-
-      const orders = result.data || [];
+      const orders = await fetchOrdersForDynamicMessages();
       const returnMessages = orders
         .filter(order => ['postRentalShip', 'postRentalReturn'].includes(order.orderType))
         .filter(order => order.returnStatus !== 'returned')
@@ -200,7 +243,7 @@ export function Dashboard() {
         }));
 
       const paymentMessages = orders
-        .filter(order => order.paymentAccount === '未收款')
+        .filter(hasUnreceivedPayment)
         .map((order): DynamicMessage => ({
           id: `${order._id}-payment`,
           type: 'payment',
@@ -212,14 +255,20 @@ export function Dashboard() {
           customerName: order.customerName || '',
         }));
 
+      setMessageCounts({
+        return: returnMessages.length,
+        payment: paymentMessages.length,
+      });
+
       const nextMessages = [...returnMessages, ...paymentMessages]
         .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
-        .slice(0, 20);
+        .slice(0, DYNAMIC_MESSAGE_DISPLAY_LIMIT);
 
       setMessages(nextMessages);
     } catch (err) {
       console.error('获取首页动态消息失败:', err);
       setMessages([]);
+      setMessageCounts({ return: 0, payment: 0 });
     } finally {
       setMessagesLoading(false);
     }
@@ -262,8 +311,8 @@ export function Dashboard() {
     };
   }, []);
 
-  const returnMessageCount = messages.filter(item => item.type === 'return').length;
-  const paymentMessageCount = messages.filter(item => item.type === 'payment').length;
+  const returnMessageCount = messageCounts.return;
+  const paymentMessageCount = messageCounts.payment;
   const shouldRollMessages = messages.length > 4;
   const rollingMessages = shouldRollMessages ? [...messages, ...messages] : messages;
   const rollDuration = `${Math.max(18, messages.length * 3)}s`;

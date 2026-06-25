@@ -2,24 +2,19 @@ import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
 import { Table, Button, Input, Select, Tag, Dialog, MessagePlugin, Textarea } from 'tdesign-react';
 import { Search, RotateCcw, Upload, Download, Plus, Pencil, Trash2, Minus, X, ChevronRight, ChevronLeft, FileDown, Check } from 'lucide-react';
-import { OrderRecord, OrderFilters, InboundRecord, OutboundRecord, PhoneModelItem, ORDER_TYPE_MAP, ORDER_SOURCE_MAP, ORDER_ATTRIBUTE_MAP, SALES_CHANNEL_MAP, ORDER_STATUS_MAP, CHANNEL_CATEGORY_MAP, SHIPPING_FEE_MAP, ProductItem, TransferProductItem, OrderAttachment, dictToOptions, getDictLabel } from '../types';
+import { OrderRecord, OrderFilters, InboundRecord, OutboundRecord, PhoneBrand, PhoneModelItem, ProductItem, TransferProductItem, OrderAttachment, PaymentSplit, dictToOptions, getDictLabel } from '../types';
 import { useOrders } from '../hooks/useOrders';
-import { formatDate, getChannelTypeText, getTotalQuantity } from '../utils/format';
+import { usePhoneModels } from '../hooks/usePhoneModels';
+import { formatDate, getTotalQuantity } from '../utils/format';
 import { OUTBOUND_SYNC_STATUS_MAP, getOutboundSyncStatusTheme, resolveOutboundStatus, resolveOutboundSyncStatus } from '../utils/outboundLinkage';
 import { parseOrderExcel, exportOrderExcel } from '../utils/orderExcel';
-import { BRANDS, getBrandLabel, getProductLabel, getProductsByBrand, getSpecsByProduct, PAYMENT_ACCOUNTS, SALESPERSONS } from '../data/dict';
+import { getBrandLabel, getProductLabel } from '../data/dict';
 import { parseConsigneeInfo, callFunction, getCloudFileURLs, getCurrentOperatorName, uploadToCloudStorage } from '../lib/cloudbase';
 import { PAGE_SIZE } from '../utils/constants';
+import { DICT_CODES, useDictionaries } from '../contexts/DictionaryContext';
 
 /** ========== 预计算静态 options（模块级常量，避免每次渲染重建） ========== */
 const PLACEHOLDER_OPTION = { label: '请选择', value: '' };
-
-const ORDER_SOURCE_OPTIONS = [PLACEHOLDER_OPTION, ...dictToOptions(ORDER_SOURCE_MAP)];
-const ORDER_ATTRIBUTE_OPTIONS = [PLACEHOLDER_OPTION, ...dictToOptions(ORDER_ATTRIBUTE_MAP)];
-const ORDER_TYPE_OPTIONS = [PLACEHOLDER_OPTION, ...dictToOptions(ORDER_TYPE_MAP)];
-const SALES_CHANNEL_OPTIONS = [PLACEHOLDER_OPTION, ...dictToOptions(SALES_CHANNEL_MAP)];
-const CHANNEL_CATEGORY_OPTIONS = [PLACEHOLDER_OPTION, ...dictToOptions(CHANNEL_CATEGORY_MAP)];
-const SALESPERSON_OPTIONS = [PLACEHOLDER_OPTION, ...SALESPERSONS.map(v => ({ label: v, value: v }))];
 
 /** 平台渠道的 salesChannel key 集合（人人租系列 + 云途/汇租机/租机乐/倬石电子/云界互联/极客矩阵/极速闪租） */
 const PLATFORM_CHANNELS = new Set(['aRrz', 'fRrz', 'lRrz', 'jRrz', 'gRrz', 'yuntu', '云途', 'huizuji', 'zujile', '租机乐', 'zhuoshi', 'yunjie', 'jikejuzhen', 'jisushanzu']);
@@ -34,7 +29,7 @@ function calcChannelCategory(salesChannel: string): 'platform' | 'offline' | '' 
 const ORDER_TYPE_VIRTUAL_PRODUCTS: Partial<Record<string, string[]>> = {
   newBusiness: ['平台租金', '续期租金'],
   postRentalPayment: ['补收差价', '仅退款', '利润差额', '维修费', '快递费'],
-  deposit: ['收押金', '退押金'],
+  deposit: ['收押金', '退押金', '押金'],
 };
 
 /** 订单来源 → 可选订单类型白名单 */
@@ -42,26 +37,6 @@ const ORDER_SOURCE_ORDER_TYPE_MAP: Partial<Record<string, string[]>> = {
   new: ['newBusiness'],
   service: ['postRentalShip', 'postRentalReturn', 'postRentalPayment', 'deposit'],
 };
-
-/** 归还状态字典（租后发货/租后退货时使用） */
-const RETURN_STATUS_MAP = {
-  returned: '产品已退回入库',
-  inTransit: '产品运输途中',
-  notReturned: '客户未退回',
-} as const;
-const RETURN_STATUS_OPTIONS = [PLACEHOLDER_OPTION, ...dictToOptions(RETURN_STATUS_MAP)];
-
-const PAYMENT_ACCOUNT_OPTIONS = [PLACEHOLDER_OPTION, ...PAYMENT_ACCOUNTS.map(v => ({ label: v, value: v }))];
-const ORDER_STATUS_OPTIONS = dictToOptions(ORDER_STATUS_MAP);
-
-const SHIPPING_FEE_OPTIONS = [PLACEHOLDER_OPTION, ...dictToOptions(SHIPPING_FEE_MAP)];
-const SHIP_CONFIRM_SHIPPING_FEE_OPTIONS = [
-  { label: '包邮', value: 'prepaid' },
-  { label: '到付', value: 'cod' },
-];
-const BRAND_OPTIONS = [PLACEHOLDER_OPTION, ...BRANDS.map(v => ({ label: getBrandLabel(v), value: v }))];
-const FILTER_SALESPERSON_OPTIONS = [{ label: '全部', value: '' }, ...SALESPERSONS.map(v => ({ label: v, value: v }))];
-const FILTER_ORDER_STATUS_OPTIONS = [{ label: '全部', value: '' }, ...dictToOptions(ORDER_STATUS_MAP)];
 
 /** 货品条目默认值 */
 const EMPTY_PRODUCT: ProductItem = {
@@ -72,6 +47,7 @@ const EMPTY_PRODUCT: ProductItem = {
   unitPrice: 0,
   amount: 0,
   paymentAccount: '',
+  paymentSplits: [],
 };
 
 /** 转租赁2货品条目默认值 */
@@ -107,6 +83,26 @@ interface OrderFormData {
   attachments: OrderAttachment[];
   returnStatus: string;
   returnTrackingNumbers: string;
+}
+
+interface OrderWizardDictionaries {
+  ORDER_SOURCE_MAP: Record<string, string>;
+  ORDER_ATTRIBUTE_MAP: Record<string, string>;
+  ORDER_TYPE_MAP: Record<string, string>;
+  SALES_CHANNEL_MAP: Record<string, string>;
+  CHANNEL_CATEGORY_MAP: Record<string, string>;
+  ORDER_STATUS_MAP: Record<string, string>;
+  RETURN_STATUS_MAP: Record<string, string>;
+  SHIPPING_FEE_MAP: Record<string, string>;
+  ORDER_SOURCE_OPTIONS: Array<{ label: string; value: string }>;
+  ORDER_ATTRIBUTE_OPTIONS: Array<{ label: string; value: string }>;
+  ORDER_TYPE_OPTIONS: Array<{ label: string; value: string }>;
+  SALES_CHANNEL_OPTIONS: Array<{ label: string; value: string }>;
+  SALESPERSON_OPTIONS: Array<{ label: string; value: string }>;
+  PAYMENT_ACCOUNT_OPTIONS: Array<{ label: string; value: string }>;
+  ORDER_STATUS_OPTIONS: Array<{ label: string; value: string }>;
+  RETURN_STATUS_OPTIONS: Array<{ label: string; value: string }>;
+  SHIPPING_FEE_OPTIONS: Array<{ label: string; value: string }>;
 }
 
 const EMPTY_ORDER: OrderFormData = {
@@ -225,8 +221,84 @@ function clearHiddenProductPaymentFields(form: Pick<OrderFormData, 'orderSource'
       unitPrice: 0,
       amount: 0,
       paymentAccount: '',
+      paymentSplits: [],
     };
   });
+}
+
+function parsePaymentSplits(value: OrderRecord['paymentSplits'] | ProductItem['paymentSplits']): PaymentSplit[] {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function normalizePaymentSplits(source: Pick<ProductItem, 'paymentAccount' | 'amount' | 'paymentSplits'>): PaymentSplit[] {
+  const splits = parsePaymentSplits(source.paymentSplits)
+    .map(split => ({ account: String(split.account || '').trim(), amount: Math.max(0, Number(split.amount) || 0) }))
+    .filter(split => split.account || split.amount > 0);
+  if (splits.length > 0) return splits;
+  return source.paymentAccount ? [{ account: source.paymentAccount, amount: Math.max(0, Number(source.amount) || 0) }] : [];
+}
+
+function getEditablePaymentSplits(product: ProductItem): PaymentSplit[] {
+  const rawSplits = parsePaymentSplits(product.paymentSplits)
+    .map(split => ({
+      account: String(split.account || ''),
+      amount: Math.max(0, Number(split.amount) || 0),
+    }));
+  if (rawSplits.length > 0) return rawSplits;
+  if (product.paymentAccount) return [{ account: product.paymentAccount, amount: Math.max(0, Number(product.amount) || 0) }];
+  return [{ account: '', amount: Math.max(0, Number(product.amount) || 0) }];
+}
+
+function getPaymentAccountValue(splits: PaymentSplit[]): string {
+  const accounts = splits.map(split => split.account).filter(Boolean);
+  if (accounts.length === 0) return '';
+  return Array.from(new Set(accounts)).join('、');
+}
+
+function getPaymentSplitTotal(product: ProductItem): number {
+  return normalizePaymentSplits(product).reduce((sum, split) => sum + (Number(split.amount) || 0), 0);
+}
+
+function isPaymentSplitValid(product: ProductItem): boolean {
+  const splits = normalizePaymentSplits(product);
+  if (splits.length === 0 || splits.some(split => !split.account || split.amount <= 0)) return false;
+  return Math.abs(getPaymentSplitTotal(product) - (Number(product.amount) || 0)) < 0.01;
+}
+
+function formatPaymentSplits(source: Pick<OrderRecord, 'paymentAccount' | 'amount' | 'paymentSplits'>): string {
+  const splits = normalizePaymentSplits(source as ProductItem);
+  if (splits.length === 0) return source.paymentAccount || '-';
+  if (splits.length === 1) return splits[0].account || source.paymentAccount || '-';
+  return splits.map(split => `${split.account || '-'} ¥${split.amount || 0}`).join('；');
+}
+
+function hasUnreceivedPayment(record: OrderRecord): boolean {
+  return record.paymentAccount === '未收款' || normalizePaymentSplits(record as unknown as ProductItem).some(split => split.account === '未收款');
+}
+
+function serializeProductForSave(product: ProductItem): ProductItem {
+  const paymentSplits = normalizePaymentSplits(product);
+  return {
+    ...product,
+    paymentSplits,
+    paymentAccount: getPaymentAccountValue(paymentSplits),
+  };
+}
+
+function syncSinglePaymentSplitAmount(product: ProductItem, amount: number): PaymentSplit[] {
+  const splits = normalizePaymentSplits(product);
+  if (splits.length > 1) return splits;
+  return [{ account: splits[0]?.account || product.paymentAccount || '', amount }];
 }
 
 function buildEditFormFromRecord(record: OrderRecord): OrderFormData {
@@ -273,6 +345,7 @@ function buildEditFormFromRecord(record: OrderRecord): OrderFormData {
       unitPrice: record.unitPrice,
       amount: record.amount,
       paymentAccount: record.paymentAccount,
+      paymentSplits: normalizePaymentSplits(record as unknown as ProductItem),
     }],
     attachments: record.attachments || [],
     returnStatus: record.returnStatus || '',
@@ -283,7 +356,77 @@ function buildEditFormFromRecord(record: OrderRecord): OrderFormData {
 export function Orders() {
   const orders = useOrders();
   const location = useLocation();
+  const dictionaries = useDictionaries();
+  const productModels = usePhoneModels();
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const ORDER_SOURCE_MAP = dictionaries.getMap(DICT_CODES.orderSource);
+  const ORDER_ATTRIBUTE_MAP = dictionaries.getMap(DICT_CODES.orderAttribute);
+  const ORDER_TYPE_MAP = dictionaries.getMap(DICT_CODES.orderType);
+  const SALES_CHANNEL_MAP = dictionaries.getMap(DICT_CODES.salesChannel);
+  const CHANNEL_CATEGORY_MAP = dictionaries.getMap(DICT_CODES.channelCategory);
+  const ORDER_STATUS_MAP = dictionaries.getMap(DICT_CODES.orderStatus);
+  const RETURN_STATUS_MAP = dictionaries.getMap(DICT_CODES.returnStatus);
+  const SHIPPING_FEE_MAP = dictionaries.getMap(DICT_CODES.shippingFee);
+  const SALESPERSONS = dictionaries.getItems(DICT_CODES.salesperson).map(item => item.value);
+
+  const ORDER_SOURCE_OPTIONS = useMemo(() => [PLACEHOLDER_OPTION, ...dictToOptions(ORDER_SOURCE_MAP)], [ORDER_SOURCE_MAP]);
+  const ORDER_ATTRIBUTE_OPTIONS = useMemo(() => [PLACEHOLDER_OPTION, ...dictToOptions(ORDER_ATTRIBUTE_MAP)], [ORDER_ATTRIBUTE_MAP]);
+  const ORDER_TYPE_OPTIONS = useMemo(() => [PLACEHOLDER_OPTION, ...dictToOptions(ORDER_TYPE_MAP)], [ORDER_TYPE_MAP]);
+  const SALES_CHANNEL_OPTIONS = useMemo(() => [PLACEHOLDER_OPTION, ...dictToOptions(SALES_CHANNEL_MAP)], [SALES_CHANNEL_MAP]);
+  const SALESPERSON_OPTIONS = useMemo(() => [PLACEHOLDER_OPTION, ...SALESPERSONS.map(v => ({ label: dictionaries.getLabel(DICT_CODES.salesperson, v), value: v }))], [SALESPERSONS, dictionaries]);
+  const PAYMENT_ACCOUNT_OPTIONS = useMemo(() => [PLACEHOLDER_OPTION, ...dictionaries.getOptions(DICT_CODES.paymentAccount)], [dictionaries]);
+  const ORDER_STATUS_OPTIONS = useMemo(() => dictToOptions(ORDER_STATUS_MAP), [ORDER_STATUS_MAP]);
+  const RETURN_STATUS_OPTIONS = useMemo(() => [PLACEHOLDER_OPTION, ...dictToOptions(RETURN_STATUS_MAP)], [RETURN_STATUS_MAP]);
+  const SHIPPING_FEE_OPTIONS = useMemo(() => [PLACEHOLDER_OPTION, ...dictToOptions(SHIPPING_FEE_MAP)], [SHIPPING_FEE_MAP]);
+  const FILTER_SALESPERSON_OPTIONS = useMemo(() => [{ label: '全部', value: '' }, ...SALESPERSONS.map(v => ({ label: dictionaries.getLabel(DICT_CODES.salesperson, v), value: v }))], [SALESPERSONS, dictionaries]);
+  const FILTER_ORDER_STATUS_OPTIONS = useMemo(() => [{ label: '全部', value: '' }, ...dictToOptions(ORDER_STATUS_MAP)], [ORDER_STATUS_MAP]);
+  const SHIP_CONFIRM_SHIPPING_FEE_OPTIONS = useMemo(
+    () => dictToOptions(SHIPPING_FEE_MAP).filter(option => option.value === 'prepaid' || option.value === 'cod'),
+    [SHIPPING_FEE_MAP]
+  );
+
+  useEffect(() => {
+    productModels.loadBrands();
+  }, [productModels.loadBrands]);
+
+  const wizardDictionaries = useMemo<OrderWizardDictionaries>(() => ({
+    ORDER_SOURCE_MAP,
+    ORDER_ATTRIBUTE_MAP,
+    ORDER_TYPE_MAP,
+    SALES_CHANNEL_MAP,
+    CHANNEL_CATEGORY_MAP,
+    ORDER_STATUS_MAP,
+    RETURN_STATUS_MAP,
+    SHIPPING_FEE_MAP,
+    ORDER_SOURCE_OPTIONS,
+    ORDER_ATTRIBUTE_OPTIONS,
+    ORDER_TYPE_OPTIONS,
+    SALES_CHANNEL_OPTIONS,
+    SALESPERSON_OPTIONS,
+    PAYMENT_ACCOUNT_OPTIONS,
+    ORDER_STATUS_OPTIONS,
+    RETURN_STATUS_OPTIONS,
+    SHIPPING_FEE_OPTIONS,
+  }), [
+    ORDER_SOURCE_MAP,
+    ORDER_ATTRIBUTE_MAP,
+    ORDER_TYPE_MAP,
+    SALES_CHANNEL_MAP,
+    CHANNEL_CATEGORY_MAP,
+    ORDER_STATUS_MAP,
+    RETURN_STATUS_MAP,
+    SHIPPING_FEE_MAP,
+    ORDER_SOURCE_OPTIONS,
+    ORDER_ATTRIBUTE_OPTIONS,
+    ORDER_TYPE_OPTIONS,
+    SALES_CHANNEL_OPTIONS,
+    SALESPERSON_OPTIONS,
+    PAYMENT_ACCOUNT_OPTIONS,
+    ORDER_STATUS_OPTIONS,
+    RETURN_STATUS_OPTIONS,
+    SHIPPING_FEE_OPTIONS,
+  ]);
 
   const [filters, setFilters] = useState<OrderFilters>({});
   const [detailVisible, setDetailVisible] = useState(false);
@@ -639,7 +782,7 @@ export function Orders() {
       if (addForm.products.some(p => !p.specification)) { MessagePlugin.warning('请选择规格'); return; }
       if (addForm.products.some(p => !p.quantity || p.quantity <= 0)) { MessagePlugin.warning('请填写数量'); return; }
       if (addForm.products.some(p => shouldShowProductPaymentFields(addForm.orderSource, addForm.orderType, addForm.orderAttribute, p.brand) && (!p.unitPrice || p.unitPrice <= 0))) { MessagePlugin.warning('请填写单价'); return; }
-      if (addForm.products.some(p => shouldShowProductPaymentFields(addForm.orderSource, addForm.orderType, addForm.orderAttribute, p.brand) && !p.paymentAccount)) { MessagePlugin.warning('请选择收款账户'); return; }
+      if (addForm.products.some(p => shouldShowProductPaymentFields(addForm.orderSource, addForm.orderType, addForm.orderAttribute, p.brand) && !isPaymentSplitValid(p))) { MessagePlugin.warning('请填写收款账户，并确保收款金额合计等于货品金额'); return; }
       if (addForm.products.some(p => p.productName === '部分转租赁2' || p.productName === '全部转租赁2') && addForm.transferProducts.some(t => !t.paidPeriod || t.paidPeriod <= 0)) { MessagePlugin.warning('转租赁2请填写已交租期'); return; }
       if (addForm.products.some(p => p.productName === '部分转租赁2' || p.productName === '全部转租赁2') && addForm.transferProducts.some(t => !t.paidRent || t.paidRent <= 0)) { MessagePlugin.warning('转租赁2请填写已交租金'); return; }
     }
@@ -670,7 +813,7 @@ export function Orders() {
         addForm.transferProducts.some(t => t.brand || t.productName || t.specification || t.paidPeriod || t.paidRent) ||
         addAttachFiles.length > 0) return true;
     // 检查货品是否有数据
-    return addForm.products.some(p => p.brand || p.productName || p.specification || p.quantity || p.unitPrice || p.paymentAccount);
+    return addForm.products.some(p => p.brand || p.productName || p.specification || p.quantity || p.unitPrice || p.paymentAccount || normalizePaymentSplits(p).length > 0);
   };
 
   const handleRequestCloseAdd = () => {
@@ -730,7 +873,7 @@ export function Orders() {
         channelCategory: addForm.channelCategory,
         onlineOrderNumber: addForm.onlineOrderNumber,
         customerName: addForm.customerName,
-        ...product,
+        ...serializeProductForSave(product),
         trackingNumber: shipmentFields.trackingNumber,
         consignee: addForm.consignee,
         consigneePhone: addForm.consigneePhone,
@@ -1002,7 +1145,7 @@ export function Orders() {
       if (editForm.products.some(p => !p.specification)) { MessagePlugin.warning('请选择规格'); return; }
       if (editForm.products.some(p => !p.quantity || p.quantity <= 0)) { MessagePlugin.warning('请填写数量'); return; }
       if (editForm.products.some(p => shouldShowProductPaymentFields(editForm.orderSource, editForm.orderType, editForm.orderAttribute, p.brand) && (!p.unitPrice || p.unitPrice <= 0))) { MessagePlugin.warning('请填写单价'); return; }
-      if (editForm.products.some(p => shouldShowProductPaymentFields(editForm.orderSource, editForm.orderType, editForm.orderAttribute, p.brand) && !p.paymentAccount)) { MessagePlugin.warning('请选择收款账户'); return; }
+      if (editForm.products.some(p => shouldShowProductPaymentFields(editForm.orderSource, editForm.orderType, editForm.orderAttribute, p.brand) && !isPaymentSplitValid(p))) { MessagePlugin.warning('请填写收款账户，并确保收款金额合计等于货品金额'); return; }
       const editHasTransfer = editForm.products.some(p => p.productName === '部分转租赁2' || p.productName === '全部转租赁2');
       if (editHasTransfer && editForm.transferProducts.some(t => !t.paidPeriod || t.paidPeriod <= 0)) { MessagePlugin.warning('转租赁2请填写已交租期'); return; }
       if (editHasTransfer && editForm.transferProducts.some(t => !t.paidRent || t.paidRent <= 0)) { MessagePlugin.warning('转租赁2请填写已交租金'); return; }
@@ -1050,7 +1193,7 @@ export function Orders() {
         channelCategory: editForm.channelCategory,
         onlineOrderNumber: editForm.onlineOrderNumber,
         customerName: editForm.customerName,
-        ...product,
+        ...serializeProductForSave(product),
         trackingNumber: shipmentFields.trackingNumber,
         consignee: editForm.consignee,
         consigneePhone: editForm.consigneePhone,
@@ -1337,7 +1480,7 @@ export function Orders() {
           hover
           stripe
           rowClassName={({ row }: { row: OrderRecord }) => {
-            const isUnreceived = row.paymentAccount === '未收款';
+            const isUnreceived = hasUnreceivedPayment(row);
             const isUnreturned = row.returnStatus === 'notReturned' || row.returnStatus === 'inTransit';
             return (isUnreceived || isUnreturned) ? 'order-row-unreceived' : '';
           }}
@@ -1377,7 +1520,7 @@ export function Orders() {
             <DetailRow label="数量" value={currentRecord.quantity} />
             {shouldShowProductPaymentFields(currentRecord.orderSource, currentRecord.orderType, currentRecord.orderAttribute, currentRecord.brand) && <DetailRow label="单价" value={currentRecord.unitPrice ? `¥${currentRecord.unitPrice}` : '-'} />}
             {shouldShowProductPaymentFields(currentRecord.orderSource, currentRecord.orderType, currentRecord.orderAttribute, currentRecord.brand) && <DetailRow label="金额" value={currentRecord.amount ? `¥${currentRecord.amount}` : '-'} />}
-            {shouldShowProductPaymentFields(currentRecord.orderSource, currentRecord.orderType, currentRecord.orderAttribute, currentRecord.brand) && <DetailRow label="收款账户" value={currentRecord.paymentAccount} />}
+            {shouldShowProductPaymentFields(currentRecord.orderSource, currentRecord.orderType, currentRecord.orderAttribute, currentRecord.brand) && <DetailRow label="收款账户" value={formatPaymentSplits(currentRecord)} />}
             <DetailRow label="收货人名称" value={currentRecord.consignee} />
             <DetailRow label="收货人电话" value={currentRecord.consigneePhone} />
             <DetailRow label="收货人地址" value={currentRecord.consigneeAddress} />
@@ -1638,7 +1781,7 @@ export function Orders() {
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-1 text-sm text-gray-800">
                     <div><span className="text-gray-400">入库日期：</span>{formatDate(record.inboundDate, false) || '-'}</div>
                     <div><span className="text-gray-400">客户名称：</span>{record.customerName || '-'}</div>
-                    <div><span className="text-gray-400">渠道类型：</span>{getChannelTypeText(record.type)}</div>
+                    <div><span className="text-gray-400">渠道类型：</span>{dictionaries.getLabel(DICT_CODES.channelType, record.type)}</div>
                     <div><span className="text-gray-400">渠道名称：</span>{record.shopName || '-'}</div>
                     <div><span className="text-gray-400">快递单号：</span><span className="font-medium text-gray-900">{record.trackingNumber || '-'}</span></div>
                     <div><span className="text-gray-400">入库数量：</span>{getTotalQuantity(record) || '-'}</div>
@@ -1736,6 +1879,10 @@ export function Orders() {
           attachInputRef={addAttachInputRef}
           onChange={setAddForm}
           onAttachFilesChange={setAddAttachFiles}
+          dictionaries={wizardDictionaries}
+          productModelBrands={productModels.brands}
+          productModelLoading={productModels.loading}
+          productModelLoadError={productModels.loadError}
         />
       </Dialog>
 
@@ -1771,6 +1918,10 @@ export function Orders() {
           attachInputRef={editAttachInputRef}
           onChange={setEditForm}
           onAttachFilesChange={setEditAttachFiles}
+          dictionaries={wizardDictionaries}
+          productModelBrands={productModels.brands}
+          productModelLoading={productModels.loading}
+          productModelLoadError={productModels.loadError}
         />
       </Dialog>
 
@@ -1966,7 +2117,7 @@ export function Orders() {
 
 /** 新增订单 6 步向导 */
 function AddOrderWizard({
-  step, form, attachFiles, attachInputRef, onChange, onAttachFilesChange, mode = 'add',
+  step, form, attachFiles, attachInputRef, onChange, onAttachFilesChange, dictionaries, productModelBrands, productModelLoading = false, productModelLoadError = '', mode = 'add',
 }: {
   step: number;
   form: OrderFormData;
@@ -1974,10 +2125,69 @@ function AddOrderWizard({
   attachInputRef: React.RefObject<HTMLInputElement>;
   onChange: React.Dispatch<React.SetStateAction<OrderFormData>>;
   onAttachFilesChange: React.Dispatch<React.SetStateAction<File[]>>;
+  dictionaries: OrderWizardDictionaries;
+  productModelBrands: PhoneBrand[];
+  productModelLoading?: boolean;
+  productModelLoadError?: string;
   mode?: 'add' | 'edit';
 }) {
+  const {
+    ORDER_SOURCE_MAP,
+    ORDER_ATTRIBUTE_MAP,
+    ORDER_TYPE_MAP,
+    SALES_CHANNEL_MAP,
+    CHANNEL_CATEGORY_MAP,
+    ORDER_STATUS_MAP,
+    RETURN_STATUS_MAP,
+    SHIPPING_FEE_MAP,
+    ORDER_SOURCE_OPTIONS,
+    ORDER_ATTRIBUTE_OPTIONS,
+    ORDER_TYPE_OPTIONS,
+    SALES_CHANNEL_OPTIONS,
+    SALESPERSON_OPTIONS,
+    PAYMENT_ACCOUNT_OPTIONS,
+    ORDER_STATUS_OPTIONS,
+    RETURN_STATUS_OPTIONS,
+    SHIPPING_FEE_OPTIONS,
+  } = dictionaries;
   const [pasteText, setPasteText] = useState('');
   const [parsing, setParsing] = useState(false);
+  const runtimeProductBrandMap = useMemo(() => {
+    return Object.fromEntries(
+      productModelBrands
+        .filter(brand => brand.enabled !== false)
+        .map(brand => [brand.brand, brand])
+    ) as Record<string, PhoneBrand>;
+  }, [productModelBrands]);
+  const brandOptions = useMemo(() => {
+    return [
+      PLACEHOLDER_OPTION,
+      ...productModelBrands
+        .filter(brand => brand.enabled !== false)
+        .sort((a, b) => (a.sort || 0) - (b.sort || 0) || a.brand.localeCompare(b.brand, 'zh-CN'))
+        .map(brand => ({ label: getBrandLabel(brand.brand), value: brand.brand })),
+    ];
+  }, [productModelBrands]);
+  const getCatalogProductsByBrand = useCallback((brand: string) => {
+    const runtimeBrand = runtimeProductBrandMap[brand];
+    if (runtimeBrand) {
+      return (runtimeBrand.products || [])
+        .filter(product => product.enabled !== false)
+        .sort((a, b) => (a.sort || 0) - (b.sort || 0) || a.name.localeCompare(b.name, 'zh-CN'))
+        .map(product => product.name);
+    }
+    return [];
+  }, [runtimeProductBrandMap]);
+  const getCatalogSpecsByProduct = useCallback((brand: string, productName: string) => {
+    const runtimeProduct = runtimeProductBrandMap[brand]?.products?.find(product => product.name === productName);
+    if (runtimeProduct) {
+      return (runtimeProduct.specs || [])
+        .filter(spec => spec.enabled !== false)
+        .sort((a, b) => (a.sort || 0) - (b.sort || 0) || a.name.localeCompare(b.name, 'zh-CN'))
+        .map(spec => spec.name);
+    }
+    return [];
+  }, [runtimeProductBrandMap]);
   const updateField = useCallback(<K extends keyof OrderFormData>(key: K, val: OrderFormData[K]) => {
     onChange(prev => ({ ...prev, [key]: val }));
   }, [onChange]);
@@ -1998,6 +2208,25 @@ function AddOrderWizard({
       return applyVirtualProductStatus(prev, prev.products.filter((_, i) => i !== index));
     });
   }, [onChange]);
+  const updateProductPaymentSplits = useCallback((index: number, splits: PaymentSplit[]) => {
+    const cleanedSplits = splits.map(split => ({
+      account: split.account,
+      amount: Math.max(0, Number(split.amount) || 0),
+    }));
+    updateProduct(index, {
+      paymentSplits: cleanedSplits,
+      paymentAccount: getPaymentAccountValue(cleanedSplits),
+    });
+  }, [updateProduct]);
+  const addProductPaymentSplit = useCallback((index: number) => {
+    const product = form.products[index];
+    updateProductPaymentSplits(index, [...getEditablePaymentSplits(product), { account: '', amount: 0 }]);
+  }, [form.products, updateProductPaymentSplits]);
+  const removeProductPaymentSplit = useCallback((index: number, splitIndex: number) => {
+    const product = form.products[index];
+    const nextSplits = getEditablePaymentSplits(product).filter((_, i) => i !== splitIndex);
+    updateProductPaymentSplits(index, nextSplits.length > 0 ? nextSplits : [{ account: '', amount: product.amount || 0 }]);
+  }, [form.products, updateProductPaymentSplits]);
 
   // 转租赁2货品 CRUD
   const updateTransferProduct = useCallback((index: number, patch: Partial<TransferProductItem>) => {
@@ -2021,7 +2250,7 @@ function AddOrderWizard({
     const cache: Record<string, { label: string; value: string }[]> = {};
     for (const p of form.products) {
       if (p.brand && !cache[p.brand]) {
-        let products = getProductsByBrand(p.brand);
+        let products = getCatalogProductsByBrand(p.brand);
         // 虚拟产品/无 品牌下根据订单类型过滤（仅租赁1生效）
         if ((p.brand === '虚拟产品' || p.brand === '无') && form.orderAttribute === 'rental1' && form.orderType && ORDER_TYPE_VIRTUAL_PRODUCTS[form.orderType]) {
           const allowed = new Set(ORDER_TYPE_VIRTUAL_PRODUCTS[form.orderType]!);
@@ -2031,38 +2260,38 @@ function AddOrderWizard({
       }
     }
     return cache;
-  }, [form.products.map(p => p.brand).join(','), form.orderType, form.orderAttribute]);
+  }, [form.products.map(p => p.brand).join(','), form.orderType, form.orderAttribute, getCatalogProductsByBrand]);
   const specOptionsMap = useMemo(() => {
     const cache: Record<string, { label: string; value: string }[]> = {};
     for (const p of form.products) {
       const key = `${p.brand}|${p.productName}`;
       if (p.brand && p.productName && !cache[key]) {
-        cache[key] = [PLACEHOLDER_OPTION, ...getSpecsByProduct(p.brand, p.productName).map(v => ({ label: v, value: v }))];
+        cache[key] = [PLACEHOLDER_OPTION, ...getCatalogSpecsByProduct(p.brand, p.productName).map(v => ({ label: v, value: v }))];
       }
     }
     return cache;
-  }, [form.products.map(p => `${p.brand}|${p.productName}`).join(',')]);
+  }, [form.products.map(p => `${p.brand}|${p.productName}`).join(','), getCatalogSpecsByProduct]);
 
   // 转租赁级联 options（按索引缓存各组）
   const transferProductOptionsMap = useMemo(() => {
     const cache: Record<string, { label: string; value: string }[]> = {};
     for (const t of form.transferProducts) {
       if (t.brand && !cache[t.brand]) {
-        cache[t.brand] = [PLACEHOLDER_OPTION, ...getProductsByBrand(t.brand).map(v => ({ label: getProductLabel(v), value: v }))];
+        cache[t.brand] = [PLACEHOLDER_OPTION, ...getCatalogProductsByBrand(t.brand).map(v => ({ label: getProductLabel(v), value: v }))];
       }
     }
     return cache;
-  }, [form.transferProducts.map(t => t.brand).join(',')]);
+  }, [form.transferProducts.map(t => t.brand).join(','), getCatalogProductsByBrand]);
   const transferSpecOptionsMap = useMemo(() => {
     const cache: Record<string, { label: string; value: string }[]> = {};
     for (const t of form.transferProducts) {
       const key = `${t.brand}|${t.productName}`;
       if (t.brand && t.productName && !cache[key]) {
-        cache[key] = [PLACEHOLDER_OPTION, ...getSpecsByProduct(t.brand, t.productName).map(v => ({ label: v, value: v }))];
+        cache[key] = [PLACEHOLDER_OPTION, ...getCatalogSpecsByProduct(t.brand, t.productName).map(v => ({ label: v, value: v }))];
       }
     }
     return cache;
-  }, [form.transferProducts.map(t => `${t.brand}|${t.productName}`).join(',')]);
+  }, [form.transferProducts.map(t => `${t.brand}|${t.productName}`).join(','), getCatalogSpecsByProduct]);
   // 订单类型选项（根据订单来源过滤）
   const filteredOrderTypeOptions = useMemo(() => {
     if (!form.orderSource || !ORDER_SOURCE_ORDER_TYPE_MAP[form.orderSource]) {
@@ -2070,7 +2299,7 @@ function AddOrderWizard({
     }
     const allowed = new Set(ORDER_SOURCE_ORDER_TYPE_MAP[form.orderSource]!);
     return ORDER_TYPE_OPTIONS.filter(o => !o.value || allowed.has(o.value));
-  }, [form.orderSource]);
+  }, [form.orderSource, ORDER_TYPE_OPTIONS]);
 
   // 是否有货品名称为「部分转租赁2」或「全部转租赁2」
   const hasTransferProduct = useMemo(() => {
@@ -2142,18 +2371,18 @@ function AddOrderWizard({
       {step === 1 && (
         <div className="py-4">
           <h4 className="text-sm font-medium text-gray-600 mb-4">填写基础信息</h4>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
+          <div className="order-basic-form-grid grid grid-cols-2 gap-3">
+            <div className="order-basic-form-field">
               <label className="block text-xs text-gray-500 mb-1">日期 <span className="text-red-500">*</span></label>
-              <input type="date" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500"
+              <input type="date" className="order-basic-date-input w-full px-3 border border-gray-300 text-sm focus:outline-none focus:border-blue-500"
                 value={form.date} onChange={e => updateField('date', e.target.value)} />
             </div>
-            <div>
+            <div className="order-basic-form-field">
               <label className="block text-xs text-gray-500 mb-1">客户名称 <span className="text-red-500">*</span></label>
               <Input placeholder="请输入客户名称"
                 value={form.customerName} onChange={val => updateField('customerName', val as string)} />
             </div>
-            <div>
+            <div className="order-basic-form-field">
               <label className="block text-xs text-gray-500 mb-1">销售人员 <span className="text-red-500">*</span></label>
               <Select placeholder="请选择" value={form.salesperson || ''} onChange={val => updateField('salesperson', val as string)} options={SALESPERSON_OPTIONS} />
             </div>
@@ -2244,6 +2473,15 @@ function AddOrderWizard({
       {/* ========== Step 3：货品信息 ========== */}
       {step === 3 && (
         <div className="py-4 max-h-[55vh] overflow-auto px-1">
+          {(productModelLoading || productModelLoadError || brandOptions.length <= 1) && (
+            <div className={`mb-3 rounded border px-3 py-2 text-sm ${
+              productModelLoadError ? 'border-red-200 bg-red-50 text-red-600' : 'border-amber-200 bg-amber-50 text-amber-700'
+            }`}>
+              {productModelLoading
+                ? '正在加载云端型号字典...'
+                : productModelLoadError || '云端型号字典暂无数据，请先在型号管理中初始化或维护品牌、货品和规格'}
+            </div>
+          )}
           <div className="flex items-center justify-between mb-2">
             <h4 className="text-sm font-medium text-gray-600">填写货品信息</h4>
             <Button size="small" variant="outline" icon={<Plus size={14} />} onClick={addProduct}>添加货品</Button>
@@ -2264,7 +2502,7 @@ function AddOrderWizard({
                       <label className="block text-xs text-gray-500 mb-1">品牌 <span className="text-red-500">*</span></label>
                       <Select placeholder="请选择品牌" value={product.brand || ''}
                         onChange={val => updateProduct(idx, { brand: val as string, productName: '', specification: '' })}
-                        options={BRAND_OPTIONS} filterable />
+                        options={brandOptions} filterable disabled={productModelLoading || !!productModelLoadError || brandOptions.length <= 1} />
                     </div>
                     <div>
                       <label className="block text-xs text-gray-500 mb-1">货品名称 <span className="text-red-500">*</span></label>
@@ -2281,13 +2519,21 @@ function AddOrderWizard({
                     <div>
                       <label className="block text-xs text-gray-500 mb-1">数量 <span className="text-red-500">*</span></label>
                       <Input type="number" placeholder="数量"
-                        value={product.quantity ? String(product.quantity) : ''} onChange={val => { const q = Math.max(0, Number(val)); updateProduct(idx, { quantity: q, amount: q * product.unitPrice }); }} />
+                        value={product.quantity ? String(product.quantity) : ''} onChange={val => {
+                          const q = Math.max(0, Number(val));
+                          const amount = q * product.unitPrice;
+                          updateProduct(idx, { quantity: q, amount, paymentSplits: syncSinglePaymentSplitAmount(product, amount) });
+                        }} />
                     </div>
                     {shouldShowPaymentFields && (
                       <div>
                         <label className="block text-xs text-gray-500 mb-1">单价 <span className="text-red-500">*</span></label>
                         <Input type="number" placeholder="单价"
-                          value={product.unitPrice ? String(product.unitPrice) : ''} onChange={val => { const p = Math.max(0, Number(val)); updateProduct(idx, { unitPrice: p, amount: product.quantity * p }); }} />
+                          value={product.unitPrice ? String(product.unitPrice) : ''} onChange={val => {
+                            const p = Math.max(0, Number(val));
+                            const amount = product.quantity * p;
+                            updateProduct(idx, { unitPrice: p, amount, paymentSplits: syncSinglePaymentSplitAmount(product, amount) });
+                          }} />
                       </div>
                     )}
                     {shouldShowPaymentFields && (
@@ -2298,10 +2544,38 @@ function AddOrderWizard({
                       </div>
                     )}
                     {shouldShowPaymentFields && (
-                      <div>
-                        <label className="block text-xs text-gray-500 mb-1">收款账户 <span className="text-red-500">*</span></label>
-                        <Select placeholder="请选择" value={product.paymentAccount || ''}
-                          onChange={val => updateProduct(idx, { paymentAccount: val as string })} options={PAYMENT_ACCOUNT_OPTIONS} />
+                      <div className="grid grid-cols-1 gap-2 md:col-span-3">
+                        <div className="flex items-center justify-between">
+                          <label className="block text-xs text-gray-500">收款账户 <span className="text-red-500">*</span></label>
+                          <Button size="small" variant="outline" icon={<Plus size={14} />} onClick={() => addProductPaymentSplit(idx)}>添加收款</Button>
+                        </div>
+                        {getEditablePaymentSplits(product).map((split, splitIndex) => {
+                          const splits = getEditablePaymentSplits(product);
+                          const splitTotal = splits.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+                          const diff = (product.amount || 0) - splitTotal;
+                          return (
+                            <div key={splitIndex} className="grid grid-cols-[1fr_160px_36px] items-center gap-2">
+                              <Select placeholder="请选择收款账户" value={split.account || ''}
+                                onChange={val => {
+                                  const nextSplits = [...splits];
+                                  nextSplits[splitIndex] = { ...nextSplits[splitIndex], account: val as string };
+                                  updateProductPaymentSplits(idx, nextSplits);
+                                }} options={PAYMENT_ACCOUNT_OPTIONS} />
+                              <Input type="number" placeholder="金额" value={split.amount ? String(split.amount) : ''}
+                                onChange={val => {
+                                  const nextSplits = [...splits];
+                                  nextSplits[splitIndex] = { ...nextSplits[splitIndex], amount: Math.max(0, Number(val) || 0) };
+                                  updateProductPaymentSplits(idx, nextSplits);
+                                }} />
+                              <Button size="small" variant="text" theme="danger" icon={<Minus size={14} />} disabled={splits.length <= 1} onClick={() => removeProductPaymentSplit(idx, splitIndex)} />
+                              {splitIndex === splits.length - 1 && (
+                                <div className={`col-span-3 text-xs ${Math.abs(diff) < 0.01 ? 'text-gray-400' : 'text-red-500'}`}>
+                                  收款合计 ¥{splitTotal || 0}，货品金额 ¥{product.amount || 0}{Math.abs(diff) >= 0.01 ? `，差额 ¥${diff}` : ''}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -2330,7 +2604,7 @@ function AddOrderWizard({
                       <label className="block text-xs text-gray-500 mb-1">品牌 <span className="text-red-500">*</span></label>
                       <Select placeholder="请选择品牌" value={tp.brand || ''}
                         onChange={val => updateTransferProduct(tIdx, { brand: val as string, productName: '', specification: '' })}
-                        options={BRAND_OPTIONS} filterable />
+                        options={brandOptions} filterable disabled={productModelLoading || !!productModelLoadError || brandOptions.length <= 1} />
                     </div>
                     <div>
                       <label className="block text-xs text-gray-500 mb-1">货品名称 <span className="text-red-500">*</span></label>
@@ -2540,7 +2814,7 @@ function AddOrderWizard({
                 return (
                   <div key={i} className="text-xs text-gray-600 ml-2 border-l-2 border-blue-200 pl-2 mb-1">
                     货品{i + 1}：{p.brand ? getBrandLabel(p.brand) : '-'} / {p.productName ? getProductLabel(p.productName) : '-'} / {p.specification || '-'}，
-                    数量 {p.quantity || 0}{shouldShowPaymentFields ? `，单价 ¥${p.unitPrice || 0}，金额 ¥${p.amount || 0}，收款账户 ${p.paymentAccount || '-'}` : ''}
+                    数量 {p.quantity || 0}{shouldShowPaymentFields ? `，单价 ¥${p.unitPrice || 0}，金额 ¥${p.amount || 0}，收款账户 ${formatPaymentSplits(p as unknown as OrderRecord)}` : ''}
                   </div>
                 );
               })}

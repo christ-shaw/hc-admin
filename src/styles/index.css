@@ -74,4 +74,27 @@
   .dashboard-message-roll:hover {
     animation-play-state: paused;
   }
+
+  .order-basic-form-grid {
+    align-items: start;
+  }
+
+  .order-basic-form-field {
+    min-width: 0;
+  }
+
+  .order-basic-date-input,
+  .order-basic-form-field .t-input {
+    height: 40px;
+    border-radius: 8px !important;
+  }
+
+  .order-basic-form-field .t-input__inner {
+    height: 38px;
+  }
+
+  .order-basic-form-field .t-select,
+  .order-basic-form-field .t-select__wrap {
+    width: 100%;
+  }
 }

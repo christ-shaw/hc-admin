@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Dialog, Tag, Loading, Tabs } from 'tdesign-react';
-import { InboundRecord, OutboundRecord, CHANNEL_TYPE_MAP } from '../types';
+import { InboundRecord, OutboundRecord } from '../types';
 import { formatDate, getTotalQuantity } from '../utils/format';
 import { useStorage } from '../hooks/useStorage';
 import { useLogs } from '../hooks/useLogs';
@@ -10,6 +10,7 @@ import {
   getOutboundStatusTheme,
   resolveOutboundStatus,
 } from '../utils/outboundLinkage';
+import { DICT_CODES, useDictionaries } from '../contexts/DictionaryContext';
 
 interface RecordDetailProps {
   visible: boolean;
@@ -23,6 +24,7 @@ interface RecordDetailProps {
 export function RecordDetail({ visible, record, type, onClose, onEdit, onDelete }: RecordDetailProps) {
   const { getRealImageUrl } = useStorage();
   const { fetchRecordHistory } = useLogs();
+  const dictionaries = useDictionaries();
   const [imageUrls, setImageUrls] = useState<Record<string, string>>({});
   const [imagesLoading, setImagesLoading] = useState(false);
   const [historyVisible, setHistoryVisible] = useState(false);
@@ -122,7 +124,7 @@ export function RecordDetail({ visible, record, type, onClose, onEdit, onDelete 
           <div className="space-y-3">
             <DetailItem label="客户名称" value={record.customerName} />
             <DetailItem label="日期" value={formatDate((record as InboundRecord).inboundDate)} />
-            <DetailItem label="渠道类型" value={CHANNEL_TYPE_MAP[(record as InboundRecord).type] || (record as InboundRecord).type || '-'} />
+            <DetailItem label="渠道类型" value={dictionaries.getLabel(DICT_CODES.channelType, (record as InboundRecord).type) || '-'} />
             <DetailItem label="渠道名称" value={(record as InboundRecord).shopName || '-'} />
             <DetailItem label="快递单号" value={(record as InboundRecord).trackingNumber || '-'} />
             <GoodsDetail record={record} />

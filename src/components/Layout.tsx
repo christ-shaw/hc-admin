@@ -51,12 +51,40 @@ type NavItem = typeof navItems[number];
 interface OrderMessageRecord {
   salesperson?: string;
   paymentAccount?: string;
+  paymentSplits?: Array<{ account?: string }> | string;
   orderType?: string;
   returnStatus?: string;
 }
 
+interface QueryOrdersResult {
+  data?: OrderMessageRecord[];
+  cursor?: string | null;
+  hasMore?: boolean;
+}
+
+const ORDER_MESSAGE_PAGE_SIZE = 100;
+const ORDER_MESSAGE_MAX_SCAN = 10000;
+
 function getUserDisplayName(user: { id?: string; user_metadata?: { username?: string; nickName?: string } } | null) {
   return user?.user_metadata?.nickName || user?.user_metadata?.username || user?.id?.slice(0, 8) || '';
+}
+
+function hasUnreceivedPayment(order: OrderMessageRecord) {
+  if (order.paymentAccount === '未收款') return true;
+  const value = order.paymentSplits;
+  const splits = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? (() => {
+          try {
+            const parsed = JSON.parse(value);
+            return Array.isArray(parsed) ? parsed : [];
+          } catch {
+            return [];
+          }
+        })()
+      : [];
+  return splits.some(split => split?.account === '未收款');
 }
 
 export function AppLayout({ children }: { children: React.ReactNode }) {
@@ -104,17 +132,28 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
     }
 
     try {
-      const result = await callFunction<{ data?: OrderMessageRecord[] }>('queryOrders', {
-        data: { limit: 100, cursor: null },
-      });
-      const orders = result.data || [];
-      const hasMessages = orders.some(order => {
-        if (order.salesperson !== username) return false;
-        const needReturn = ['postRentalShip', 'postRentalReturn'].includes(order.orderType || '') && order.returnStatus !== 'returned';
-        const needPayment = order.paymentAccount === '未收款';
-        return needReturn || needPayment;
-      });
-      setHasUserMessages(hasMessages);
+      let cursor: string | null = null;
+      let hasMore = true;
+      let scanned = 0;
+      let nextHasMessages = false;
+
+      while (hasMore && scanned < ORDER_MESSAGE_MAX_SCAN && !nextHasMessages) {
+        const result: QueryOrdersResult = await callFunction<QueryOrdersResult>('queryOrders', {
+          data: { limit: ORDER_MESSAGE_PAGE_SIZE, cursor },
+        });
+        const orders = result.data || [];
+        scanned += orders.length;
+        nextHasMessages = orders.some((order: OrderMessageRecord) => {
+          if (order.salesperson !== username) return false;
+          const needReturn = ['postRentalShip', 'postRentalReturn'].includes(order.orderType || '') && order.returnStatus !== 'returned';
+          const needPayment = hasUnreceivedPayment(order);
+          return needReturn || needPayment;
+        });
+        cursor = result.cursor || null;
+        hasMore = !!result.hasMore && !!cursor && orders.length > 0;
+      }
+
+      setHasUserMessages(nextHasMessages);
     } catch {
       // 静默失败，不影响主界面
       setHasUserMessages(false);

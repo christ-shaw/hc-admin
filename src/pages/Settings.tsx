@@ -13,6 +13,7 @@ import { usePermission } from '../hooks/usePermission';
 import { RoleManageTab } from '../components/RoleManageTab';
 import { UserRoleTab } from '../components/UserRoleTab';
 import { LoginLogTab } from '../components/LoginLogTab';
+import { DictionaryManageTab } from '../components/DictionaryManageTab';
 
 interface InitializePermissionResult {
   success: boolean;
@@ -117,8 +118,10 @@ export function SettingsPage() {
   const canManageRoles = can('settings:role_manage');
   const canManageUserRoles = can('settings:user_role_manage');
   const canViewLoginLogs = can('settings:read');
+  const canManageDictionaries = can('settings:dict_manage') || can('settings:update');
   const tabList = [
     { value: 'general', label: '全部设置' },
+    ...(canViewLoginLogs ? [{ value: 'dictionaries', label: '数据字典' }] : []),
     ...(canManageRoles ? [{ value: 'roles', label: '角色管理' }] : []),
     ...(canManageUserRoles ? [{ value: 'users', label: '用户角色' }] : []),
     ...(canViewLoginLogs ? [{ value: 'loginLogs', label: '登录日志' }] : []),
@@ -290,6 +293,10 @@ export function SettingsPage() {
 
           {activeTab === 'roles' && canManageRoles && (
             <RoleManageTab onChanged={refreshPermissions} />
+          )}
+
+          {activeTab === 'dictionaries' && canViewLoginLogs && (
+            <DictionaryManageTab canManage={canManageDictionaries} />
           )}
 
           {activeTab === 'users' && canManageUserRoles && (
