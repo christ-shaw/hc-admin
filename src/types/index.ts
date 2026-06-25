@@ -125,9 +125,29 @@ export interface LogFilters {
 }
 
 /** 手机品牌 */
+export interface PhoneModelSpec {
+  name: string;
+  enabled?: boolean;
+  sort?: number;
+  systemItem?: boolean;
+}
+
+export interface PhoneProduct {
+  name: string;
+  enabled?: boolean;
+  sort?: number;
+  systemItem?: boolean;
+  specs: PhoneModelSpec[];
+}
+
 export interface PhoneBrand {
+  _id?: string;
   brand: string;
-  models: string[];
+  enabled?: boolean;
+  sort?: number;
+  systemBrand?: boolean;
+  products?: PhoneProduct[];
+  models?: string[];
 }
 
 /** 订单记录 —— 对齐 Excel「订单明细」工作表 25 列 */

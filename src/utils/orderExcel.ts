@@ -1,6 +1,6 @@
 import * as XLSX from 'xlsx';
 import { OrderRecord } from '../types';
-import { getDictLabel, ORDER_SOURCE_MAP, ORDER_ATTRIBUTE_MAP, ORDER_TYPE_MAP, SALES_CHANNEL_MAP, CHANNEL_CATEGORY_MAP, ORDER_STATUS_MAP } from '../data/dict';
+import { getBrandLabel, getDictLabel, getProductLabel, ORDER_SOURCE_MAP, ORDER_ATTRIBUTE_MAP, ORDER_TYPE_MAP, SALES_CHANNEL_MAP, CHANNEL_CATEGORY_MAP, ORDER_STATUS_MAP } from '../data/dict';
 
 /** Excel 列名 → OrderRecord 字段映射 */
 const EXCEL_COLUMN_MAP: Record<string, keyof OrderRecord> = {
@@ -157,6 +157,8 @@ export function exportOrderExcel(records: OrderRecord[], filename?: string): voi
     EXPORT_COLUMNS.map(c => {
       const val = r[c.key];
       if (c.key === 'date') return val || '';
+      if (c.key === 'brand' && typeof val === 'string') return getBrandLabel(val);
+      if ((c.key === 'productName' || c.key === 'transferProductName') && typeof val === 'string') return getProductLabel(val);
       const dict = DICT_FIELDS[c.key];
       if (dict && typeof val === 'string' && val) return getDictLabel(dict, val);
       return val ?? '';

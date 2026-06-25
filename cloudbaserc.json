@@ -79,6 +79,11 @@
       "runtime": "Nodejs18.15"
     },
     {
+      "name": "manageProductModels",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
       "name": "generateDailyShipmentStats",
       "handler": "index.main",
       "runtime": "Nodejs18.15",

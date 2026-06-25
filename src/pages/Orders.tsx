@@ -2,8 +2,9 @@ import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
 import { Table, Button, Input, Select, Tag, Dialog, MessagePlugin, Textarea } from 'tdesign-react';
 import { Search, RotateCcw, Upload, Download, Plus, Pencil, Trash2, Minus, X, ChevronRight, ChevronLeft, FileDown, Check } from 'lucide-react';
-import { OrderRecord, OrderFilters, InboundRecord, OutboundRecord, PhoneModelItem, ProductItem, TransferProductItem, OrderAttachment, dictToOptions, getDictLabel } from '../types';
+import { OrderRecord, OrderFilters, InboundRecord, OutboundRecord, PhoneBrand, PhoneModelItem, ProductItem, TransferProductItem, OrderAttachment, dictToOptions, getDictLabel } from '../types';
 import { useOrders } from '../hooks/useOrders';
+import { usePhoneModels } from '../hooks/usePhoneModels';
 import { formatDate, getTotalQuantity } from '../utils/format';
 import { parseOrderExcel, exportOrderExcel } from '../utils/orderExcel';
 import { BRANDS, getBrandLabel, getProductLabel, getProductsByBrand, getSpecsByProduct } from '../data/dict';
@@ -27,7 +28,7 @@ function calcChannelCategory(salesChannel: string): 'platform' | 'offline' | '' 
 const ORDER_TYPE_VIRTUAL_PRODUCTS: Partial<Record<string, string[]>> = {
   newBusiness: ['平台租金', '续期租金'],
   postRentalPayment: ['补收差价', '仅退款', '利润差额', '维修费', '快递费'],
-  deposit: ['收押金', '退押金'],
+  deposit: ['收押金', '退押金', '押金'],
 };
 
 /** 订单来源 → 可选订单类型白名单 */
@@ -36,7 +37,7 @@ const ORDER_SOURCE_ORDER_TYPE_MAP: Partial<Record<string, string[]>> = {
   service: ['postRentalShip', 'postRentalReturn', 'postRentalPayment', 'deposit'],
 };
 
-const BRAND_OPTIONS = [PLACEHOLDER_OPTION, ...BRANDS.map(v => ({ label: getBrandLabel(v), value: v }))];
+const STATIC_BRAND_OPTIONS = [PLACEHOLDER_OPTION, ...BRANDS.map(v => ({ label: getBrandLabel(v), value: v }))];
 
 /** 货品条目默认值 */
 const EMPTY_PRODUCT: ProductItem = {
@@ -258,6 +259,7 @@ export function Orders() {
   const orders = useOrders();
   const location = useLocation();
   const dictionaries = useDictionaries();
+  const productModels = usePhoneModels();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const ORDER_SOURCE_MAP = dictionaries.getMap(DICT_CODES.orderSource);
@@ -285,6 +287,11 @@ export function Orders() {
     () => dictToOptions(SHIPPING_FEE_MAP).filter(option => option.value === 'prepaid' || option.value === 'cod'),
     [SHIPPING_FEE_MAP]
   );
+
+  useEffect(() => {
+    productModels.loadBrands();
+  }, [productModels.loadBrands]);
+
   const wizardDictionaries = useMemo<OrderWizardDictionaries>(() => ({
     ORDER_SOURCE_MAP,
     ORDER_ATTRIBUTE_MAP,
@@ -1681,6 +1688,7 @@ export function Orders() {
           onChange={setAddForm}
           onAttachFilesChange={setAddAttachFiles}
           dictionaries={wizardDictionaries}
+          productModelBrands={productModels.brands}
         />
       </Dialog>
 
@@ -1717,6 +1725,7 @@ export function Orders() {
           onChange={setEditForm}
           onAttachFilesChange={setEditAttachFiles}
           dictionaries={wizardDictionaries}
+          productModelBrands={productModels.brands}
         />
       </Dialog>
 
@@ -1912,7 +1921,7 @@ export function Orders() {
 
 /** 新增订单 6 步向导 */
 function AddOrderWizard({
-  step, form, attachFiles, attachInputRef, onChange, onAttachFilesChange, dictionaries, mode = 'add',
+  step, form, attachFiles, attachInputRef, onChange, onAttachFilesChange, dictionaries, productModelBrands, mode = 'add',
 }: {
   step: number;
   form: OrderFormData;
@@ -1921,6 +1930,7 @@ function AddOrderWizard({
   onChange: React.Dispatch<React.SetStateAction<OrderFormData>>;
   onAttachFilesChange: React.Dispatch<React.SetStateAction<File[]>>;
   dictionaries: OrderWizardDictionaries;
+  productModelBrands: PhoneBrand[];
   mode?: 'add' | 'edit';
 }) {
   const {
@@ -1944,6 +1954,44 @@ function AddOrderWizard({
   } = dictionaries;
   const [pasteText, setPasteText] = useState('');
   const [parsing, setParsing] = useState(false);
+  const runtimeProductBrandMap = useMemo(() => {
+    return Object.fromEntries(
+      productModelBrands
+        .filter(brand => brand.enabled !== false)
+        .map(brand => [brand.brand, brand])
+    ) as Record<string, PhoneBrand>;
+  }, [productModelBrands]);
+  const hasRuntimeProductCatalog = productModelBrands.some(brand => brand.enabled !== false && (brand.products?.length || brand.models?.length));
+  const brandOptions = useMemo(() => {
+    if (!hasRuntimeProductCatalog) return STATIC_BRAND_OPTIONS;
+    return [
+      PLACEHOLDER_OPTION,
+      ...productModelBrands
+        .filter(brand => brand.enabled !== false)
+        .sort((a, b) => (a.sort || 0) - (b.sort || 0) || a.brand.localeCompare(b.brand, 'zh-CN'))
+        .map(brand => ({ label: getBrandLabel(brand.brand), value: brand.brand })),
+    ];
+  }, [hasRuntimeProductCatalog, productModelBrands]);
+  const getCatalogProductsByBrand = useCallback((brand: string) => {
+    const runtimeBrand = runtimeProductBrandMap[brand];
+    if (runtimeBrand) {
+      return (runtimeBrand.products || [])
+        .filter(product => product.enabled !== false)
+        .sort((a, b) => (a.sort || 0) - (b.sort || 0) || a.name.localeCompare(b.name, 'zh-CN'))
+        .map(product => product.name);
+    }
+    return getProductsByBrand(brand);
+  }, [runtimeProductBrandMap]);
+  const getCatalogSpecsByProduct = useCallback((brand: string, productName: string) => {
+    const runtimeProduct = runtimeProductBrandMap[brand]?.products?.find(product => product.name === productName);
+    if (runtimeProduct) {
+      return (runtimeProduct.specs || [])
+        .filter(spec => spec.enabled !== false)
+        .sort((a, b) => (a.sort || 0) - (b.sort || 0) || a.name.localeCompare(b.name, 'zh-CN'))
+        .map(spec => spec.name);
+    }
+    return getSpecsByProduct(brand, productName);
+  }, [runtimeProductBrandMap]);
   const updateField = useCallback(<K extends keyof OrderFormData>(key: K, val: OrderFormData[K]) => {
     onChange(prev => ({ ...prev, [key]: val }));
   }, [onChange]);
@@ -1987,7 +2035,7 @@ function AddOrderWizard({
     const cache: Record<string, { label: string; value: string }[]> = {};
     for (const p of form.products) {
       if (p.brand && !cache[p.brand]) {
-        let products = getProductsByBrand(p.brand);
+        let products = getCatalogProductsByBrand(p.brand);
         // 虚拟产品/无 品牌下根据订单类型过滤（仅租赁1生效）
         if ((p.brand === '虚拟产品' || p.brand === '无') && form.orderAttribute === 'rental1' && form.orderType && ORDER_TYPE_VIRTUAL_PRODUCTS[form.orderType]) {
           const allowed = new Set(ORDER_TYPE_VIRTUAL_PRODUCTS[form.orderType]!);
@@ -1997,38 +2045,38 @@ function AddOrderWizard({
       }
     }
     return cache;
-  }, [form.products.map(p => p.brand).join(','), form.orderType, form.orderAttribute]);
+  }, [form.products.map(p => p.brand).join(','), form.orderType, form.orderAttribute, getCatalogProductsByBrand]);
   const specOptionsMap = useMemo(() => {
     const cache: Record<string, { label: string; value: string }[]> = {};
     for (const p of form.products) {
       const key = `${p.brand}|${p.productName}`;
       if (p.brand && p.productName && !cache[key]) {
-        cache[key] = [PLACEHOLDER_OPTION, ...getSpecsByProduct(p.brand, p.productName).map(v => ({ label: v, value: v }))];
+        cache[key] = [PLACEHOLDER_OPTION, ...getCatalogSpecsByProduct(p.brand, p.productName).map(v => ({ label: v, value: v }))];
       }
     }
     return cache;
-  }, [form.products.map(p => `${p.brand}|${p.productName}`).join(',')]);
+  }, [form.products.map(p => `${p.brand}|${p.productName}`).join(','), getCatalogSpecsByProduct]);
 
   // 转租赁级联 options（按索引缓存各组）
   const transferProductOptionsMap = useMemo(() => {
     const cache: Record<string, { label: string; value: string }[]> = {};
     for (const t of form.transferProducts) {
       if (t.brand && !cache[t.brand]) {
-        cache[t.brand] = [PLACEHOLDER_OPTION, ...getProductsByBrand(t.brand).map(v => ({ label: getProductLabel(v), value: v }))];
+        cache[t.brand] = [PLACEHOLDER_OPTION, ...getCatalogProductsByBrand(t.brand).map(v => ({ label: getProductLabel(v), value: v }))];
       }
     }
     return cache;
-  }, [form.transferProducts.map(t => t.brand).join(',')]);
+  }, [form.transferProducts.map(t => t.brand).join(','), getCatalogProductsByBrand]);
   const transferSpecOptionsMap = useMemo(() => {
     const cache: Record<string, { label: string; value: string }[]> = {};
     for (const t of form.transferProducts) {
       const key = `${t.brand}|${t.productName}`;
       if (t.brand && t.productName && !cache[key]) {
-        cache[key] = [PLACEHOLDER_OPTION, ...getSpecsByProduct(t.brand, t.productName).map(v => ({ label: v, value: v }))];
+        cache[key] = [PLACEHOLDER_OPTION, ...getCatalogSpecsByProduct(t.brand, t.productName).map(v => ({ label: v, value: v }))];
       }
     }
     return cache;
-  }, [form.transferProducts.map(t => `${t.brand}|${t.productName}`).join(',')]);
+  }, [form.transferProducts.map(t => `${t.brand}|${t.productName}`).join(','), getCatalogSpecsByProduct]);
   // 订单类型选项（根据订单来源过滤）
   const filteredOrderTypeOptions = useMemo(() => {
     if (!form.orderSource || !ORDER_SOURCE_ORDER_TYPE_MAP[form.orderSource]) {
@@ -2230,7 +2278,7 @@ function AddOrderWizard({
                       <label className="block text-xs text-gray-500 mb-1">品牌 <span className="text-red-500">*</span></label>
                       <Select placeholder="请选择品牌" value={product.brand || ''}
                         onChange={val => updateProduct(idx, { brand: val as string, productName: '', specification: '' })}
-                        options={BRAND_OPTIONS} filterable />
+                        options={brandOptions} filterable />
                     </div>
                     <div>
                       <label className="block text-xs text-gray-500 mb-1">货品名称 <span className="text-red-500">*</span></label>
@@ -2296,7 +2344,7 @@ function AddOrderWizard({
                       <label className="block text-xs text-gray-500 mb-1">品牌 <span className="text-red-500">*</span></label>
                       <Select placeholder="请选择品牌" value={tp.brand || ''}
                         onChange={val => updateTransferProduct(tIdx, { brand: val as string, productName: '', specification: '' })}
-                        options={BRAND_OPTIONS} filterable />
+                        options={brandOptions} filterable />
                     </div>
                     <div>
                       <label className="block text-xs text-gray-500 mb-1">货品名称 <span className="text-red-500">*</span></label>
