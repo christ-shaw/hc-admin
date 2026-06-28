@@ -35,6 +35,7 @@ const PAGE_PERMISSION_OPTIONS = [
 
 const ACTION_PERMISSION_OPTIONS = [
   { label: '全部权限', value: '*' },
+  { label: '小程序访问', value: 'miniapp:access' },
   { label: '入库查询', value: 'inbound:read' },
   { label: '入库新增', value: 'inbound:create' },
   { label: '入库编辑', value: 'inbound:update' },

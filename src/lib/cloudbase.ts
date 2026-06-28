@@ -89,6 +89,10 @@ export function getPermissionCurrentUserPayload(user: any) {
   const metadata = user.user_metadata || user.userMetadata || user.metadata || {};
   return {
     id: user.id || user.uid || '',
+    uid: user.uid || '',
+    userId: user.userId || user.id || user.uid || '',
+    customUserId: user.customUserId || '',
+    openid: user.openid || user.openId || '',
     username: metadata.username || user.username || user.userName || '',
     nickName: metadata.nickName || metadata.nickname || user.nickName || user.nickname || '',
     email: user.email || '',
@@ -120,12 +124,12 @@ function isAuthError(err: any): boolean {
   if (!err) return false;
   // 检查错误码
   const code = String(err.code || err.resultCode || '').toUpperCase();
-  if (['LOGIN_REQUIRED', 'AUTH_EXPIRED', 'TOKEN_EXPIRED', 'ACCESS_DENIED', 'UNAUTHENTICATED'].includes(code)) {
+  if (['AUTH_EXPIRED', 'TOKEN_EXPIRED', 'UNAUTHENTICATED'].includes(code)) {
     return true;
   }
   // 检查错误消息
   const msg = String(err.message || err.msg || '').toLowerCase();
-  if (msg.includes('login required') || msg.includes('auth expired') || msg.includes('token expired') || msg.includes('unauthenticated')) {
+  if (msg.includes('auth expired') || msg.includes('token expired') || msg.includes('unauthenticated')) {
     return true;
   }
   return false;

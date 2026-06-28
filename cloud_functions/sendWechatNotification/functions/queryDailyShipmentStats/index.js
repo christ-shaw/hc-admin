@@ -11,23 +11,43 @@ cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 const db = cloud.database();
 
 const STATS_COLLECTION = 'daily_shipment_stats';
+const GENERATE_FUNCTION = 'generateDailyShipmentStats';
+
+function formatDate(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+async function queryStats(statDate) {
+  let query = db.collection(STATS_COLLECTION);
+  if (statDate) {
+    query = query.where({ statDate });
+  }
+
+  const result = await query
+    .orderBy('statDate', 'desc')
+    .limit(1)
+    .get();
+
+  return result.data && result.data.length > 0 ? result.data[0] : null;
+}
 
 exports.main = async (event, context) => {
   const data = event.data || {};
-  const { statDate } = data;
+  const requestedStatDate = data.statDate;
+  const expectedStatDate = requestedStatDate || formatDate(new Date());
 
   try {
-    let query = db.collection(STATS_COLLECTION);
-    if (statDate) {
-      query = query.where({ statDate });
+    let record = await queryStats(expectedStatDate);
+    if (!record && !requestedStatDate) {
+      const generated = await cloud.callFunction({
+        name: GENERATE_FUNCTION,
+        data: { now: new Date().toISOString() },
+      });
+      record = generated && generated.result && generated.result.data || await queryStats(expectedStatDate);
     }
-
-    const result = await query
-      .orderBy('statDate', 'desc')
-      .limit(1)
-      .get();
-
-    const record = result.data && result.data.length > 0 ? result.data[0] : null;
 
     return {
       success: true,

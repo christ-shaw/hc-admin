@@ -562,6 +562,8 @@ export function Invoices() {
   ];
 
   const displayRecords = invoices.getPageRecords(invoices.currentPage);
+  const loadedInvoicePages = Math.max(1, Math.ceil(invoices.records.length / 20));
+  const canGoNextInvoicePage = invoices.currentPage < loadedInvoicePages || invoices.hasMore;
 
   return (
     <div className="space-y-4">
@@ -616,12 +618,12 @@ export function Invoices() {
         {/* 分页 */}
         <div className="flex justify-center items-center gap-2 py-4 border-t border-gray-100">
           <Button size="small" variant="outline" disabled={invoices.currentPage <= 1}
-            onClick={() => invoices.setCurrentPage(invoices.currentPage - 1)}>
+            onClick={invoices.goPreviousPage}>
             上一页
           </Button>
           <span className="text-sm text-gray-500">第 {invoices.currentPage} 页</span>
-          <Button size="small" variant="outline" disabled={!invoices.hasMore}
-            onClick={() => invoices.fetchRecords(invoices.cursor)}>
+          <Button size="small" variant="outline" disabled={!canGoNextInvoicePage || invoices.loading}
+            onClick={invoices.goNextPage}>
             下一页
           </Button>
           <span className="text-sm text-gray-400">共 {invoices.totalRecords} 条</span>

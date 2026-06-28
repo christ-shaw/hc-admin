@@ -21,8 +21,10 @@ const PRODUCT_MODELS_COLLECTION = 'product_models';
 const ORDER_SERIAL_COUNTER = 'orderSerialNumber';
 const SOURCE = 'zanchenzu';
 const PENDING_SHIPMENT_TEXT = '待发货';
-// 货品三级（brand/productName/specification）与销售渠道由插件选择后传入
-const REQUIRED_FIELDS = ['sourceOrderNo', 'recipient', 'recipientPhone', 'recipientAddress', 'salesChannel', 'brand', 'productName', 'specification'];
+// 货品三级（brand/productName/specification）、销售渠道、人员（responsiblePerson）由插件选择后传入
+const REQUIRED_FIELDS = ['sourceOrderNo', 'recipient', 'recipientPhone', 'recipientAddress', 'salesChannel', 'responsiblePerson', 'brand', 'productName', 'specification'];
+
+const SALESPERSON_DICT_GROUP = 'salesperson';
 
 // 固定业务字段（按需求）
 const FIXED_ORDER_SOURCE = 'new';        // 订单来源：新增
@@ -154,6 +156,16 @@ function todayInBeijing() {
   return d.toISOString().slice(0, 10);
 }
 
+// 读取某字典分组的启用项（dict_items），返回 [{value,label}]
+async function fetchDictItems(groupCode) {
+  const res = await db.collection('dict_items')
+    .where({ groupCode, enabled: true })
+    .orderBy('sort', 'asc')
+    .limit(1000)
+    .get();
+  return (res.data || []).map((d) => ({ value: d.value, label: d.label || d.value }));
+}
+
 // 读取启用的货品三级结构（brand -> products -> specs），供插件选择
 async function fetchProductModels() {
   const res = await db.collection(PRODUCT_MODELS_COLLECTION)
@@ -250,8 +262,11 @@ exports.main = async (event) => {
   // 取货品三级结构（供插件下拉选择）；与销售渠道枚举一并返回
   if (payload && payload.action === 'getProductModels') {
     try {
-      const brands = await fetchProductModels();
-      return ok('OK', '获取成功', { brands, salesChannels: SALES_CHANNEL_OPTIONS });
+      const [brands, salespersons] = await Promise.all([
+        fetchProductModels(),
+        fetchDictItems(SALESPERSON_DICT_GROUP),
+      ]);
+      return ok('OK', '获取成功', { brands, salesChannels: SALES_CHANNEL_OPTIONS, salespersons });
     } catch (err) {
       console.error('[importOrderFromAssist] 获取货品失败:', err);
       return fail(500, 'INTERNAL_ERROR', err.message || '获取货品失败');

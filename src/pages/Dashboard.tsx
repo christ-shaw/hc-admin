@@ -30,6 +30,7 @@ interface DynamicMessage {
   type: MessageType;
   title: string;
   detail: string;
+  owner: string;
   date: string;
   orderId: string;
   onlineOrderNumber: string;
@@ -119,7 +120,8 @@ const buildOrderLabel = (order: OrderRecord) => {
   return parts.join(' · ') || '未命名订单';
 };
 
-const buildOwnerLabel = (order: OrderRecord) => `责任人 ${order.salesperson || '-'}`;
+const getOwnerName = (order: OrderRecord) => order.salesperson || '-';
+const buildOwnerLabel = (order: OrderRecord) => `责任人 ${getOwnerName(order)}`;
 
 function hasUnreceivedPayment(order: OrderRecord) {
   if (order.paymentAccount === '未收款') return true;
@@ -236,6 +238,7 @@ export function Dashboard() {
           type: 'return',
           title: '归还状态待处理',
           detail: `${buildOrderLabel(order)} · ${buildOwnerLabel(order)} · ${RETURN_STATUS_LABELS[order.returnStatus || ''] || '未填写归还状态'}`,
+          owner: getOwnerName(order),
           date: getOrderTime(order),
           orderId: order._id,
           onlineOrderNumber: order.onlineOrderNumber || '',
@@ -249,6 +252,7 @@ export function Dashboard() {
           type: 'payment',
           title: '订单待收款',
           detail: `${buildOrderLabel(order)} · ${buildOwnerLabel(order)} · 金额 ¥${order.amount || 0}`,
+          owner: getOwnerName(order),
           date: getOrderTime(order),
           orderId: order._id,
           onlineOrderNumber: order.onlineOrderNumber || '',
@@ -389,7 +393,12 @@ export function Dashboard() {
                     <p className="truncate text-sm font-medium text-gray-800">{message.title}</p>
                     <span className="flex-shrink-0 text-xs text-gray-400">{formatDate(message.date, false)}</span>
                   </div>
-                  <p className="mt-0.5 truncate text-sm text-gray-500">{message.detail}</p>
+                  <div className="mt-1 flex min-w-0 items-center gap-2">
+                    <span className="flex-shrink-0 rounded-md bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-700">
+                      责任人 {message.owner}
+                    </span>
+                    <p className="min-w-0 flex-1 truncate text-sm text-gray-500">{message.detail}</p>
+                  </div>
                 </div>
               </button>
             ))}

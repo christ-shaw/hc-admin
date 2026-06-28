@@ -2,9 +2,9 @@ import { useState, useEffect, useCallback } from 'react';
 import { Dialog, Tag, Loading } from 'tdesign-react';
 import { InboundRecord, OutboundRecord } from '../types';
 import { formatDate, getTotalQuantity } from '../utils/format';
-import { useStorage } from '../hooks/useStorage';
 import { useLogs } from '../hooks/useLogs';
 import { DICT_CODES, useDictionaries } from '../contexts/DictionaryContext';
+import { getCloudFileURLs } from '../lib/cloudbase';
 
 interface RecordDetailProps {
   visible: boolean;
@@ -16,7 +16,6 @@ interface RecordDetailProps {
 }
 
 export function RecordDetail({ visible, record, type, onClose, onEdit, onDelete }: RecordDetailProps) {
-  const { getRealImageUrl } = useStorage();
   const { fetchRecordHistory } = useLogs();
   const dictionaries = useDictionaries();
   const [imageUrls, setImageUrls] = useState<Record<string, string>>({});
@@ -46,28 +45,24 @@ export function RecordDetail({ visible, record, type, onClose, onEdit, onDelete 
     setImageUrls({});
 
     (async () => {
-      const urls: Record<string, string> = {};
-      for (const photo of allPhotos) {
+      try {
+        const fileList = await getCloudFileURLs(allPhotos);
         if (cancelled) return;
-        try {
-          const url = await getRealImageUrl(photo);
-          if (!cancelled) {
-            urls[photo] = url;
-            // 逐个更新，让已加载的图片立刻显示
-            setImageUrls({ ...urls });
-          }
-        } catch {
-          if (!cancelled) {
-            urls[photo] = photo; // 兜底使用原始值
-            setImageUrls({ ...urls });
-          }
+        const urls = Object.fromEntries(
+          fileList.map(item => [item.fileID, item.tempFileURL || item.fileID])
+        );
+        setImageUrls(urls);
+      } catch {
+        if (!cancelled) {
+          setImageUrls(Object.fromEntries(allPhotos.map(photo => [photo, photo])));
         }
+      } finally {
+        if (!cancelled) setImagesLoading(false);
       }
-      if (!cancelled) setImagesLoading(false);
     })();
 
     return () => { cancelled = true; };
-  }, [record?._id, getRealImageUrl, isInbound]);
+  }, [record?._id, isInbound]);
 
   const loadHistory = useCallback(async () => {
     if (!record?._id) return;
