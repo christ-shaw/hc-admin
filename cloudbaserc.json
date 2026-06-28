@@ -121,6 +121,11 @@
       "runtime": "Nodejs18.15"
     },
     {
+      "name": "importOrderFromAssist",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
       "name": "sendWechatNotification",
       "handler": "index.main",
       "runtime": "Nodejs18.15"

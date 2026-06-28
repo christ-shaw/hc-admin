@@ -41,25 +41,48 @@ hc-admin 是 CloudBase 应用：React 前端 + 云函数（`wx-server-sdk`）+ N
 
 ## 5. 字段映射（插件 normalized → orders 集合）
 
-`orders` 集合实际字段（见 `订单字段关联关系说明.md`）：
-`serialNumber, date, orderSource, customerName, consignee, consigneePhone, consigneeAddress, status, products[], onlineOrderNumber, salesperson ...`
+`orders` 集合是**扁平结构**（已核对 `OrderRecord` 类型与数据库真实记录）：货品字段 `brand/productName/specification/quantity/unitPrice/amount/paymentAccount` 都在顶层，**不是 `products[]` 数组**。`status` 真实枚举见 `ORDER_STATUS_MAP`，顶层同时有 `amount`（金额）与 `paidRent`（已交租金）两个字段。
 
-| 插件字段 | orders 字段 | 说明 |
+| 插件字段 | orders 字段（顶层） | 说明 |
 | --- | --- | --- |
-| `sourceOrderNo` | `onlineOrderNumber` | 同时存独立幂等键（见 §7） |
+| `sourceOrderNo` | `onlineOrderNumber` | 网店订单号，同时是幂等键来源（见 §7） |
 | `recipient` | `consignee` + `customerName` | 收货人=客户名，发货流程靠 `consignee` 匹配出库 |
 | `recipientPhone` | `consigneePhone` | 完整手机号 |
 | `recipientAddress` | `consigneeAddress` | |
-| `goodsTitle` | `products[0].productName` | orders 为 products 数组结构 |
-| `goodsQuantity` | `products[0].quantity` | 默认 1 |
-| `paidRent` | `products[0].amount` | |
+| `brand` | `brand` | 插件从 `manageProductModels` 三级选择（见 §5.1） |
+| `productName` | `productName` | 选中的货品名（**不再用** `goodsTitle`） |
+| `specification` | `specification` | 选中的规格 |
+| `salesChannel` | `salesChannel` | 插件下拉选择，传 `SALES_CHANNEL_MAP` 的 key（校验合法性） |
+| `goodsTitle` | → `customerRemark` | 页面原始商品名仅作参考写入备注 |
+| `goodsQuantity` | `quantity` | 默认 1 |
+| `paidRent` | —（暂忽略） | 暂不映射，`paidRent` 写默认 0 |
 | `responsiblePerson` | `salesperson` | |
-| `orderedAt` | `date` | |
-| （固定值） | `status = 'unknown'` | 见下方说明 |
-| `source` | `orderSource = 'zanchenzu'` | |
+| （计数器生成） | `serialNumber` | 由 `system_counters` 的 `orderSerialNumber` 事务自增，与前端建单一致 |
+| （固定值）| `date = 当天`（北京时间 YYYY-MM-DD） | 订单日期固定为导入当天，非 `orderedAt` |
+| （固定值）| `orderSource = 'new'`（新增） | |
+| （固定值）| `orderAttribute = 'rental1'`（租赁1） | |
+| （固定值）| `orderType = 'newBusiness'`（新增业务） | |
+| （固定值）| `status = 'unknown'` | 见下方说明 |
+| （固定值）| `customerRemark = '【赞晨租导入】原商品：<goodsTitle>'` + `importSource = 'hc-order-assist'` | 来源标记 |
+| 其余字段 | `channelCategory/unitPrice/amount/shippingFee/transferItems/returnStatus/attachments ...` | 按 `EMPTY_ORDER` 默认值补空，保证列表显示与编辑向导可用 |
 | `raw` | 仅写入导入日志，不污染订单 | |
 
-> 状态映射说明：hc-admin 的 `status` 枚举（`shipped/noShip/returnReceived/returnShipped/unknown`）没有「待发货」。最贴近的是 `unknown`（待处理/未明确），且只有 `unknown`/`--` 状态才会显示「发货」「申请快递」按钮。因此导入订单一律置 `status = 'unknown'`，才能进入正常发货流程。
+> 状态映射说明：hc-admin 的 `status` 枚举（`shipped/noShip/returnReceived/returnShipped/unknown`）没有「待发货」。`unknown` 显示为 `--`，且 `isPendingShipmentStatus` 只认 `unknown`/`--`，是唯一会显示「发货」「申请快递」按钮的状态。因此导入订单一律置 `status = 'unknown'`，才能进入正常发货流程。
+
+> 来源字段说明：`orderSource` 现固定写 `new`（新增）。来源信息另由 `onlineOrderNumber`（来源单号）、`customerRemark` 标注与 `importSource` 字段保留，并由 §8 导入日志完整记录。
+
+### 5.1 货品三级与销售渠道选择
+
+货品（品牌→货品名称→规格）与销售渠道**不从赞晨租页面解析**，改由用户在插件导入弹窗中选择，确保与 hc-admin 受控目录一致：
+
+- 导入接口新增 **`getProductModels`** 动作（同一路径、同一静态 token 鉴权）：
+  - 请求体 `{"action":"getProductModels"}`。
+  - 返回 `data.brands`（`[{brand, products:[{name, specs:[名称...]}]}]`，仅含 enabled，按 sort 排序，读自 `product_models` 集合）与 `data.salesChannels`（`[{value,label}]`，对应 `SALES_CHANNEL_MAP`）。
+- 插件 content-script 拉取后，在导入弹窗渲染：销售渠道下拉 + 品牌→货品→规格级联下拉；四项选完才允许确认。
+- 提交时随订单带上 `salesChannel / brand / productName / specification`。
+- 服务端校验：四项为必填；`salesChannel` 必须是 `SALES_CHANNEL_MAP` 合法 key，否则 422 `INVALID_FIELD`。
+
+> 路线说明：本动作走 **token 鉴权**（方案三 B 路线），content-script 无 CloudBase 登录态也能取目录。代价是读取目录只认 token、绕过角色权限——与 `manageProductModels`（需 CloudBase 登录 + `models:read`）不同。升级到方案 A 后可改为直接调 `manageProductModels`。
 
 ## 6. 字段必填性
 
@@ -70,12 +93,16 @@ hc-admin 是 CloudBase 应用：React 前端 + 云函数（`wx-server-sdk`）+ N
 | `recipient` | 是 | 收货人 → consignee/customerName |
 | `recipientPhone` | 是 | 完整手机号（已解密） |
 | `recipientAddress` | 是 | 收货地址 |
-| `goodsTitle` | 是 | 商品名称 |
+| `salesChannel` | 是 | 销售渠道 key，须为 `SALES_CHANNEL_MAP` 合法值（见 §5.1） |
+| `brand` | 是 | 货品品牌（弹窗选择） |
+| `productName` | 是 | 货品名称（弹窗选择） |
+| `specification` | 是 | 规格（弹窗选择） |
+| `goodsTitle` | 否 | 仅作参考写入 `customerRemark` |
 | `goodsQuantity` | 否 | 默认 1 |
-| `orderedAt` / `paidRent` / `responsiblePerson` | 否 | 缺失不阻断创建 |
+| `orderedAt` / `paidRent` / `responsiblePerson` | 否 | 缺失不阻断创建（`orderedAt` 不再使用，日期固定当天） |
 | `operator.*` | 方案 A 由服务端从登录态取，忽略前端值；方案 B 仅供参考 | |
 
-缺失必填字段返回 `MISSING_FIELDS`，并在响应中指明缺失字段。
+缺失必填字段返回 `MISSING_FIELDS`；`salesChannel` 非法返回 `INVALID_FIELD`，均在响应中指明。
 
 ## 7. 幂等设计
 
@@ -153,3 +180,44 @@ CloudBase NoSQL 没有原生复合唯一约束，`unique(source, source_order_no
 4. 在 `cloudbaserc.json` 注册并部署。
 5. 改插件对接。
 6. 用一条真实待发货订单联调。
+
+## 13. 当前实现状态（方案三 / B — 静态 Token）
+
+已采用 **方案三：静态 API Token + HTTP 访问服务**（DESIGN §10.1）作为 MVP，对应上表的 B 路线。
+
+已完成（本仓库）：
+
+- 云函数 `cloud_functions/sendWechatNotification/functions/importOrderFromAssist/`（`index.js` + `package.json`）。
+  - 鉴权：校验 `Authorization: Bearer <token>`，期望值取自环境变量 `HC_ORDER_ASSIST_TOKEN`。
+  - 状态校验：`sourceStatusCode === 'PENDING_SHIPMENT'`，兜底 `sourceStatus.includes('待发货')`。
+  - 字段校验：`sourceOrderNo / recipient / recipientPhone / recipientAddress / salesChannel / brand / productName / specification`；`salesChannel` 校验枚举合法性。
+  - `getProductModels` 动作：token 鉴权返回货品三级树 + 销售渠道选项（见 §5.1）。
+  - 幂等：`order_import_logs` 以 `_id = zanchenzu_<sourceOrderNo>` 抢占锁，重复返回 `DUPLICATED`。
+  - 序号经 `system_counters`/`orderSerialNumber` 事务自增生成 `serialNumber`。
+  - 按扁平结构映射写入 `orders`：固定 `date=当天 / orderSource='new' / orderAttribute='rental1' / orderType='newBusiness' / status='unknown'`，`salesChannel`、`brand/productName/specification` 取自插件选择，原 `goodsTitle` 入 `customerRemark`，`paidRent` 暂忽略；并回写导入日志。
+  - 返回 CloudBase「HTTP 访问服务」集成响应（带真实状态码 + `{success,code,message,data}`）。
+- 已在 `cloudbaserc.json` 注册该函数。
+- 插件侧（hc-order-assist）已配套：`background.js` 透传新字段 + `getHcAdminProductModels` 消息处理（带 15s 超时）；`content-script.js` 导入弹窗支持销售渠道下拉 + 品牌→货品→规格级联选择。
+
+部署与配置步骤（已用 CloudBase CLI `tcb` 3.3.3 实测，envId `cloud1-8gvbotkt966e5e19`）：
+
+1. 部署函数并一并创建 HTTP 访问路径：
+   ```bash
+   tcb fn deploy importOrderFromAssist --force \
+     --path /api/integrations/hc-order-assist/orders/import \
+     -e cloud1-8gvbotkt966e5e19
+   ```
+   成功后返回访问链接：`https://<envId>.service.tcloudbase.com/api/integrations/hc-order-assist/orders/import`。
+2. 配置环境变量 `HC_ORDER_ASSIST_TOKEN`（自定义强随机串）。CLI 方式：在 `cloudbaserc.json` 的该函数下临时加 `envVariables.HC_ORDER_ASSIST_TOKEN`，执行 `tcb config update fn importOrderFromAssist`（提示时选「覆盖更新」），**推送后把 token 从文件删掉，不要提交进仓库**。也可在控制台 → 云函数 → 该函数 → 环境变量 中直接配置。
+3. 开启 **HTTP 访问服务总开关**（首次必做）：`tcb service switch`（选「开启」）。注意首次开启后网关有**几分钟传播延迟**，期间接口会返回 403 `HTTPSERVICE_NONACTIVATED`，属正常现象，稍等重试即可。
+4. **手动创建 `order_import_logs` 集合**：CloudBase NoSQL **不会**在首次 `add` 时自动建集合，未建会返回 500 `DATABASE_COLLECTION_NOT_EXIST`。用控制台或 MCP `createCollection` 预先创建。（`orders`、`system_counters` 已存在。）
+
+> ⚠️ **重新部署会清空环境变量**：`tcb fn deploy` / `tcb config update fn` 会用 `cloudbaserc.json` 中该函数的配置覆盖云端。由于仓库里**不保存** token（见第 2 步），每次重新部署后都需要**重新推送一次 `HC_ORDER_ASSIST_TOKEN`**，否则云函数会因取不到 token 而对所有请求返回 500。
+
+插件侧（hc-order-assist 仓库）配套：
+
+- `config.js` 填 `hcAdmin.apiBase`（HTTP 访问服务域名）、`hcAdmin.importPath`（绑定的路径）、`hcAdmin.apiToken`（与 `HC_ORDER_ASSIST_TOKEN` 相同）。
+- 若访问域名非 `localhost`，在 `manifest.json` 的 `host_permissions` 加入该域名。
+- background.js / content-script 现有逻辑已满足；`sourceStatusCode` 为可选（云函数有中文兜底）。
+
+后续升级到方案 A（CloudBase 身份贯通）时，仅需把鉴权从静态 token 换成 `getCurrentUser(event)`，其余校验/幂等/映射逻辑可复用。

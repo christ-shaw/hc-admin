@@ -1,0 +1,9 @@
+{
+  "name": "importOrderFromAssist",
+  "version": "1.0.0",
+  "description": "接收 HC Order Assist 插件导入的待发货订单",
+  "main": "index.js",
+  "dependencies": {
+    "wx-server-sdk": "~2.6.3"
+  }
+}
