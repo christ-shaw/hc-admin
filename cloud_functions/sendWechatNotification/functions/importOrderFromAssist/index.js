@@ -189,9 +189,9 @@ function mapToOrder(order, serialNumber, now) {
     orderSource: FIXED_ORDER_SOURCE,       // 新增
     orderAttribute: FIXED_ORDER_ATTRIBUTE, // 租赁1
     orderType: FIXED_ORDER_TYPE,           // 新增业务
-    salesChannel: order.salesChannel || '',// 插件下拉选择传入（SALES_CHANNEL_MAP 的 key）
+    salesChannel: order.salesChannel || '',// 插件按商户名称判定后传入（SALES_CHANNEL_MAP 的 key）
     salesperson: order.responsiblePerson || '',
-    channelCategory: '',
+    channelCategory: 'platform',           // 固定：平台
     onlineOrderNumber: order.sourceOrderNo || '',
     customerName: order.recipient || '',
     brand: order.brand || '',              // 插件从 manageProductModels 选择

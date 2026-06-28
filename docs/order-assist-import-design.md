@@ -52,7 +52,7 @@ hc-admin 是 CloudBase 应用：React 前端 + 云函数（`wx-server-sdk`）+ N
 | `brand` | `brand` | 插件从 `manageProductModels` 三级选择（见 §5.1） |
 | `productName` | `productName` | 选中的货品名（**不再用** `goodsTitle`） |
 | `specification` | `specification` | 选中的规格 |
-| `salesChannel` | `salesChannel` | 插件下拉选择，传 `SALES_CHANNEL_MAP` 的 key（校验合法性） |
+| `salesChannel` | `salesChannel` | 插件按**商户名称**自动判定（见 §5.1），传 `SALES_CHANNEL_MAP` 的 key（校验合法性） |
 | `goodsTitle` | → `customerRemark` | 页面原始商品名仅作参考写入备注 |
 | `goodsQuantity` | `quantity` | 默认 1 |
 | `paidRent` | —（暂忽略） | 暂不映射，`paidRent` 写默认 0 |
@@ -62,6 +62,7 @@ hc-admin 是 CloudBase 应用：React 前端 + 云函数（`wx-server-sdk`）+ N
 | （固定值）| `orderSource = 'new'`（新增） | |
 | （固定值）| `orderAttribute = 'rental1'`（租赁1） | |
 | （固定值）| `orderType = 'newBusiness'`（新增业务） | |
+| （固定值）| `channelCategory = 'platform'`（平台） | |
 | （固定值）| `status = 'unknown'` | 见下方说明 |
 | （固定值）| `customerRemark = '【赞晨租导入】原商品：<goodsTitle>'` + `importSource = 'hc-order-assist'` | 来源标记 |
 | 其余字段 | `channelCategory/unitPrice/amount/shippingFee/transferItems/returnStatus/attachments ...` | 按 `EMPTY_ORDER` 默认值补空，保证列表显示与编辑向导可用 |
@@ -79,6 +80,7 @@ hc-admin 是 CloudBase 应用：React 前端 + 云函数（`wx-server-sdk`）+ N
   - 请求体 `{"action":"getProductModels"}`。
   - 返回 `data.brands`（`[{brand, products:[{name, specs:[名称...]}]}]`，仅含 enabled，按 sort 排序，读自 `product_models` 集合）与 `data.salesChannels`（`[{value,label}]`，对应 `SALES_CHANNEL_MAP`）。
 - 插件 content-script 拉取后，在导入弹窗渲染：销售渠道下拉 + 品牌→货品→规格级联下拉；四项选完才允许确认。
+- **销售渠道按商户名称自动判定**：插件从订单 `.table-top` 行解析「商户名称」，按关键字映射预选渠道（仍可人工改）：云途→`yuntu`、汇租机→`huizuji`、云界→`yunjie`、租机乐→`zujile`、倬石→`zhuoshi`、鸿城→`fRrz`。
 - 提交时随订单带上 `salesChannel / brand / productName / specification`。
 - 服务端校验：四项为必填；`salesChannel` 必须是 `SALES_CHANNEL_MAP` 合法 key，否则 422 `INVALID_FIELD`。
 
