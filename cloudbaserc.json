@@ -101,6 +101,26 @@
       "runtime": "Nodejs18.15"
     },
     {
+      "name": "queryRecords",
+      "handler": "index.main",
+      "runtime": "Nodejs16.13"
+    },
+    {
+      "name": "updateRecord",
+      "handler": "index.main",
+      "runtime": "Nodejs16.13"
+    },
+    {
+      "name": "deleteInboundRecord",
+      "handler": "index.main",
+      "runtime": "Nodejs16.13"
+    },
+    {
+      "name": "deleteOutboundRecord",
+      "handler": "index.main",
+      "runtime": "Nodejs16.13"
+    },
+    {
       "name": "queryOrders",
       "handler": "index.main",
       "runtime": "Nodejs18.15"
