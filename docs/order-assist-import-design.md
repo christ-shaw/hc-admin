@@ -86,6 +86,14 @@ hc-admin 是 CloudBase 应用：React 前端 + 云函数（`wx-server-sdk`）+ N
 
 > 路线说明：本动作走 **token 鉴权**（方案三 B 路线），content-script 无 CloudBase 登录态也能取目录。代价是读取目录只认 token、绕过角色权限——与 `manageProductModels`（需 CloudBase 登录 + `models:read`）不同。升级到方案 A 后可改为直接调 `manageProductModels`。
 
+### 5.2 回查快递单号（getTracking）
+
+待发货阶段，插件可在订单行点「查快递单」反向从 hc-admin 取快递单号：
+
+- 导入接口新增 **`getTracking`** 动作（同路径、同 token 鉴权）：请求体 `{"action":"getTracking","sourceOrderNo":"ME..."}`。
+- 服务端按 `onlineOrderNumber === sourceOrderNo` 查 `orders`，优先返回已有 `trackingNumber` 的那条，响应 `data`：`{found, trackingNumber, sfWaybillNo, expressProvider, status, serialNumber}`。
+- 插件行为：未找到 → 提示未导入；找到但 `trackingNumber` 空 → 提示「尚未发货/无快递单号」；有单号 → 弹窗显示并复制到剪贴板（`trackingNumber` 为空时回退 `sfWaybillNo`）。
+
 ## 6. 字段必填性
 
 | 字段 | 必填 | 说明 |

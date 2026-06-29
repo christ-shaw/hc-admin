@@ -259,6 +259,36 @@ exports.main = async (event) => {
   if (!token) return fail(401, 'LOGIN_REQUIRED', '缺少 Authorization token');
   if (token !== expectedToken) return fail(401, 'LOGIN_REQUIRED', 'token 无效');
 
+  // 按来源订单号查 hc-admin 订单的快递单号
+  if (payload && payload.action === 'getTracking') {
+    const sn = String(payload.sourceOrderNo || '').trim();
+    if (!sn) return fail(422, 'MISSING_FIELDS', '缺少 sourceOrderNo');
+    try {
+      const res = await db.collection(ORDERS_COLLECTION)
+        .where({ onlineOrderNumber: sn })
+        .limit(20)
+        .get();
+      const docs = res.data || [];
+      if (docs.length === 0) {
+        return ok('NOT_FOUND', '未找到订单', { found: false });
+      }
+      // 优先取已有快递单号的那条
+      const withTracking = docs.find((d) => String(d.trackingNumber || '').trim());
+      const doc = withTracking || docs[0];
+      return ok('OK', '查询成功', {
+        found: true,
+        trackingNumber: String(doc.trackingNumber || '').trim(),
+        sfWaybillNo: String(doc.sfWaybillNo || '').trim(),
+        expressProvider: doc.expressProvider || '',
+        status: doc.status || '',
+        serialNumber: doc.serialNumber,
+      });
+    } catch (err) {
+      console.error('[importOrderFromAssist] 查快递单号失败:', err);
+      return fail(500, 'INTERNAL_ERROR', err.message || '查快递单号失败');
+    }
+  }
+
   // 取货品三级结构（供插件下拉选择）；与销售渠道枚举一并返回
   if (payload && payload.action === 'getProductModels') {
     try {
