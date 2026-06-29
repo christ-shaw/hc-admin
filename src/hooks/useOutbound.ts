@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { callFunction } from '../lib/cloudbase';
+import { callFunction, getCurrentPermissionUserPayload } from '../lib/cloudbase';
 import { OutboundRecord, OutboundFilters } from '../types';
 import { PAGE_SIZE } from '../utils/constants';
 
@@ -8,6 +8,7 @@ interface QueryResult {
   data: OutboundRecord[];
   cursor: string | null;
   hasMore: boolean;
+  errMsg?: string;
 }
 
 interface OutboundState {
@@ -43,7 +44,9 @@ export function useOutbound() {
     };
 
     try {
-      const result = await callFunction<QueryResult>('queryRecords', { data: requestData });
+      const currentUser = await getCurrentPermissionUserPayload().catch(() => null);
+      const result = await callFunction<QueryResult>('queryRecords', { data: { ...requestData, currentUser } });
+      if (!result.success && result.errMsg) throw new Error(result.errMsg);
       const records = result.data || [];
       const nextCursor = result.cursor;
       const hasMore = result.hasMore !== undefined ? result.hasMore : !!nextCursor;
@@ -72,25 +75,29 @@ export function useOutbound() {
 
   const updateRecord = useCallback(async (recordId: string, updateData: Partial<OutboundRecord>) => {
     try {
-      const result = await callFunction<{ success: boolean }>('updateRecord', {
-        data: { recordId, type: 'outbound', updateData },
+      const currentUser = await getCurrentPermissionUserPayload().catch(() => null);
+      const result = await callFunction<{ success: boolean; errMsg?: string }>('updateRecord', {
+        data: { recordId, type: 'outbound', updateData, currentUser },
       });
+      if (!result?.success && result?.errMsg) throw new Error(result.errMsg);
       return result?.success || false;
     } catch (err) {
       console.error('更新出库记录失败:', err);
-      return false;
+      throw err;
     }
   }, []);
 
   const deleteRecord = useCallback(async (recordId: string) => {
     try {
-      const result = await callFunction<{ success: boolean }>('deleteOutboundRecord', {
-        data: { _id: recordId },
+      const currentUser = await getCurrentPermissionUserPayload().catch(() => null);
+      const result = await callFunction<{ success: boolean; errMsg?: string }>('deleteOutboundRecord', {
+        data: { _id: recordId, currentUser },
       });
+      if (!result?.success && result?.errMsg) throw new Error(result.errMsg);
       return result?.success || false;
     } catch (err) {
       console.error('删除出库记录失败:', err);
-      return false;
+      throw err;
     }
   }, []);
 

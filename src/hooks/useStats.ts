@@ -1,7 +1,15 @@
 import { useState, useCallback } from 'react';
-import { callFunction } from '../lib/cloudbase';
+import { callFunction, getCurrentPermissionUserPayload } from '../lib/cloudbase';
 import { StatsData, ModelStatsItem } from '../types';
 import { extractDateString } from '../utils/format';
+
+interface QueryRecordsResult {
+  success?: boolean;
+  data?: unknown[];
+  hasMore: boolean;
+  cursor: string | null;
+  errMsg?: string;
+}
 
 export function useStats() {
   const [loading, setLoading] = useState(false);
@@ -24,6 +32,7 @@ export function useStats() {
 
       const startDateStr = formatDateStr(startDate);
       const endDateStr = formatDateStr(endDate);
+      const currentUser = await getCurrentPermissionUserPayload().catch(() => null);
 
       // 获取入库记录
       const inboundRecords: unknown[] = [];
@@ -31,10 +40,11 @@ export function useStats() {
       let hasMore = true;
 
       while (hasMore && inboundRecords.length < 10000) {
-        const result: { data?: unknown[]; hasMore: boolean; cursor: string | null } = await callFunction(
+        const result: QueryRecordsResult = await callFunction<QueryRecordsResult>(
           'queryRecords',
-          { data: { type: 'inbound', startDate: startDateStr, endDate: endDateStr, limit: 100, cursor } },
+          { data: { type: 'inbound', startDate: startDateStr, endDate: endDateStr, limit: 100, cursor, currentUser } },
         );
+        if (result.success === false) throw new Error(result.errMsg || '查询入库统计失败');
         const data = result.data || [];
         inboundRecords.push(...data);
         hasMore = result.hasMore;
@@ -47,10 +57,11 @@ export function useStats() {
       hasMore = true;
 
       while (hasMore && outboundRecords.length < 10000) {
-        const result: { data?: unknown[]; hasMore: boolean; cursor: string | null } = await callFunction(
+        const result: QueryRecordsResult = await callFunction<QueryRecordsResult>(
           'queryRecords', {
-          data: { type: 'outbound', startDate: startDateStr, endDate: endDateStr, limit: 100, cursor },
+          data: { type: 'outbound', startDate: startDateStr, endDate: endDateStr, limit: 100, cursor, currentUser },
         });
+        if (result.success === false) throw new Error(result.errMsg || '查询出库统计失败');
         const data = result.data || [];
         outboundRecords.push(...data);
         hasMore = result.hasMore;
@@ -131,14 +142,17 @@ export function useStats() {
     const endDateStr = `${nextDate.getFullYear()}-${String(nextDate.getMonth() + 1).padStart(2, '0')}-${String(nextDate.getDate()).padStart(2, '0')}`;
 
     try {
+      const currentUser = await getCurrentPermissionUserPayload().catch(() => null);
       const [inboundResult, outboundResult] = await Promise.all([
-        callFunction<{ data: Record<string, unknown>[] }>('queryRecords', {
-          data: { type: 'inbound', startDate: date, endDate: endDateStr, limit: 1000 },
+        callFunction<{ success?: boolean; data?: Record<string, unknown>[]; errMsg?: string }>('queryRecords', {
+          data: { type: 'inbound', startDate: date, endDate: endDateStr, limit: 1000, currentUser },
         }),
-        callFunction<{ data: Record<string, unknown>[] }>('queryRecords', {
-          data: { type: 'outbound', startDate: date, endDate: endDateStr, limit: 1000 },
+        callFunction<{ success?: boolean; data?: Record<string, unknown>[]; errMsg?: string }>('queryRecords', {
+          data: { type: 'outbound', startDate: date, endDate: endDateStr, limit: 1000, currentUser },
         }),
       ]);
+      if (inboundResult.success === false) throw new Error(inboundResult.errMsg || '查询入库型号统计失败');
+      if (outboundResult.success === false) throw new Error(outboundResult.errMsg || '查询出库型号统计失败');
 
       const inboundRecords = inboundResult.data || [];
       const outboundRecords = outboundResult.data || [];

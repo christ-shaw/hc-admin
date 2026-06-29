@@ -9,7 +9,14 @@ import { formatDate, getTotalQuantity } from '../utils/format';
 import { OUTBOUND_SYNC_STATUS_MAP, getOutboundSyncStatusTheme, resolveOutboundStatus, resolveOutboundSyncStatus } from '../utils/outboundLinkage';
 import { parseOrderExcel, exportOrderExcel } from '../utils/orderExcel';
 import { getBrandLabel, getProductLabel } from '../data/dict';
-import { parseConsigneeInfo, callFunction, getCloudFileURLs, getCurrentOperatorName, uploadToCloudStorage } from '../lib/cloudbase';
+import {
+  parseConsigneeInfo,
+  callFunction,
+  getCloudFileURLs,
+  getCurrentOperatorName,
+  getCurrentPermissionUserPayload,
+  uploadToCloudStorage,
+} from '../lib/cloudbase';
 import { PAGE_SIZE } from '../utils/constants';
 import { DICT_CODES, useDictionaries } from '../contexts/DictionaryContext';
 
@@ -921,15 +928,20 @@ export function Orders() {
     const keyword = consignee.trim();
     if (!keyword) return [];
 
-    const result = await callFunction<{ success?: boolean; data?: OutboundRecord[] }>('queryRecords', {
+    const currentUser = await getCurrentPermissionUserPayload().catch(() => null);
+    const result = await callFunction<{ success?: boolean; data?: OutboundRecord[]; errMsg?: string }>('queryRecords', {
       data: {
         type: 'outbound',
         customerName: keyword,
         outboundStatus: 'completed',
         limit: 20,
         cursor: null,
+        currentUser,
       },
     });
+    if (result.success === false) {
+      throw new Error(result.errMsg || '查询发货记录失败');
+    }
 
     return (result.data || [])
       .filter(item => item.trackingNumber && resolveOutboundStatus(item) === 'completed')
@@ -1040,15 +1052,20 @@ export function Orders() {
 
     setAfterSaleInboundLoading(true);
     try {
-      const result = await callFunction<{ success?: boolean; data?: InboundRecord[] }>('queryRecords', {
+      const currentUser = await getCurrentPermissionUserPayload().catch(() => null);
+      const result = await callFunction<{ success?: boolean; data?: InboundRecord[]; errMsg?: string }>('queryRecords', {
         data: {
           type: 'inbound',
           customerName: trimmedCustomerName || undefined,
           trackingNumber: trimmedTrackingNumber || undefined,
           limit: 50,
           cursor: null,
+          currentUser,
         },
       });
+      if (result.success === false) {
+        throw new Error(result.errMsg || '查询入库记录失败');
+      }
 
       const records = (result.data || []).sort((a, b) => {
         const aTime = new Date(a.inboundDate || a.createTime?.$date || 0).getTime();
@@ -1271,6 +1288,14 @@ export function Orders() {
     { colKey: 'serialNumber', title: '序号', width: 60 },
     { colKey: 'date', title: '日期', width: 100, cell: ({ row }: { row: OrderRecord }) => formatDate(row.date, false) },
     { colKey: 'orderType', title: '订单类型', width: 90, cell: ({ row }: { row: OrderRecord }) => getDictLabel(ORDER_TYPE_MAP, row.orderType) || '-' },
+    {
+      colKey: 'importSource', title: '订单来源', width: 90,
+      cell: ({ row }: { row: OrderRecord }) => (
+        row.importSource === 'hc-order-assist'
+          ? <Tag theme="primary" variant="light">赞晨租</Tag>
+          : <span>手工</span>
+      ),
+    },
     { colKey: 'salesChannel', title: '销售渠道', width: 90, cell: ({ row }: { row: OrderRecord }) => getDictLabel(SALES_CHANNEL_MAP, row.salesChannel) || '-' },
     { colKey: 'salesperson', title: '人员', width: 60, cell: ({ row }: { row: OrderRecord }) => row.salesperson || '-' },
     { colKey: 'customerName', title: '客户名称', width: 100, ellipsis: true },

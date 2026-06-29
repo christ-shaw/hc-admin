@@ -78,17 +78,21 @@ export function OutboundList() {
 
   const handleDelete = async () => {
     if (!currentRecord) return;
-    const success = await outbound.deleteRecord(currentRecord._id);
-    if (success) {
-      const operator = await getCurrentOperatorName();
-      await logs.saveOperationLog('delete', 'outbound', currentRecord._id, currentRecord.customerName, operator);
-      await notifyRecordChange('delete', 'outbound', currentRecord as unknown as Record<string, unknown>);
-      MessagePlugin.success('删除成功');
-      setDeleteConfirmVisible(false);
-      setDetailVisible(false);
-      outbound.fetchRecords(null, outbound.filters);
-    } else {
-      MessagePlugin.error('删除失败');
+    try {
+      const success = await outbound.deleteRecord(currentRecord._id);
+      if (success) {
+        const operator = await getCurrentOperatorName();
+        await logs.saveOperationLog('delete', 'outbound', currentRecord._id, currentRecord.customerName, operator);
+        await notifyRecordChange('delete', 'outbound', currentRecord as unknown as Record<string, unknown>);
+        MessagePlugin.success('删除成功');
+        setDeleteConfirmVisible(false);
+        setDetailVisible(false);
+        outbound.fetchRecords(null, outbound.filters);
+      } else {
+        MessagePlugin.error('删除失败');
+      }
+    } catch (err) {
+      MessagePlugin.error('删除失败: ' + (err instanceof Error ? err.message : String(err)));
     }
   };
 

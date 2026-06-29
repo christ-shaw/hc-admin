@@ -18,6 +18,23 @@ const USER_COLLECTION = 'permission_users';
 const USER_ROLE_COLLECTION = 'user_roles';
 const USER_ROLE_MANAGE_PERMISSION = 'settings:user_role_manage';
 const ROLE_MANAGE_PERMISSION = 'settings:role_manage';
+const LEGACY_WHITELIST_COLLECTION = 'user_whitelist';
+const MINIAPP_OPERATOR_ROLE_ID = 'role_miniapp_operator';
+const MINIAPP_OPERATOR_ROLE_CODE = 'miniapp_operator';
+const MINIAPP_OPERATOR_PERMISSIONS = [
+  'miniapp:access',
+  'inbound:create',
+  'outbound:create',
+  'inbound:read',
+  'outbound:read',
+  'inbound:update',
+  'inbound:delete',
+  'outbound:update',
+  'outbound:delete',
+  'stats:read',
+  'models:read',
+  'logs:read',
+];
 
 function notFound(err) {
   const message = String(err && err.message || '');
@@ -34,6 +51,17 @@ function getPayload(event) {
 
 function unique(values) {
   return Array.from(new Set((values || []).filter(Boolean).map(String)));
+}
+
+function normalizeIdentityType(value) {
+  const identityType = String(value || '').trim();
+  return identityType || 'cloudbase_uid';
+}
+
+function normalizePlatforms(values, identityType) {
+  const list = unique(values);
+  if (list.length > 0) return list;
+  return identityType === 'wechat_openid' ? ['miniapp'] : ['admin'];
 }
 
 function firstNonEmpty(values) {
@@ -62,6 +90,14 @@ async function getDoc(collectionName, id) {
     if (notFound(err)) return null;
     throw err;
   }
+}
+
+async function findRoleByCode(code) {
+  const result = await db.collection(ROLE_COLLECTION)
+    .where({ code })
+    .limit(1)
+    .get();
+  return result.data && result.data[0] || null;
 }
 
 async function fetchAll(collectionName, where = {}) {
@@ -336,6 +372,9 @@ async function listUserRoles() {
       if (!record) {
         return {
           userId: user.userId,
+          openid: user.openid || '',
+          identityType: user.identityType || '',
+          platforms: user.platforms || [],
           username: user.username,
           nickName: user.nickName,
           email: user.email,
@@ -349,6 +388,9 @@ async function listUserRoles() {
       const role = roleMap.get(record.roleId);
       return {
         ...record,
+        openid: user.openid || '',
+        identityType: user.identityType || '',
+        platforms: user.platforms || [],
         username: record.username || user.username,
         nickName: record.nickName || user.nickName,
         email: user.email,
@@ -436,7 +478,7 @@ async function removeUserRole(payload) {
 async function createUserRecord(payload, currentUser) {
   const userId = String(payload.userId || '').trim();
   const username = String(payload.username || '').trim();
-  if (!userId) return { success: false, errMsg: '请填写 CloudBase 用户 ID' };
+  if (!userId) return { success: false, errMsg: '请填写用户唯一 ID' };
   if (!username) return { success: false, errMsg: '请填写用户名' };
 
   const existing = await findLocalUser(userId);
@@ -444,8 +486,17 @@ async function createUserRecord(payload, currentUser) {
     return { success: false, errMsg: '该用户 ID 已存在，请直接编辑' };
   }
 
+  const identityType = normalizeIdentityType(payload.identityType);
+  const platforms = normalizePlatforms(payload.platforms, identityType);
+  const openid = identityType === 'wechat_openid'
+    ? userId
+    : String(payload.openid || '').trim();
+
   const data = {
     userId,
+    openid,
+    identityType,
+    platforms,
     username,
     nickName: String(payload.nickName || '').trim(),
     email: String(payload.email || '').trim(),
@@ -479,6 +530,19 @@ async function updateUserRecord(payload, currentUser) {
   if (payload.nickName !== undefined) data.nickName = String(payload.nickName || '').trim();
   if (payload.email !== undefined) data.email = String(payload.email || '').trim();
   if (payload.phone !== undefined) data.phone = String(payload.phone || '').trim();
+  if (payload.identityType !== undefined) {
+    const identityType = normalizeIdentityType(payload.identityType);
+    data.identityType = identityType;
+    data.platforms = normalizePlatforms(payload.platforms, identityType);
+    data.openid = identityType === 'wechat_openid'
+      ? userId
+      : String(payload.openid || existing.openid || '').trim();
+  } else if (payload.platforms !== undefined) {
+    data.platforms = normalizePlatforms(payload.platforms, existing.identityType);
+  }
+  if (payload.openid !== undefined && data.openid === undefined) {
+    data.openid = String(payload.openid || '').trim();
+  }
 
   await db.collection(USER_COLLECTION).doc(existing._id).update({ data });
   return { success: true };
@@ -503,6 +567,133 @@ async function deleteUserRecord(payload) {
 
   await db.collection(USER_COLLECTION).doc(existing._id).remove();
   return { success: true };
+}
+
+async function ensureMiniappOperatorRole() {
+  const existingById = await getDoc(ROLE_COLLECTION, MINIAPP_OPERATOR_ROLE_ID);
+  if (existingById) {
+    const mergedPermissions = unique([...(existingById.actionPermissions || []), ...MINIAPP_OPERATOR_PERMISSIONS]);
+    if (mergedPermissions.length !== (existingById.actionPermissions || []).length) {
+      await db.collection(ROLE_COLLECTION).doc(existingById._id).update({
+        data: {
+          actionPermissions: mergedPermissions,
+          updatedAt: now(),
+        },
+      });
+      return { ...existingById, actionPermissions: mergedPermissions };
+    }
+    return existingById;
+  }
+
+  const existingByCode = await findRoleByCode(MINIAPP_OPERATOR_ROLE_CODE);
+  if (existingByCode) {
+    const mergedPermissions = unique([...(existingByCode.actionPermissions || []), ...MINIAPP_OPERATOR_PERMISSIONS]);
+    if (mergedPermissions.length !== (existingByCode.actionPermissions || []).length) {
+      await db.collection(ROLE_COLLECTION).doc(existingByCode._id).update({
+        data: {
+          actionPermissions: mergedPermissions,
+          updatedAt: now(),
+        },
+      });
+      return { ...existingByCode, actionPermissions: mergedPermissions };
+    }
+    return existingByCode;
+  }
+
+  const role = {
+    name: '小程序操作员',
+    code: MINIAPP_OPERATOR_ROLE_CODE,
+    description: '由旧小程序白名单迁移创建，可登录小程序并执行常用出入库操作',
+    pagePermissions: [],
+    actionPermissions: MINIAPP_OPERATOR_PERMISSIONS,
+    systemRole: false,
+    createdAt: now(),
+    updatedAt: now(),
+  };
+
+  await db.collection(ROLE_COLLECTION).doc(MINIAPP_OPERATOR_ROLE_ID).set({
+    data: role,
+  });
+
+  return {
+    _id: MINIAPP_OPERATOR_ROLE_ID,
+    ...role,
+  };
+}
+
+async function migrateLegacyWhitelist(currentUser) {
+  let legacyUsers = [];
+  try {
+    legacyUsers = await fetchAll(LEGACY_WHITELIST_COLLECTION);
+  } catch (error) {
+    if (!notFound(error)) throw error;
+  }
+
+  const role = await ensureMiniappOperatorRole();
+  let createdUsers = 0;
+  let skippedUsers = 0;
+  let assignedRoles = 0;
+  let skippedRoles = 0;
+
+  for (const legacyUser of legacyUsers) {
+    const openid = String(legacyUser.openid || '').trim();
+    if (!openid) continue;
+
+    const existingUser = await findLocalUser(openid);
+    if (!existingUser) {
+      await db.collection(USER_COLLECTION).add({
+        data: {
+          userId: openid,
+          openid,
+          identityType: 'wechat_openid',
+          platforms: ['miniapp'],
+          username: String(legacyUser.nickname || legacyUser.remark || openid).trim(),
+          nickName: String(legacyUser.nickname || '').trim(),
+          avatarUrl: String(legacyUser.avatarUrl || '').trim(),
+          email: '',
+          phone: '',
+          source: 'legacy_whitelist',
+          lastSyncedAt: now(),
+          createdAt: now(),
+          createdBy: currentUser.id,
+          updatedAt: now(),
+          updatedBy: currentUser.id,
+        },
+      });
+      createdUsers += 1;
+    } else {
+      skippedUsers += 1;
+    }
+
+    const existingRole = await findUserRole(openid);
+    if (!existingRole) {
+      await db.collection(USER_ROLE_COLLECTION).add({
+        data: {
+          userId: openid,
+          username: String(legacyUser.nickname || legacyUser.remark || openid).trim(),
+          nickName: String(legacyUser.nickname || '').trim(),
+          roleId: role._id,
+          assignedBy: currentUser.id,
+          createdAt: now(),
+          updatedAt: now(),
+        },
+      });
+      assignedRoles += 1;
+    } else {
+      skippedRoles += 1;
+    }
+  }
+
+  return {
+    success: true,
+    total: legacyUsers.length,
+    createdUsers,
+    skippedUsers,
+    assignedRoles,
+    skippedRoles,
+    roleId: role._id,
+    errMsg: '旧白名单迁移完成',
+  };
 }
 
 exports.main = async (event, context) => {
@@ -530,6 +721,7 @@ exports.main = async (event, context) => {
     if (action === 'deleteUser') return deleteUserRecord(payload);
     if (action === 'assign') return assignUserRole(payload, auth.currentUser);
     if (action === 'remove') return removeUserRole(payload);
+    if (action === 'migrateLegacyWhitelist') return migrateLegacyWhitelist(auth.currentUser);
 
     return { success: false, errMsg: '不支持的操作类型' };
   } catch (error) {

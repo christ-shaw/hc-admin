@@ -148,8 +148,28 @@ export function useInvoices() {
   }, []);
 
   const setCurrentPage = useCallback((page: number) => {
-    setState(prev => ({ ...prev, currentPage: page }));
+    setState(prev => {
+      const totalPages = Math.max(1, Math.ceil(prev.records.length / PAGE_SIZE));
+      const nextPage = Math.min(Math.max(1, page), totalPages);
+      return { ...prev, currentPage: nextPage };
+    });
   }, []);
+
+  const goPreviousPage = useCallback(() => {
+    setState(prev => ({ ...prev, currentPage: Math.max(1, prev.currentPage - 1) }));
+  }, []);
+
+  const goNextPage = useCallback(async () => {
+    const nextPage = state.currentPage + 1;
+    const loadedPages = Math.ceil(state.records.length / PAGE_SIZE);
+    if (nextPage <= loadedPages) {
+      setCurrentPage(nextPage);
+      return;
+    }
+    if (state.hasMore) {
+      await fetchRecords(state.cursor);
+    }
+  }, [fetchRecords, setCurrentPage, state.currentPage, state.cursor, state.hasMore, state.records.length]);
 
   const getPageRecords = useCallback((page: number): InvoiceRecord[] => {
     const start = (page - 1) * PAGE_SIZE;
@@ -165,5 +185,7 @@ export function useInvoices() {
     resetFilters,
     getPageRecords,
     setCurrentPage,
+    goPreviousPage,
+    goNextPage,
   };
 }

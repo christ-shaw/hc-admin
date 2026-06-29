@@ -11,6 +11,9 @@ interface RoleRecord {
 interface UserRoleRecord {
   _id?: string;
   userId: string;
+  openid?: string;
+  identityType?: string;
+  platforms?: string[];
   username?: string;
   nickName?: string;
   email?: string;
@@ -25,6 +28,9 @@ interface ManageUserRolesResult {
   success: boolean;
   data?: UserRoleRecord[];
   errMsg?: string;
+  total?: number;
+  createdUsers?: number;
+  assignedRoles?: number;
 }
 
 interface ManageRolesResult {
@@ -35,11 +41,23 @@ interface ManageRolesResult {
 
 const EMPTY_USER_FORM = {
   userId: '',
+  identityType: 'wechat_openid',
   username: '',
   nickName: '',
   email: '',
   phone: '',
 };
+
+const IDENTITY_TYPE_OPTIONS = [
+  { label: '小程序 openid', value: 'wechat_openid' },
+  { label: 'CloudBase UID', value: 'cloudbase_uid' },
+];
+
+function getIdentityTypeLabel(identityType?: string) {
+  if (identityType === 'wechat_openid') return '小程序 openid';
+  if (identityType === 'cloudbase_uid') return 'CloudBase UID';
+  return '未标记';
+}
 
 export function UserRoleTab({ onChanged }: { onChanged?: () => void }) {
   const [users, setUsers] = useState<UserRoleRecord[]>([]);
@@ -52,6 +70,7 @@ export function UserRoleTab({ onChanged }: { onChanged?: () => void }) {
   const [userForm, setUserForm] = useState(EMPTY_USER_FORM);
   const [savingUser, setSavingUser] = useState(false);
   const [deletingUserId, setDeletingUserId] = useState('');
+  const [migratingWhitelist, setMigratingWhitelist] = useState(false);
 
   // 角色分配弹窗
   const [assignDialogVisible, setAssignDialogVisible] = useState(false);
@@ -104,6 +123,7 @@ export function UserRoleTab({ onChanged }: { onChanged?: () => void }) {
     setEditingUser(user);
     setUserForm({
       userId: user.userId || '',
+      identityType: user.identityType || (user.openid ? 'wechat_openid' : 'cloudbase_uid'),
       username: user.username || '',
       nickName: user.nickName || '',
       email: user.email || '',
@@ -114,7 +134,7 @@ export function UserRoleTab({ onChanged }: { onChanged?: () => void }) {
 
   const handleSaveUser = async () => {
     if (!userForm.userId.trim()) {
-      MessagePlugin.warning('请填写 CloudBase 用户 ID');
+      MessagePlugin.warning('请填写用户唯一 ID');
       return;
     }
     if (!userForm.username.trim()) {
@@ -128,6 +148,9 @@ export function UserRoleTab({ onChanged }: { onChanged?: () => void }) {
         data: {
           action: editingUser ? 'updateUser' : 'createUser',
           userId: userForm.userId.trim(),
+          openid: userForm.identityType === 'wechat_openid' ? userForm.userId.trim() : '',
+          identityType: userForm.identityType,
+          platforms: userForm.identityType === 'wechat_openid' ? ['miniapp'] : ['admin'],
           username: userForm.username.trim(),
           nickName: userForm.nickName.trim(),
           email: userForm.email.trim(),
@@ -166,6 +189,27 @@ export function UserRoleTab({ onChanged }: { onChanged?: () => void }) {
       MessagePlugin.error('删除用户失败: ' + String(err));
     } finally {
       setDeletingUserId('');
+    }
+  };
+
+  const handleMigrateLegacyWhitelist = async () => {
+    setMigratingWhitelist(true);
+    try {
+      const result = await callFunction<ManageUserRolesResult>('manageUserRoles', {
+        data: { action: 'migrateLegacyWhitelist' },
+      });
+      if (result.success) {
+        MessagePlugin.success(`迁移完成：新增 ${result.createdUsers || 0} 个用户，分配 ${result.assignedRoles || 0} 个角色`);
+        loadUsers();
+        loadRoles();
+        onChanged?.();
+      } else {
+        MessagePlugin.error(result.errMsg || '迁移旧白名单失败');
+      }
+    } catch (err) {
+      MessagePlugin.error('迁移旧白名单失败: ' + String(err));
+    } finally {
+      setMigratingWhitelist(false);
     }
   };
 
@@ -236,9 +280,15 @@ export function UserRoleTab({ onChanged }: { onChanged?: () => void }) {
       cell: ({ row }: { row: UserRoleRecord }) => row.phone || '-',
     },
     {
+      colKey: 'identityType',
+      title: '身份类型',
+      width: 130,
+      cell: ({ row }: { row: UserRoleRecord }) => getIdentityTypeLabel(row.identityType),
+    },
+    {
       colKey: 'userId',
-      title: 'CloudBase 用户 ID',
-      width: 200,
+      title: '用户唯一 ID / 小程序 openid',
+      width: 240,
       ellipsis: true,
     },
     {
@@ -280,6 +330,9 @@ export function UserRoleTab({ onChanged }: { onChanged?: () => void }) {
           <Button variant="outline" icon={<RefreshCw size={16} />} onClick={loadUsers}>
             刷新
           </Button>
+          <Button variant="outline" loading={migratingWhitelist} onClick={handleMigrateLegacyWhitelist}>
+            迁移旧白名单
+          </Button>
           <Button theme="primary" icon={<Plus size={16} />} onClick={openCreateUser}>
             添加用户
           </Button>
@@ -287,7 +340,7 @@ export function UserRoleTab({ onChanged }: { onChanged?: () => void }) {
       </div>
 
       <div className="text-xs text-gray-400 bg-blue-50 rounded-lg p-3">
-        提示：CloudBase 用户 ID 可在 CloudBase 控制台「身份认证 → 用户管理」中查看，是用户的唯一标识。
+        提示：小程序用户请填写登录失败页展示的 openid；后台 Web 用户可继续填写 CloudBase UID。
       </div>
 
       <Table data={users} columns={columns} loading={loading} rowKey="userId" stripe hover />
@@ -303,11 +356,23 @@ export function UserRoleTab({ onChanged }: { onChanged?: () => void }) {
       >
         <div className="space-y-4">
           <div>
-            <label className="block text-sm text-gray-600 mb-1">CloudBase 用户 ID <span className="text-red-500">*</span></label>
+            <label className="block text-sm text-gray-600 mb-1">身份类型</label>
+            <Select
+              value={userForm.identityType}
+              onChange={val => setUserForm(prev => ({ ...prev, identityType: val as string }))}
+              options={IDENTITY_TYPE_OPTIONS}
+              disabled={!!editingUser}
+            />
+          </div>
+          <div>
+            <label className="block text-sm text-gray-600 mb-1">
+              {userForm.identityType === 'wechat_openid' ? '小程序 openid' : 'CloudBase UID'}
+              <span className="text-red-500"> *</span>
+            </label>
             <Input
               value={userForm.userId}
               onChange={val => setUserForm(prev => ({ ...prev, userId: val as string }))}
-              placeholder="从 CloudBase 控制台复制用户 UID"
+              placeholder={userForm.identityType === 'wechat_openid' ? '从小程序登录失败页复制 openid' : '从 CloudBase 控制台复制用户 UID'}
               disabled={!!editingUser}
             />
           </div>

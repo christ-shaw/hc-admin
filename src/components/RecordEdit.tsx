@@ -82,14 +82,19 @@ export function RecordEdit({ visible, record, type, onClose, onSave }: RecordEdi
       updateData.trackingNumber = trackingNumber;
     }
 
-    const success = await onSave(record!._id, updateData);
-    setSaving(false);
+    try {
+      const success = await onSave(record!._id, updateData);
 
-    if (success) {
-      MessagePlugin.success('保存成功');
-      onClose();
-    } else {
-      MessagePlugin.error('保存失败');
+      if (success) {
+        MessagePlugin.success('保存成功');
+        onClose();
+      } else {
+        MessagePlugin.error('保存失败');
+      }
+    } catch (err) {
+      MessagePlugin.error('保存失败: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setSaving(false);
     }
   };
 

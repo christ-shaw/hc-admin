@@ -223,6 +223,7 @@ export interface OrderRecord {
   paidPeriod: number;               // 已交租期
   paidRent: number;                 // 已交租金
   transferItems?: string;            // 转租赁2多组货品JSON（兼容多组）
+  importSource?: string;            // 订单来源标记（hc-order-assist=赞晨租导入）
   attachments: OrderAttachment[];   // 订单附件
   returnStatus?: string;            // 归还状态（租后发货/租后退货时使用）
   returnTrackingNumbers?: string;   // 归还物流单号（多个逗号分隔，归还状态=运输途中时必填）
