@@ -22,7 +22,7 @@ const ORDER_SERIAL_COUNTER = 'orderSerialNumber';
 const SOURCE = 'zanchenzu';
 const PENDING_SHIPMENT_TEXT = '待发货';
 // 货品三级（brand/productName/specification）、销售渠道、人员（responsiblePerson）由插件选择后传入
-const REQUIRED_FIELDS = ['sourceOrderNo', 'recipient', 'recipientPhone', 'recipientAddress', 'salesChannel', 'responsiblePerson', 'brand', 'productName', 'specification'];
+const REQUIRED_FIELDS = ['sourceOrderNo', 'sourceOrderItemNo', 'recipient', 'recipientPhone', 'recipientAddress', 'salesChannel', 'responsiblePerson', 'brand', 'productName', 'specification'];
 
 const SALESPERSON_DICT_GROUP = 'salesperson';
 
@@ -215,6 +215,7 @@ function mapToOrder(order, serialNumber, now) {
     paymentAccount: '',
     paymentSplits: [],
     trackingNumber: '',
+    sourceOrderItemNo: order.sourceOrderItemNo || '',
     consignee: order.recipient || '',
     consigneePhone: order.recipientPhone || '',
     consigneeAddress: order.recipientAddress || '',
@@ -306,6 +307,7 @@ exports.main = async (event) => {
   const order = (payload && payload.order) || {};
   const operator = (payload && payload.operator) || {};
   const sourceOrderNo = String(order.sourceOrderNo || '').trim();
+  const sourceOrderItemNo = String(order.sourceOrderItemNo || '').trim();
 
   // 2. 状态校验
   if (!isPendingShipment(order)) {
@@ -321,7 +323,7 @@ exports.main = async (event) => {
     return fail(422, 'INVALID_FIELD', `salesChannel 非法: ${order.salesChannel}`);
   }
 
-  const importKey = `${SOURCE}_${sourceOrderNo}`;
+  const importKey = `${SOURCE}_${sourceOrderItemNo}`;
   const now = db.serverDate();
 
   // 4. 幂等锁：先抢占日志 _id，重复则直接返回已有订单
@@ -331,6 +333,7 @@ exports.main = async (event) => {
         _id: importKey,
         source: SOURCE,
         sourceOrderNo,
+        sourceOrderItemNo,
         operatorId: operator.uid || '',
         operatorName: operator.username || '',
         rawPayload: order.raw || null,

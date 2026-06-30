@@ -45,7 +45,8 @@ hc-admin 是 CloudBase 应用：React 前端 + 云函数（`wx-server-sdk`）+ N
 
 | 插件字段 | orders 字段（顶层） | 说明 |
 | --- | --- | --- |
-| `sourceOrderNo` | `onlineOrderNumber` | 网店订单号，同时是幂等键来源（见 §7） |
+| `sourceOrderNo` | `onlineOrderNumber` | 原始赞晨租订单号；同一订单拆多个货品时该字段保持相同 |
+| `sourceOrderItemNo` | `sourceOrderItemNo` | 货品项唯一编号（形如 `<sourceOrderNo>#<n>`），幂等键来源（见 §7） |
 | `recipient` | `consignee` + `customerName` | 收货人=客户名，发货流程靠 `consignee` 匹配出库 |
 | `recipientPhone` | `consigneePhone` | 完整手机号 |
 | `recipientAddress` | `consigneeAddress` | |
@@ -98,7 +99,8 @@ hc-admin 是 CloudBase 应用：React 前端 + 云函数（`wx-server-sdk`）+ N
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
-| `sourceOrderNo` | 是 | 幂等键之一 |
+| `sourceOrderNo` | 是 | 原始赞晨租订单号 |
+| `sourceOrderItemNo` | 是 | 货品项唯一编号（`<sourceOrderNo>#<n>`），每条 hc-admin 订单一一对应 |
 | `sourceStatusCode` | 是 | 状态枚举，服务端据此校验是否待发货 |
 | `recipient` | 是 | 收货人 → consignee/customerName |
 | `recipientPhone` | 是 | 完整手机号（已解密） |
@@ -118,7 +120,8 @@ hc-admin 是 CloudBase 应用：React 前端 + 云函数（`wx-server-sdk`）+ N
 
 CloudBase NoSQL 没有原生复合唯一约束，`unique(source, source_order_no)` 不能直接声明。采用 **`_id` 幂等锁**（推荐）：
 
-- 在 `order_import_logs` 集合中 `_id = 'zanchenzu_' + sourceOrderNo`，`_id` 天然唯一。
+- 在 `order_import_logs` 集合中 `_id = 'zanchenzu_' + sourceOrderItemNo`，`_id` 天然唯一。
+- `sourceOrderItemNo` 自带 `sourceOrderNo` 前缀（`<sourceOrderNo>#<n>`），全局唯一；同一 `sourceOrderNo` 的多个货品项各自建一条订单，互不冲突。
 - 流程：
   1. 先 `add` 一条日志占位（成功 = 首次导入）。
   2. 创建 `orders` 订单。
@@ -138,9 +141,10 @@ CloudBase NoSQL 没有原生复合唯一约束，`unique(source, source_order_no
 
 | 字段 | 说明 |
 | --- | --- |
-| `_id` | 幂等键 `zanchenzu_<sourceOrderNo>` |
+| `_id` | 幂等键 `zanchenzu_<sourceOrderItemNo>` |
 | `source` | 固定 `zanchenzu` |
 | `sourceOrderNo` | 来源订单号 |
+| `sourceOrderItemNo` | 来源订单货品项编号 |
 | `operatorId` / `operatorName` | 方案 A 取自登录态；方案 B 取自前端 operator |
 | `rawPayload` | 插件原始 `raw` |
 | `normalizedPayload` | 映射后写入 orders 的数据 |
@@ -200,9 +204,9 @@ CloudBase NoSQL 没有原生复合唯一约束，`unique(source, source_order_no
 - 云函数 `cloud_functions/sendWechatNotification/functions/importOrderFromAssist/`（`index.js` + `package.json`）。
   - 鉴权：校验 `Authorization: Bearer <token>`，期望值取自环境变量 `HC_ORDER_ASSIST_TOKEN`。
   - 状态校验：`sourceStatusCode === 'PENDING_SHIPMENT'`，兜底 `sourceStatus.includes('待发货')`。
-  - 字段校验：`sourceOrderNo / recipient / recipientPhone / recipientAddress / salesChannel / brand / productName / specification`；`salesChannel` 校验枚举合法性。
+  - 字段校验：`sourceOrderNo / sourceOrderItemNo / recipient / recipientPhone / recipientAddress / salesChannel / brand / productName / specification`；`salesChannel` 校验枚举合法性。
   - `getProductModels` 动作：token 鉴权返回货品三级树 + 销售渠道选项（见 §5.1）。
-  - 幂等：`order_import_logs` 以 `_id = zanchenzu_<sourceOrderNo>` 抢占锁，重复返回 `DUPLICATED`。
+  - 幂等：`order_import_logs` 以 `_id = zanchenzu_<sourceOrderItemNo>` 抢占锁；`sourceOrderItemNo` 全局唯一，同一赞晨租订单的每个货品项各建一条 hc-admin 订单，重复返回 `DUPLICATED`。
   - 序号经 `system_counters`/`orderSerialNumber` 事务自增生成 `serialNumber`。
   - 按扁平结构映射写入 `orders`：固定 `date=当天 / orderSource='new' / orderAttribute='rental1' / orderType='newBusiness' / status='unknown'`，`salesChannel`、`brand/productName/specification` 取自插件选择，原 `goodsTitle` 入 `customerRemark`，`paidRent` 暂忽略；并回写导入日志。
   - 返回 CloudBase「HTTP 访问服务」集成响应（带真实状态码 + `{success,code,message,data}`）。
