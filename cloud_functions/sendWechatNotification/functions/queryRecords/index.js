@@ -7,6 +7,7 @@ const db = cloud.database();
 const _ = db.command;
 const MAX_LIMIT = 100; // 微信云数据库单次查询最大限制
 const { requireMiniappPermission, deniedResult } = require('./miniappAuth');
+const { getCurrentUser } = require('./permissionAuth');
 
 const ROLE_COLLECTION = 'roles';
 const USER_ROLE_COLLECTION = 'user_roles';
@@ -95,11 +96,14 @@ async function requireWebPermission(currentUser, permissions = []) {
 }
 
 async function requireRecordPermission(payload, requiredPermission) {
-  if (payload.currentUser) {
-    const webAuth = await requireWebPermission(payload.currentUser, [requiredPermission]);
-    if (webAuth.allowed || webAuth.code !== 'LOGIN_REQUIRED') return webAuth;
+  // 小程序调用带平台注入的可信 OPENID，走小程序鉴权
+  const wxContext = (typeof cloud.getWXContext === 'function' && cloud.getWXContext()) || {};
+  if (wxContext.OPENID) {
+    return await requireMiniappPermission(cloud, db, [requiredPermission]);
   }
-  return await requireMiniappPermission(cloud, db, [requiredPermission]);
+  // 网页端：身份从服务端登录态解析，绝不信任 payload.currentUser（否则可伪造身份越权）
+  const currentUser = await getCurrentUser();
+  return await requireWebPermission(currentUser, [requiredPermission]);
 }
 
 function trimString(value) {
