@@ -7,6 +7,7 @@
 
 const cloud = require('wx-server-sdk');
 const { getCurrentUser } = require('./permissionAuth');
+const { requireMiniappPermission } = require('./miniappAuth');
 
 cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 
@@ -23,6 +24,8 @@ const WRITE_PERMISSION = 'models:write';
 const ORDER_READ_PERMISSION = 'orders:read';
 const ORDER_CREATE_PERMISSION = 'orders:create';
 const ORDER_UPDATE_PERMISSION = 'orders:update';
+// 出入库记录编辑器（RecordEdit）需要读取型号下拉，放行库存权限
+const INVENTORY_READ_PERMISSIONS = ['inbound:read', 'inbound:create', 'inbound:update', 'outbound:read', 'outbound:create', 'outbound:update'];
 
 function now() {
   return new Date().toISOString();
@@ -536,7 +539,7 @@ async function deleteSpec(payload) {
 
 exports.main = async (event) => {
   const payload = getPayload(event);
-  const action = payload.action || 'getBrands';
+  const action = payload.action || 'getProductTree';
   const writeActions = new Set([
     'initializeDefault',
     'addBrand',
@@ -552,14 +555,27 @@ exports.main = async (event) => {
   ]);
 
   try {
-    const permission = await requirePermission(
-      writeActions.has(action)
-        ? [WRITE_PERMISSION]
-        : [READ_PERMISSION, WRITE_PERMISSION, ORDER_READ_PERMISSION, ORDER_CREATE_PERMISSION, ORDER_UPDATE_PERMISSION]
-    );
+    const isWrite = writeActions.has(action);
+    // 双鉴权：小程序调用带 WX 上下文 OPENID，走 miniappAuth（miniapp:access）；
+    // hc-admin 网页端无 OPENID，走原 RBAC。
+    const wxContext = (typeof cloud.getWXContext === 'function' && cloud.getWXContext()) || {};
+    let permission;
+    if (wxContext.OPENID) {
+      const auth = await requireMiniappPermission(cloud, db, isWrite ? [WRITE_PERMISSION] : []);
+      permission = auth.allowed
+        ? { allowed: true, role: auth.role }
+        : { allowed: false, code: auth.code, errMsg: auth.errMsg };
+    } else {
+      permission = await requirePermission(
+        isWrite
+          ? [WRITE_PERMISSION]
+          : [READ_PERMISSION, WRITE_PERMISSION, ORDER_READ_PERMISSION, ORDER_CREATE_PERMISSION, ORDER_UPDATE_PERMISSION, ...INVENTORY_READ_PERMISSIONS]
+      );
+    }
     if (!permission.allowed) return { success: false, code: permission.code, errMsg: permission.errMsg };
 
-    if (action === 'getBrands' || action === 'list') {
+    // 统一入口：返回完整品牌树（品牌→货品→规格），hc-admin 与小程序共用
+    if (action === 'getProductTree') {
       return { success: true, data: await fetchBrands() };
     }
 
