@@ -220,7 +220,7 @@ function mapToOrder(order, serialNumber, now) {
     consigneePhone: order.recipientPhone || '',
     consigneeAddress: order.recipientAddress || '',
     shippingFee: '',
-    status: 'unknown',                     // = '--'，待发货态，可进入发货/申请快递流程
+    status: 'unshipped',                   // 未发货（需要出库），可进入生成出库单/发货流程
     customerRemark: remark,
     transferBrand: '',
     transferProductName: '',
@@ -231,6 +231,8 @@ function mapToOrder(order, serialNumber, now) {
     attachments: [],
     returnStatus: '',
     returnTrackingNumbers: '',
+    needsOutbound: true,                    // 赞晨导入订单默认需要出库
+    outboundRecordId: '',                  // 尚未生成出库单
     importSource: 'hc-order-assist',       // 来源标记（额外字段，UI 忽略）
     createTime: now,
   };

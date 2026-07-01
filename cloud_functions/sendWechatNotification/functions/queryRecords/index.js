@@ -203,7 +203,7 @@ exports.main = async (event, context) => {
     const auth = await requireRecordPermission(payload, requiredPermission);
     if (!auth.allowed) return deniedResult(auth);
 
-    const { type, limit = 20, cursor, customerName, trackingNumber, startDate, endDate, shopName, channelType, model, _id, hasIssue, pendingOnly } = payload;
+    const { type, limit = 20, cursor, customerName, trackingNumber, startDate, endDate, shopName, channelType, model, _id, hasIssue, pendingOnly, outboundStatus } = payload;
 
     // 根据类型选择集合
     const collectionName = type === 'inbound' ? 'inbound_records' : 'outbound_records';
@@ -267,6 +267,10 @@ exports.main = async (event, context) => {
     const dateField = type === 'inbound' ? 'inboundDate' : 'outboundDate';
     const hasDateFilter = !!(startDate || endDate);
 
+    // 出库状态过滤（内存过滤：completed 需兼容无字段的历史记录）
+    const outboundStatusFilter = type === 'outbound' ? String(outboundStatus || '').trim() : '';
+    const hasOutboundStatusFilter = outboundStatusFilter === 'pending' || outboundStatusFilter === 'completed';
+
     
 
 
@@ -285,10 +289,15 @@ exports.main = async (event, context) => {
     const pageSize = normalizePageSize(limit);
     const skipValue = normalizeSkip(cursor);
 
-    if (hasDateFilter || (type === 'outbound' && pendingOnly === true)) {
+    if (hasDateFilter || (type === 'outbound' && pendingOnly === true) || hasOutboundStatusFilter) {
       const allRecords = await fetchAllFromQuery(query);
       const filteredRecords = allRecords.filter(record => {
         if (type === 'outbound' && pendingOnly === true && !isPendingOutboundRecord(record)) return false;
+        if (hasOutboundStatusFilter) {
+          const isPending = record.outboundStatus === 'pending';
+          if (outboundStatusFilter === 'pending' && !isPending) return false;
+          if (outboundStatusFilter === 'completed' && isPending) return false;
+        }
         if (hasDateFilter && !isDateInRange(record[dateField], startDate, endDate)) return false;
         return true;
       });

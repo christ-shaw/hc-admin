@@ -111,8 +111,34 @@ exports.main = async (event, context) => {
 
     const { _id } = payload;
 
+    // 删除前读取出库单，用于解链关联订单
+    let outbound = null;
+    try {
+      const res = await db.collection('outbound_records').doc(_id).get();
+      outbound = res && res.data || null;
+    } catch (_) { outbound = null; }
+
     // 删除出库记录
     await db.collection('outbound_records').doc(_id).remove();
+
+    // 解链：清除关联订单的 outboundRecordId；若订单是被本出库单发货的，撤回为未发货，允许重新生成出库单
+    if (outbound && Array.isArray(outbound.orderIds) && outbound.orderIds.length > 0) {
+      const wasCompleted = outbound.outboundStatus === 'completed';
+      const outboundTracking = String(outbound.trackingNumber || '').trim();
+      for (const oid of outbound.orderIds) {
+        try {
+          const oRes = await db.collection('orders').doc(oid).get();
+          const o = oRes && oRes.data;
+          if (!o) continue;
+          const update = { outboundRecordId: '' };
+          if (wasCompleted && o.status === 'shipped' && String(o.trackingNumber || '').trim() === outboundTracking) {
+            update.status = 'unshipped';
+            update.trackingNumber = '';
+          }
+          await db.collection('orders').doc(oid).update({ data: update });
+        } catch (_) { /* 单条解链失败忽略，不阻断删除 */ }
+      }
+    }
 
     return {
       success: true,
