@@ -20,6 +20,7 @@ export const CHANNEL_TYPE_MAP: Record<string, string> = {
  * 2. 订单字典（key=英文枚举，value=中文展示文本）
  * ================================================================ */
 export const ORDER_STATUS_MAP = {
+  unshipped: '未发货',
   shipped: '已发货',
   noShip: '不用发货',
   returnReceived: '退货已收',
@@ -32,6 +33,14 @@ export const RETURN_STATUS_MAP = {
   inTransit: '产品运输途中',
   notReturned: '客户未退回',
 } as const;
+
+/** 出库单状态（系统管理，非用户可编辑字典） */
+export const OUTBOUND_STATUS_MAP = {
+  pending: '待出库',
+  completed: '已出库',
+} as const;
+
+export type OutboundStatus = keyof typeof OUTBOUND_STATUS_MAP;
 
 /** 从 ORDER_STATUS_MAP 导出的状态枚举值类型 */
 export type OrderStatus = keyof typeof ORDER_STATUS_MAP;

@@ -61,6 +61,14 @@ export interface OutboundRecord {
   phonePhotos?: string[];
   hasIssue?: boolean;
   remark?: string;
+  // 订单↔出库单关联（见 docs/order-outbound-linkage-design.md）
+  outboundStatus?: 'pending' | 'completed'; // 待出库/已出库；无此字段的历史记录视为 completed
+  orderIds?: string[];                        // 关联订单 _id（支持合并多订单）
+  shippingMethod?: string;                    // 快递方式: prepaid|cod|pickup（生成时统一选择）
+  source?: 'order' | 'manual';               // 来源：订单生成/手工创建；缺省按 manual
+  consignee?: string;                         // 收货人（取自订单）
+  consigneePhone?: string;                    // 收货人电话
+  consigneeAddress?: string;                  // 收货人地址
   createTime?: { $date: string };
 }
 
@@ -111,6 +119,7 @@ export interface OutboundFilters {
   customerName?: string;
   trackingNumber?: string;
   model?: string;
+  outboundStatus?: string;   // 出库状态过滤: pending | completed（空=全部）
   startDate?: string;
   endDate?: string;
 }
@@ -210,6 +219,8 @@ export interface OrderRecord {
   attachments: OrderAttachment[];   // 订单附件
   returnStatus?: string;            // 归还状态（租后发货/租后退货时使用）
   returnTrackingNumbers?: string;   // 归还物流单号（多个逗号分隔，归还状态=运输途中时必填）
+  needsOutbound?: boolean;          // 是否需要出库（默认按订单类型判定，见出库单关联设计文档）
+  outboundRecordId?: string;        // 关联的出库单 _id（生成出库单后回写，防重复生成+完成发货回填）
   createTime?: { $date: string };
 }
 

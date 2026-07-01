@@ -213,8 +213,11 @@
 ### 8.5 小程序 UI
 
 - **首页**：把现有 `pendingOutboundTotal` 计数扩成**待出库卡片列表**（`queryRecords` `type='outbound'` `pendingOnly=true`）。卡片显示客户、型号汇总、快递方式、备注，点击进「完成发货」。
-- **完成发货表单**：预填出库单信息，录入 `trackingNumber` + 拍照 `phonePhotos` → 调 `completeOutbound`。
+- **完成发货表单**：预填出库单信息，录入 `trackingNumber`（+ 拍照 `phonePhotos`）→ 调 `completeOutbound`。
 - **手工创建出库单**（`source='manual'`）：阶段2，复用现有出库录入表单，`orderIds=[]`。
+
+> **现状（已存在脚手架）**：小程序首页已有「待处理出库单」入口卡（计数徽标）→ 跳 `query` 页按 `pendingOnly` 列出待出库记录（状态徽标 未出库/已出库）；`query` 详情弹窗已有「完成发货」区块（单号输入 + 按钮），调用 `completeOutbound`。**阶段1 只需部署 `completeOutbound` 云函数即闭环**，无需新增小程序代码。
+> **阶段2 增强**：完成发货时的**拍照上传**（现有完成流程为纯单号，未含照片）。
 
 ### 8.6 权限（定 §7.3）
 
@@ -222,7 +225,7 @@
 | --- | --- |
 | 保存 `needsOutbound` | 沿用 `orders:create` / `orders:update` |
 | 生成出库单 | `outbound:create` |
-| 完成发货（含回填订单） | `outbound:update` + `orders:update` |
+| 完成发货（含回填订单） | 仅 `outbound:update`（订单回填为系统副作用，不再单独要 `orders:update`，避免只有库存权限的仓管被拦） |
 | 手工创建出库单 | `outbound:create` |
 
 ### 8.7 删除 / 解链（定 §7.2）

@@ -153,6 +153,31 @@ export function useOrders() {
     }
   }, []);
 
+  /** 由订单生成待出库单（单/多订单合并），成功后回填 outboundRecordId */
+  const generateOutbound = useCallback(async (
+    orderIds: string[],
+    shippingMethod: string,
+    remark?: string,
+  ): Promise<{ success: boolean; outboundId?: string; errMsg?: string }> => {
+    try {
+      const result = await callFunction<{ success: boolean; outboundId?: string; errMsg?: string }>('generateOutboundFromOrders', {
+        data: { orderIds, shippingMethod, remark: remark || '' },
+      });
+      if (result.success) {
+        setState(prev => ({
+          ...prev,
+          records: prev.records.map(r => orderIds.includes(r._id)
+            ? { ...r, outboundRecordId: result.outboundId || r._id }
+            : r),
+        }));
+      }
+      return result;
+    } catch (err) {
+      console.error('生成出库单失败:', err);
+      return { success: false, errMsg: String(err) };
+    }
+  }, []);
+
   /** 申请顺丰快递单 */
   const applySfExpress = useCallback(async (_id: string): Promise<ApplyExpressResult> => {
     try {
@@ -343,6 +368,7 @@ export function useOrders() {
     importOrders,
     deleteOrder,
     updateOrder,
+    generateOutbound,
     applySfExpress,
     querySfOrderResult,
     cancelSfExpress,

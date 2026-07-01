@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { Table, Button, Input, MessagePlugin, Dialog } from 'tdesign-react';
+import { Table, Button, Input, MessagePlugin, Dialog, Tag, Select } from 'tdesign-react';
 import { Search, RotateCcw } from 'lucide-react';
 import { OutboundRecord, OutboundFilters } from '../types';
+import { OUTBOUND_STATUS_MAP } from '../data/dict';
 import { useOutbound } from '../hooks/useOutbound';
 import { useLogs } from '../hooks/useLogs';
 import { useStorage } from '../hooks/useStorage';
@@ -84,6 +85,10 @@ export function OutboundList() {
 
   const columns = [
     { colKey: 'outboundDate', title: '出库日期', width: 110, cell: ({ row }: { row: OutboundRecord }) => formatDate(row.outboundDate, false) },
+    { colKey: 'outboundStatus', title: '状态', width: 80, cell: ({ row }: { row: OutboundRecord }) => {
+      const st = row.outboundStatus === 'pending' ? 'pending' : 'completed';
+      return <Tag theme={st === 'pending' ? 'warning' : 'success'} variant="light">{OUTBOUND_STATUS_MAP[st]}</Tag>;
+    } },
     { colKey: 'customerName', title: '客户名称', width: 140, ellipsis: true },
     { colKey: 'trackingNumber', title: '快递单号', width: 140, cell: ({ row }: { row: OutboundRecord }) => row.trackingNumber || '-' },
     { colKey: 'phoneModels', title: '手机型号', width: 200, cell: ({ row }: { row: OutboundRecord }) =>
@@ -118,6 +123,13 @@ export function OutboundList() {
           <Input placeholder="客户名称" value={filters.customerName || ''} onChange={(val) => setFilters(prev => ({ ...prev, customerName: val as string }))} />
           <Input placeholder="快递单号" value={filters.trackingNumber || ''} onChange={(val) => setFilters(prev => ({ ...prev, trackingNumber: val as string }))} />
           <Input placeholder="手机型号" value={filters.model || ''} onChange={(val) => setFilters(prev => ({ ...prev, model: val as string }))} />
+          <Select placeholder="出库状态" clearable value={filters.outboundStatus || ''}
+            onChange={(val) => setFilters(prev => ({ ...prev, outboundStatus: (val as string) || '' }))}
+            options={[
+              { label: '全部', value: '' },
+              { label: OUTBOUND_STATUS_MAP.pending, value: 'pending' },
+              { label: OUTBOUND_STATUS_MAP.completed, value: 'completed' },
+            ]} />
           <input type="date" className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-primary" placeholder="开始日期" value={filters.startDate || ''} onChange={(e) => setFilters(prev => ({ ...prev, startDate: e.target.value }))} />
           <input type="date" className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-primary" placeholder="结束日期" value={filters.endDate || ''} onChange={(e) => setFilters(prev => ({ ...prev, endDate: e.target.value }))} />
           <div className="flex gap-2">

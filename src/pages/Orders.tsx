@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
-import { Table, Button, Input, Select, Tag, Dialog, MessagePlugin, Textarea } from 'tdesign-react';
+import { Table, Button, Input, Select, Tag, Dialog, MessagePlugin, Textarea, Switch } from 'tdesign-react';
 import { Search, RotateCcw, Upload, Download, Plus, Pencil, Trash2, Minus, X, ChevronRight, ChevronLeft, FileDown, Check } from 'lucide-react';
 import { OrderRecord, OrderFilters, InboundRecord, OutboundRecord, PhoneBrand, PhoneModelItem, ProductItem, TransferProductItem, OrderAttachment, PaymentSplit, dictToOptions, getDictLabel } from '../types';
 import { useOrders } from '../hooks/useOrders';
@@ -89,6 +89,7 @@ interface OrderFormData {
   attachments: OrderAttachment[];
   returnStatus: string;
   returnTrackingNumbers: string;
+  needsOutbound: boolean;
 }
 
 interface OrderWizardDictionaries {
@@ -134,15 +135,38 @@ const EMPTY_ORDER: OrderFormData = {
   attachments: [],
   returnStatus: '',
   returnTrackingNumbers: '',
+  needsOutbound: false,
 };
 
 const STATUS_TAG_THEME: Record<string, 'success' | 'warning' | 'danger' | 'default'> = {
   shipped: 'success',
+  unshipped: 'warning',
   unknown: 'default',
 };
 
 function isPendingShipmentStatus(status: string | undefined): boolean {
-  return status === 'unknown' || status === '--';
+  return status === 'unknown' || status === '--' || status === 'unshipped';
+}
+
+// 终态：不随「需要出库」开关改写的订单状态
+const TERMINAL_ORDER_STATUSES = new Set(['shipped', 'returnReceived', 'returnShipped']);
+
+/** 需要出库 → 未发货；不需要 → 不用发货；终态保持不变 */
+function deriveOutboundStatus(needsOutbound: boolean, prevStatus: string): string {
+  if (TERMINAL_ORDER_STATUSES.has(prevStatus)) return prevStatus;
+  return needsOutbound ? 'unshipped' : 'noShip';
+}
+
+/** 统一设置 needsOutbound 并联动订单状态、清理发货字段 */
+function applyNeedsOutbound(prev: OrderFormData, needsOutbound: boolean): OrderFormData {
+  const status = deriveOutboundStatus(needsOutbound, prev.status);
+  return {
+    ...prev,
+    needsOutbound,
+    status,
+    shippingFee: status === 'shipped' ? prev.shippingFee : '',
+    trackingNumber: status === 'shipped' ? prev.trackingNumber : '',
+  };
 }
 
 function isExpressApplicableStatus(status: string | undefined): boolean {
@@ -154,16 +178,25 @@ function isVirtualProductOrder(products: ProductItem[]): boolean {
   return selectedBrands.length > 0 && selectedBrands.every(brand => brand === '虚拟产品');
 }
 
+// 需要出库的订单类型（仅按订单类型判定，见 docs/order-outbound-linkage-design.md §4.1）
+const OUTBOUND_ORDER_TYPES = new Set(['newBusiness', 'postRentalShip']);
+
+/** 计算「需要出库」默认值：虚拟货品单强制 false，否则按订单类型 */
+function defaultNeedsOutbound(orderType: string, products: ProductItem[]): boolean {
+  if (isVirtualProductOrder(products)) return false;
+  return OUTBOUND_ORDER_TYPES.has(orderType);
+}
+
 function applyVirtualProductStatus(prev: OrderFormData, products: ProductItem[]): OrderFormData {
   const wasVirtualProductOrder = isVirtualProductOrder(prev.products);
   const isVirtualOrder = isVirtualProductOrder(products);
 
   if (isVirtualOrder) {
-    return { ...prev, products, status: 'noShip', shippingFee: '', trackingNumber: '' };
+    return { ...prev, products, status: 'noShip', shippingFee: '', trackingNumber: '', needsOutbound: false };
   }
 
   if (wasVirtualProductOrder && prev.status === 'noShip') {
-    return { ...prev, products, status: 'unknown' };
+    return applyNeedsOutbound({ ...prev, products }, defaultNeedsOutbound(prev.orderType, products));
   }
 
   return { ...prev, products };
@@ -335,6 +368,8 @@ function buildEditFormFromRecord(record: OrderRecord): OrderFormData {
     attachments: record.attachments || [],
     returnStatus: record.returnStatus || '',
     returnTrackingNumbers: record.returnTrackingNumbers || '',
+    // 旧数据无 needsOutbound 时按订单类型兜底（noShip=虚拟单→false）
+    needsOutbound: record.needsOutbound ?? (record.status === 'noShip' ? false : OUTBOUND_ORDER_TYPES.has(record.orderType)),
   };
 }
 
@@ -439,6 +474,13 @@ export function Orders() {
   const [shipPhotoLoading, setShipPhotoLoading] = useState(false);
   const [shipPhotoTarget, setShipPhotoTarget] = useState<OutboundRecord | null>(null);
   const [shipPhotoUrls, setShipPhotoUrls] = useState<Array<{ fileID: string; tempFileURL: string }>>([]);
+  // 生成出库单弹窗（支持单订单 / 合并多订单）
+  const [genOutVisible, setGenOutVisible] = useState(false);
+  const [genOutOrders, setGenOutOrders] = useState<OrderRecord[]>([]);
+  const [genOutShippingMethod, setGenOutShippingMethod] = useState('prepaid');
+  const [genOutRemark, setGenOutRemark] = useState('');
+  const [genOutSubmitting, setGenOutSubmitting] = useState(false);
+  const [selectedRowKeys, setSelectedRowKeys] = useState<Array<string | number>>([]);
   const [afterSaleInboundVisible, setAfterSaleInboundVisible] = useState(false);
   const [afterSaleInboundTarget, setAfterSaleInboundTarget] = useState<OrderRecord | null>(null);
   const [afterSaleInboundCustomerName, setAfterSaleInboundCustomerName] = useState('');
@@ -723,8 +765,6 @@ export function Orders() {
     }
     if (addStep === 4) {
       const { status } = getEffectiveShipmentFields(addForm);
-      if (status === 'shipped' && !addForm.shippingFee) { MessagePlugin.warning('已发货状态请选择邮寄结算方式'); return; }
-      if (status === 'shipped' && !addForm.trackingNumber) { MessagePlugin.warning('已发货状态请填写物流单号'); return; }
     }
     if (addStep === 5) {
       const needReturnStatus = addForm.orderType === 'postRentalShip' || addForm.orderType === 'postRentalReturn';
@@ -825,6 +865,8 @@ export function Orders() {
         attachments,
         returnStatus: addForm.returnStatus || '',
         returnTrackingNumbers: addForm.returnTrackingNumbers || '',
+        needsOutbound: addForm.needsOutbound,
+        outboundRecordId: '',
       }));
       const result = await orders.importOrders(newRecords);
       if (result.success) {
@@ -904,6 +946,49 @@ export function Orders() {
       setShipLoading(false);
     }
   }, [findOutboundRecords]);
+
+  const openGenerateDialog = useCallback((records: OrderRecord[]) => {
+    setGenOutOrders(records);
+    setGenOutShippingMethod(records[0]?.shippingFee || 'prepaid');
+    setGenOutRemark('');
+    setGenOutVisible(true);
+  }, []);
+
+  const handleGenerateOutboundOpen = useCallback((record: OrderRecord) => {
+    openGenerateDialog([record]);
+  }, [openGenerateDialog]);
+
+  // 合并多订单生成一个出库单：校验同客户、均需出库、均未生成、均待发货
+  const handleMergeGenerateOpen = useCallback(() => {
+    const selected = orders.getAllRecords().filter(r => selectedRowKeys.includes(r._id));
+    if (selected.length < 2) { MessagePlugin.warning('请至少选择 2 条订单合并'); return; }
+    const bad = selected.find(r => !r.needsOutbound || !isPendingShipmentStatus(r.status) || r.outboundRecordId);
+    if (bad) { MessagePlugin.warning('所选订单须均为「需要出库 + 未发货 + 未生成出库单」'); return; }
+    const customer = (selected[0].customerName || '').trim();
+    if (!selected.every(r => (r.customerName || '').trim() === customer)) {
+      MessagePlugin.warning('合并的订单必须属于同一客户'); return;
+    }
+    openGenerateDialog(selected);
+  }, [orders, selectedRowKeys, openGenerateDialog]);
+
+  const handleConfirmGenerateOutbound = useCallback(async () => {
+    if (genOutOrders.length === 0) return;
+    if (!genOutShippingMethod) { MessagePlugin.warning('请选择快递方式'); return; }
+    setGenOutSubmitting(true);
+    try {
+      const result = await orders.generateOutbound(genOutOrders.map(o => o._id), genOutShippingMethod, genOutRemark);
+      if (result.success) {
+        MessagePlugin.success(genOutOrders.length > 1 ? '已合并生成待出库单' : '已生成待出库单');
+        setGenOutVisible(false);
+        setGenOutOrders([]);
+        setSelectedRowKeys([]);
+      } else {
+        MessagePlugin.error(result.errMsg || '生成出库单失败');
+      }
+    } finally {
+      setGenOutSubmitting(false);
+    }
+  }, [genOutOrders, genOutShippingMethod, genOutRemark, orders]);
 
   const handleSelectShipRecord = useCallback((record: OutboundRecord) => {
     if (!record.trackingNumber) {
@@ -1096,8 +1181,6 @@ export function Orders() {
     }
     if (editStep === 4) {
       const { status } = getEffectiveShipmentFields(editForm);
-      if (status === 'shipped' && !editForm.shippingFee) { MessagePlugin.warning('已发货状态请选择邮寄结算方式'); return; }
-      if (status === 'shipped' && !editForm.trackingNumber) { MessagePlugin.warning('已发货状态请填写物流单号'); return; }
     }
     if (editStep === 5) {
       const needReturnStatus = editForm.orderType === 'postRentalShip' || editForm.orderType === 'postRentalReturn';
@@ -1154,6 +1237,7 @@ export function Orders() {
         attachments: allAttachments,
         returnStatus: editForm.returnStatus || '',
         returnTrackingNumbers: editForm.returnTrackingNumbers || '',
+        needsOutbound: editForm.needsOutbound,
       });
 
       const flatData = buildFlatData(editForm.products[0] || EMPTY_PRODUCT);
@@ -1212,6 +1296,7 @@ export function Orders() {
   };
 
   const columns = useMemo(() => [
+    { colKey: 'row-select', type: 'multiple' as const, width: 46 },
     { colKey: 'serialNumber', title: '序号', width: 60 },
     { colKey: 'date', title: '日期', width: 100, cell: ({ row }: { row: OrderRecord }) => formatDate(row.date, false) },
     { colKey: 'orderType', title: '订单类型', width: 90, cell: ({ row }: { row: OrderRecord }) => getDictLabel(ORDER_TYPE_MAP, row.orderType) || '-' },
@@ -1281,6 +1366,12 @@ export function Orders() {
             onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleEditOpen(row); }}>
             编辑
           </Button>
+          {row.needsOutbound && isPendingShipmentStatus(row.status) && !row.outboundRecordId && (
+            <Button variant="text" theme="primary" size="small"
+              onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleGenerateOutboundOpen(row); }}>
+              生成出库单
+            </Button>
+          )}
           {isPendingShipmentStatus(row.status) && (
             <Button variant="text" theme="primary" size="small"
               onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleShipOpen(row); }}>
@@ -1300,7 +1391,7 @@ export function Orders() {
         </div>
       ),
     },
-  ], [handleDetail, handleApplyExpress, handleQuerySfOrderResult, handleCancelSfExpress, handleEditOpen, handleShipOpen, handleAfterSaleInboundOpen, handleDeleteConfirm, applyingExpressId, queryingSfResultId, cancelingSfId, ORDER_TYPE_MAP, SALES_CHANNEL_MAP, ORDER_ATTRIBUTE_MAP, ORDER_STATUS_MAP]);
+  ], [handleDetail, handleApplyExpress, handleQuerySfOrderResult, handleCancelSfExpress, handleEditOpen, handleShipOpen, handleGenerateOutboundOpen, handleAfterSaleInboundOpen, handleDeleteConfirm, applyingExpressId, queryingSfResultId, cancelingSfId, ORDER_TYPE_MAP, SALES_CHANNEL_MAP, ORDER_ATTRIBUTE_MAP, ORDER_STATUS_MAP]);
 
   const displayRecords = orders.getPageRecords(orders.currentPage);
   const hasLoadedNextPage = orders.currentPage * PAGE_SIZE < orders.records.length;
@@ -1324,6 +1415,11 @@ export function Orders() {
           <p className="text-gray-500 mt-1">管理所有订单</p>
         </div>
         <div className="flex gap-2">
+          {selectedRowKeys.length >= 2 && (
+            <Button theme="primary" variant="outline" onClick={handleMergeGenerateOpen}>
+              合并生成出库单（{selectedRowKeys.length}）
+            </Button>
+          )}
           <Button theme="primary" icon={<Plus size={16} />} onClick={handleAddOpen}>
             新增订单
           </Button>
@@ -1397,6 +1493,8 @@ export function Orders() {
           loading={orders.loading}
           rowKey="_id"
           tableLayout="fixed"
+          selectedRowKeys={selectedRowKeys}
+          onSelectChange={(keys: Array<string | number>) => setSelectedRowKeys(keys)}
           hover
           stripe
           rowClassName={({ row }: { row: OrderRecord }) => {
@@ -1589,6 +1687,54 @@ export function Orders() {
           </div>
           <div className="rounded-lg border border-blue-100 bg-blue-50/60 p-3 text-blue-700">
             确认后将订单状态改为“已发货”，邮寄结算方式设为“{getDictLabel(SHIPPING_FEE_MAP, shipShippingFee)}”，并写入该快递单号。
+          </div>
+        </div>
+      </Dialog>
+
+      {/* 生成出库单弹窗（单订单 / 合并多订单） */}
+      <Dialog
+        header={genOutOrders.length > 1 ? `合并生成出库单（${genOutOrders.length} 条订单）` : '生成出库单'}
+        visible={genOutVisible}
+        onClose={() => { if (!genOutSubmitting) { setGenOutVisible(false); setGenOutOrders([]); } }}
+        width="480px"
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button disabled={genOutSubmitting} onClick={() => { setGenOutVisible(false); setGenOutOrders([]); }}>取消</Button>
+            <Button theme="primary" loading={genOutSubmitting} onClick={handleConfirmGenerateOutbound}>确认生成</Button>
+          </div>
+        }
+      >
+        <div className="space-y-3 text-sm">
+          <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 space-y-2">
+            <div><span className="text-gray-400">客户：</span><span className="text-gray-800">{genOutOrders[0]?.customerName || '-'}</span></div>
+            <div><span className="text-gray-400">收货人：</span><span className="text-gray-800">{genOutOrders[0]?.consignee || '-'}</span></div>
+            <div>
+              <span className="text-gray-400">货品：</span>
+              <div className="mt-1 space-y-1">
+                {genOutOrders.map(o => (
+                  <div key={o._id} className="text-gray-800">
+                    {[o.brand, o.productName, o.specification].filter(Boolean).join(' / ') || '-'} × {o.quantity ?? '-'}
+                    <span className="text-gray-400 ml-1">（单号 {o.serialNumber}）</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">快递方式 <span className="text-red-500">*</span></label>
+            <Select
+              placeholder="请选择快递方式"
+              value={genOutShippingMethod}
+              onChange={val => setGenOutShippingMethod(val as string)}
+              options={dictToOptions(SHIPPING_FEE_MAP)}
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">备注</label>
+            <Textarea placeholder="可填写出库备注（选填）" value={genOutRemark} onChange={val => setGenOutRemark(val as string)} />
+          </div>
+          <div className="rounded-lg border border-blue-100 bg-blue-50/60 p-3 text-blue-700">
+            确认后生成一条<b>待出库</b>记录{genOutOrders.length > 1 ? '（合并上述订单货品）' : ''}，交由小程序端完成发货并回填物流单号。
           </div>
         </div>
       </Dialog>
@@ -2350,7 +2496,8 @@ function AddOrderWizard({
                     });
                   }
                   updated.products = clearHiddenProductPaymentFields({ ...updated, products: updated.products || prev.products });
-                  return updated;
+                  // 订单类型联动「需要出库」默认值并驱动订单状态（用户后续可在收件人信息步手动改）
+                  return applyNeedsOutbound(updated, defaultNeedsOutbound(newType, updated.products));
                 });
               }} options={filteredOrderTypeOptions} />
             </div>
@@ -2549,61 +2696,62 @@ function AddOrderWizard({
       {step === 4 && (
         <div className="py-4">
           <h4 className="text-sm font-medium text-gray-600 mb-4">收件人信息</h4>
-          <div className="mb-3 p-3 bg-blue-50/50 rounded-lg border border-blue-100">
-            <div className="flex items-center gap-2 mb-2">
-              <span className="text-xs text-blue-600 font-medium">🧠 粘贴识别</span>
-              <span className="text-xs text-gray-400">粘贴包含姓名、电话、地址的文本，AI 自动识别填入</span>
-            </div>
-            <div className="flex gap-2">
-              <Textarea placeholder="例：张三 13800138000 北京市朝阳区建国路88号" value={pasteText}
-                onChange={val => setPasteText(val as string)} autosize={{ minRows: 1, maxRows: 3 }} className="flex-1" />
-              <Button theme="primary" size="small" loading={parsing} onClick={handleSmartParse}>识别</Button>
+
+          {/* 是否需要出库（驱动订单状态） */}
+          <div className="mb-4 p-3 rounded-lg border border-gray-200 bg-gray-50">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-sm text-gray-700">需要出库</div>
+                <div className="text-xs text-gray-400 mt-0.5">
+                  {virtualProductOrder
+                    ? '虚拟货品单，无需出库（订单状态：不用发货）'
+                    : (form.needsOutbound
+                      ? '需生成出库单发货（订单状态：未发货）'
+                      : '无需出库（订单状态：不用发货）')}
+                </div>
+              </div>
+              <Switch
+                value={!!form.needsOutbound}
+                disabled={virtualProductOrder}
+                onChange={val => onChange(prev => applyNeedsOutbound(prev, !!val))}
+              />
             </div>
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">收货人名称</label>
-              <Input placeholder="收货人名称"
-                value={form.consignee} onChange={val => updateField('consignee', val as string)} />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">收货人电话</label>
-              <Input placeholder="收货人电话"
-                value={form.consigneePhone} onChange={val => updateField('consigneePhone', val as string)} />
-            </div>
-            <div className="col-span-2">
-              <label className="block text-xs text-gray-500 mb-1">收货人地址</label>
-              <Input placeholder="收货人地址"
-                value={form.consigneeAddress} onChange={val => updateField('consigneeAddress', val as string)} />
-            </div>
-            {!virtualProductOrder && (
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">订单状态</label>
-                <Select placeholder="请选择" value={form.status || ''} onChange={val => {
-                  const newStatus = val as string;
-                  onChange(prev => ({
-                    ...prev,
-                    status: newStatus,
-                    shippingFee: newStatus === 'shipped' ? prev.shippingFee : '',
-                    trackingNumber: newStatus === 'shipped' ? prev.trackingNumber : '',
-                  }));
-                }} options={ORDER_STATUS_OPTIONS} />
+
+          {form.needsOutbound ? (
+            <>
+              <div className="mb-3 p-3 bg-blue-50/50 rounded-lg border border-blue-100">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-xs text-blue-600 font-medium">🧠 粘贴识别</span>
+                  <span className="text-xs text-gray-400">粘贴包含姓名、电话、地址的文本，AI 自动识别填入</span>
+                </div>
+                <div className="flex gap-2">
+                  <Textarea placeholder="例：张三 13800138000 北京市朝阳区建国路88号" value={pasteText}
+                    onChange={val => setPasteText(val as string)} autosize={{ minRows: 1, maxRows: 3 }} className="flex-1" />
+                  <Button theme="primary" size="small" loading={parsing} onClick={handleSmartParse}>识别</Button>
+                </div>
               </div>
-            )}
-            {form.status === 'shipped' && (
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">邮寄结算方式 <span className="text-red-500">*</span></label>
-                <Select placeholder="请选择" value={form.shippingFee || ''} onChange={val => updateField('shippingFee', val as string)} options={SHIPPING_FEE_OPTIONS} />
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">收货人名称</label>
+                  <Input placeholder="收货人名称"
+                    value={form.consignee} onChange={val => updateField('consignee', val as string)} />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">收货人电话</label>
+                  <Input placeholder="收货人电话"
+                    value={form.consigneePhone} onChange={val => updateField('consigneePhone', val as string)} />
+                </div>
+                <div className="col-span-2">
+                  <label className="block text-xs text-gray-500 mb-1">收货人地址</label>
+                  <Input placeholder="收货人地址"
+                    value={form.consigneeAddress} onChange={val => updateField('consigneeAddress', val as string)} />
+                </div>
               </div>
-            )}
-            {form.status === 'shipped' && (
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">物流单号 <span className="text-red-500">*</span></label>
-                <Input placeholder="物流单号"
-                  value={form.trackingNumber} onChange={val => updateField('trackingNumber', val as string)} />
-              </div>
-            )}
-          </div>
+            </>
+          ) : (
+            <div className="text-xs text-gray-400 p-3">该订单无需出库，无需填写收件人信息。</div>
+          )}
         </div>
       )}
 
