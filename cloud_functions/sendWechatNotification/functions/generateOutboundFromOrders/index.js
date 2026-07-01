@@ -185,6 +185,7 @@ exports.main = async (event) => {
         orderIds,
         shippingMethod,
         remark,
+        salesperson: first.salesperson || '',
         consignee: first.consignee || '',
         consigneePhone: first.consigneePhone || '',
         consigneeAddress: first.consigneeAddress || '',
