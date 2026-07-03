@@ -178,13 +178,22 @@ export interface OrderRecord {
   channelCategory: string;          // 渠道类别
   onlineOrderNumber: string;        // 网店订单号
   customerName: string;             // 客户名称
-  brand: string;                    // 品牌
-  productName: string;              // 货品名称
-  specification: string;            // 规格
-  quantity: number;                 // 数量
-  unitPrice: number;                // 单价
-  amount: number;                   // 金额
-  paymentAccount: string;           // 收款账户
+  products?: ProductItem[];         // 货品明细（新结构：一条订单多条货品）
+  /** @deprecated 旧扁平结构单货品字段，仅兼容未迁移数据；读取货品请用 getOrderProducts() */
+  brand?: string;                   // 品牌
+  /** @deprecated 见 brand */
+  productName?: string;             // 货品名称
+  /** @deprecated 见 brand */
+  specification?: string;           // 规格
+  /** @deprecated 见 brand */
+  quantity?: number;                // 数量
+  /** @deprecated 见 brand */
+  unitPrice?: number;               // 单价
+  /** @deprecated 见 brand */
+  amount?: number;                  // 金额
+  /** @deprecated 见 brand */
+  paymentAccount?: string;          // 收款账户
+  /** @deprecated 见 brand */
   paymentSplits?: PaymentSplit[] | string; // 多账户收款明细（兼容旧数据）
   trackingNumber: string;           // 物流单号
   expressProvider?: string;         // 快递服务商

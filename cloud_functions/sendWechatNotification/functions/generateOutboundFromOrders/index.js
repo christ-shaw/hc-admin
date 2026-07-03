@@ -96,11 +96,25 @@ function isPendingShipment(status) {
   return s === 'unknown' || s === '--' || s === '' || s === 'unshipped';
 }
 
-// 订单货品 → model 字符串（与小程序拼法一致：规格非"默认"时带规格）
-function buildModel(order) {
-  const brand = String(order.brand || '').trim();
-  const product = String(order.productName || '').trim();
-  const spec = String(order.specification || '').trim();
+// 读取订单货品明细：新结构 products 数组，旧扁平字段回退为单货品
+function getOrderProducts(order) {
+  if (Array.isArray(order.products) && order.products.length > 0) return order.products;
+  if (order.brand || order.productName || order.quantity) {
+    return [{
+      brand: order.brand || '',
+      productName: order.productName || '',
+      specification: order.specification || '',
+      quantity: Number(order.quantity) || 0,
+    }];
+  }
+  return [];
+}
+
+// 货品条目 → model 字符串（与小程序拼法一致：规格非"默认"时带规格）
+function buildModel(item) {
+  const brand = String(item.brand || '').trim();
+  const product = String(item.productName || '').trim();
+  const spec = String(item.specification || '').trim();
   const base = [brand, product].filter(Boolean).join(' / ');
   if (!base) return '';
   return spec && spec !== '默认' ? `${base} / ${spec}` : base;
@@ -111,14 +125,16 @@ function aggregatePhoneModels(orders) {
   const map = new Map();
   const order = [];
   for (const o of orders) {
-    const model = buildModel(o);
-    if (!model) continue;
-    const qty = Number(o.quantity) || 0;
-    if (map.has(model)) {
-      map.set(model, map.get(model) + qty);
-    } else {
-      map.set(model, qty);
-      order.push(model);
+    for (const item of getOrderProducts(o)) {
+      const model = buildModel(item);
+      if (!model) continue;
+      const qty = Number(item.quantity) || 0;
+      if (map.has(model)) {
+        map.set(model, map.get(model) + qty);
+      } else {
+        map.set(model, qty);
+        order.push(model);
+      }
     }
   }
   return order.map(model => ({ model, quantity: map.get(model) }));

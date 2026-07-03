@@ -7,6 +7,7 @@ import { useOrders } from '../hooks/useOrders';
 import { usePhoneModels } from '../hooks/usePhoneModels';
 import { formatDate, getTotalQuantity } from '../utils/format';
 import { parseOrderExcel, exportOrderExcel } from '../utils/orderExcel';
+import { getOrderProducts, getOrderTotalAmount, getOrderTotalQuantity, hasUnreceivedPayment } from '../utils/orderProducts';
 import { getBrandLabel, getProductLabel } from '../data/dict';
 import {
   parseConsigneeInfo,
@@ -300,10 +301,6 @@ function formatPaymentSplits(source: Pick<OrderRecord, 'paymentAccount' | 'amoun
   return splits.map(split => `${split.account || '-'} ¥${split.amount || 0}`).join('；');
 }
 
-function hasUnreceivedPayment(record: OrderRecord): boolean {
-  return record.paymentAccount === '未收款' || normalizePaymentSplits(record as unknown as ProductItem).some(split => split.account === '未收款');
-}
-
 function serializeProductForSave(product: ProductItem): ProductItem {
   const paymentSplits = normalizePaymentSplits(product);
   return {
@@ -355,16 +352,11 @@ function buildEditFormFromRecord(record: OrderRecord): OrderFormData {
     status: record.status,
     customerRemark: record.customerRemark,
     transferProducts,
-    products: [{
-      brand: record.brand,
-      productName: record.productName,
-      specification: record.specification,
-      quantity: record.quantity,
-      unitPrice: record.unitPrice,
-      amount: record.amount,
-      paymentAccount: record.paymentAccount,
-      paymentSplits: normalizePaymentSplits(record as unknown as ProductItem),
-    }],
+    products: (() => {
+      const items = getOrderProducts(record);
+      if (items.length === 0) return [{ ...EMPTY_PRODUCT }];
+      return items.map(item => ({ ...item, paymentSplits: normalizePaymentSplits(item) }));
+    })(),
     attachments: record.attachments || [],
     returnStatus: record.returnStatus || '',
     returnTrackingNumbers: record.returnTrackingNumbers || '',
@@ -836,8 +828,8 @@ export function Orders() {
 
       const firstTransfer = addForm.transferProducts[0];
       const shipmentFields = getEffectiveShipmentFields(addForm);
-      const newRecords: OrderRecord[] = addForm.products.map((product, index) => ({
-        _id: `manual_${Date.now()}_${index}`,
+      const newRecord: OrderRecord = {
+        _id: `manual_${Date.now()}`,
         serialNumber,
         date: addForm.date,
         orderSource: addForm.orderSource,
@@ -848,7 +840,7 @@ export function Orders() {
         channelCategory: addForm.channelCategory,
         onlineOrderNumber: addForm.onlineOrderNumber,
         customerName: addForm.customerName,
-        ...serializeProductForSave(product),
+        products: addForm.products.map(serializeProductForSave),
         trackingNumber: shipmentFields.trackingNumber,
         consignee: addForm.consignee,
         consigneePhone: addForm.consigneePhone,
@@ -867,10 +859,10 @@ export function Orders() {
         returnTrackingNumbers: addForm.returnTrackingNumbers || '',
         needsOutbound: addForm.needsOutbound,
         outboundRecordId: '',
-      }));
-      const result = await orders.importOrders(newRecords);
+      };
+      const result = await orders.importOrders([newRecord]);
       if (result.success) {
-        MessagePlugin.success(`新增订单成功，共 ${newRecords.length} 条`);
+        MessagePlugin.success(newRecord.products && newRecord.products.length > 1 ? `新增订单成功，含 ${newRecord.products.length} 条货品` : '新增订单成功');
         setAddVisible(false);
         setAddStep(1);
         setAddForm(EMPTY_ORDER);
@@ -1209,7 +1201,7 @@ export function Orders() {
 
       const firstTransfer = editForm.transferProducts[0];
       const shipmentFields = getEffectiveShipmentFields(editForm);
-      const buildFlatData = (product: ProductItem): Omit<OrderRecord, '_id' | 'createTime'> => ({
+      const updateData: Omit<OrderRecord, '_id' | 'createTime'> = {
         serialNumber: editForm.serialNumber,
         date: editForm.date,
         orderSource: editForm.orderSource,
@@ -1220,7 +1212,16 @@ export function Orders() {
         channelCategory: editForm.channelCategory,
         onlineOrderNumber: editForm.onlineOrderNumber,
         customerName: editForm.customerName,
-        ...serializeProductForSave(product),
+        products: editForm.products.map(serializeProductForSave),
+        // 清空旧扁平货品字段，避免与 products 并存产生歧义
+        brand: '',
+        productName: '',
+        specification: '',
+        quantity: 0,
+        unitPrice: 0,
+        amount: 0,
+        paymentAccount: '',
+        paymentSplits: [],
         trackingNumber: shipmentFields.trackingNumber,
         consignee: editForm.consignee,
         consigneePhone: editForm.consigneePhone,
@@ -1238,25 +1239,11 @@ export function Orders() {
         returnStatus: editForm.returnStatus || '',
         returnTrackingNumbers: editForm.returnTrackingNumbers || '',
         needsOutbound: editForm.needsOutbound,
-      });
+      };
 
-      const flatData = buildFlatData(editForm.products[0] || EMPTY_PRODUCT);
-      const success = await orders.updateOrder(editId, flatData);
+      const success = await orders.updateOrder(editId, updateData);
       if (success) {
-        const extraProducts = editForm.products.slice(1);
-        if (extraProducts.length > 0) {
-          const timestamp = Date.now();
-          const extraRecords: OrderRecord[] = extraProducts.map((product, index) => ({
-            _id: `manual_${timestamp}_${index}`,
-            ...buildFlatData(product),
-          }));
-          const result = await orders.importOrders(extraRecords);
-          if (!result.success) {
-            MessagePlugin.error('主订单已修改，但新增货品保存失败: ' + (result.errMsg || '未知错误'));
-            return;
-          }
-        }
-        MessagePlugin.success(extraProducts.length > 0 ? `修改订单成功，并新增 ${extraProducts.length} 条货品记录` : '修改订单成功');
+        MessagePlugin.success('修改订单成功');
         setEditVisible(false);
         setEditStep(1);
         setEditAttachFiles([]);
@@ -1316,13 +1303,21 @@ export function Orders() {
     {
       colKey: 'productInfo', title: '货品名称/规格', width: 160,
       cell: ({ row }: { row: OrderRecord }) => {
-        const name = row.productName || '';
-        const spec = row.specification && row.specification !== '默认' ? ` ${row.specification}` : '';
-        return name ? `${getProductLabel(name)}${spec}` : '-';
+        const items = getOrderProducts(row).filter(item => item.productName || item.brand);
+        if (items.length === 0) return '-';
+        return (
+          <div>
+            {items.map((item, index) => {
+              const spec = item.specification && item.specification !== '默认' ? ` ${item.specification}` : '';
+              const label = item.productName ? `${getProductLabel(item.productName)}${spec}` : getBrandLabel(item.brand);
+              return <div key={index} className="truncate">{label || '-'}</div>;
+            })}
+          </div>
+        );
       },
     },
-    { colKey: 'quantity', title: '数量', width: 60, cell: ({ row }: { row: OrderRecord }) => row.quantity || '-' },
-    { colKey: 'amount', title: '金额', width: 80, cell: ({ row }: { row: OrderRecord }) => row.amount ? `¥${row.amount}` : '-' },
+    { colKey: 'quantity', title: '数量', width: 60, cell: ({ row }: { row: OrderRecord }) => getOrderTotalQuantity(row) || '-' },
+    { colKey: 'amount', title: '金额', width: 80, cell: ({ row }: { row: OrderRecord }) => { const total = getOrderTotalAmount(row); return total ? `¥${total}` : '-'; } },
     {
       colKey: 'status', title: '订单状态', width: 80,
       cell: ({ row }: { row: OrderRecord }) => {
@@ -1532,13 +1527,21 @@ export function Orders() {
             <DetailRow label="人员" value={currentRecord.salesperson} />
             <DetailRow label="渠道类别" value={currentRecord.channelCategory} />
             {currentRecord.channelCategory === 'platform' && <DetailRow label="网店订单号" value={currentRecord.onlineOrderNumber} />}
-            <DetailRow label="品牌" value={getBrandLabel(currentRecord.brand)} />
-            <DetailRow label="货品名称" value={getProductLabel(currentRecord.productName)} />
-            <DetailRow label="规格" value={currentRecord.specification} />
-            <DetailRow label="数量" value={currentRecord.quantity} />
-            {shouldShowProductPaymentFields(currentRecord.orderSource, currentRecord.orderType, currentRecord.orderAttribute, currentRecord.brand) && <DetailRow label="单价" value={currentRecord.unitPrice ? `¥${currentRecord.unitPrice}` : '-'} />}
-            {shouldShowProductPaymentFields(currentRecord.orderSource, currentRecord.orderType, currentRecord.orderAttribute, currentRecord.brand) && <DetailRow label="金额" value={currentRecord.amount ? `¥${currentRecord.amount}` : '-'} />}
-            {shouldShowProductPaymentFields(currentRecord.orderSource, currentRecord.orderType, currentRecord.orderAttribute, currentRecord.brand) && <DetailRow label="收款账户" value={formatPaymentSplits(currentRecord)} />}
+            {getOrderProducts(currentRecord).map((product, index, items) => {
+              const showPayment = shouldShowProductPaymentFields(currentRecord.orderSource, currentRecord.orderType, currentRecord.orderAttribute, product.brand);
+              return (
+                <div key={index} className={items.length > 1 ? 'border-l-2 border-green-300 pl-3 my-1' : ''}>
+                  {items.length > 1 && <div className="text-xs text-green-600 font-medium mb-1">货品 {index + 1}</div>}
+                  <DetailRow label="品牌" value={getBrandLabel(product.brand)} />
+                  <DetailRow label="货品名称" value={getProductLabel(product.productName)} />
+                  <DetailRow label="规格" value={product.specification} />
+                  <DetailRow label="数量" value={product.quantity} />
+                  {showPayment && <DetailRow label="单价" value={product.unitPrice ? `¥${product.unitPrice}` : '-'} />}
+                  {showPayment && <DetailRow label="金额" value={product.amount ? `¥${product.amount}` : '-'} />}
+                  {showPayment && <DetailRow label="收款账户" value={formatPaymentSplits(product)} />}
+                </div>
+              );
+            })}
             <DetailRow label="收货人名称" value={currentRecord.consignee} />
             <DetailRow label="收货人电话" value={currentRecord.consigneePhone} />
             <DetailRow label="收货人地址" value={currentRecord.consigneeAddress} />
@@ -1711,12 +1714,16 @@ export function Orders() {
             <div>
               <span className="text-gray-400">货品：</span>
               <div className="mt-1 space-y-1">
-                {genOutOrders.map(o => (
-                  <div key={o._id} className="text-gray-800">
-                    {[o.brand, o.productName, o.specification].filter(Boolean).join(' / ') || '-'} × {o.quantity ?? '-'}
-                    <span className="text-gray-400 ml-1">（单号 {o.serialNumber}）</span>
-                  </div>
-                ))}
+                {genOutOrders.flatMap(o => {
+                  const items = getOrderProducts(o);
+                  const rows = items.length > 0 ? items : [undefined];
+                  return rows.map((item, index) => (
+                    <div key={`${o._id}_${index}`} className="text-gray-800">
+                      {item ? ([item.brand, item.productName, item.specification].filter(Boolean).join(' / ') || '-') : '-'} × {item?.quantity ?? '-'}
+                      <span className="text-gray-400 ml-1">（单号 {o.serialNumber}）</span>
+                    </div>
+                  ));
+                })}
               </div>
             </div>
           </div>
@@ -1887,9 +1894,12 @@ export function Orders() {
               { colKey: 'orderType', title: '订单类型', width: 90 },
               { colKey: 'salesChannel', title: '销售渠道', width: 90 },
               { colKey: 'customerName', title: '客户', width: 100 },
-              { colKey: 'productName', title: '货品名称', width: 120 },
-              { colKey: 'quantity', title: '数量', width: 60 },
-              { colKey: 'amount', title: '金额', width: 80 },
+              {
+                colKey: 'productName', title: '货品名称', width: 120,
+                cell: ({ row }: { row: OrderRecord }) => getOrderProducts(row).map(p => p.productName).filter(Boolean).join('、') || '-',
+              },
+              { colKey: 'quantity', title: '数量', width: 60, cell: ({ row }: { row: OrderRecord }) => getOrderTotalQuantity(row) || '-' },
+              { colKey: 'amount', title: '金额', width: 80, cell: ({ row }: { row: OrderRecord }) => getOrderTotalAmount(row) || '-' },
               { colKey: 'status', title: '状态', width: 80 },
             ]}
             rowKey="_id"

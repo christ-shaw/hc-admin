@@ -189,6 +189,21 @@
       "name": "updateCompany",
       "handler": "index.main",
       "runtime": "Nodejs18.15"
+    },
+    {
+      "name": "generateOutboundFromOrders",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
+      "name": "completeOutbound",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
+      "name": "migrateOrdersToProducts",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
     }
   ],
   "framework": {

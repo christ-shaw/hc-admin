@@ -24,6 +24,7 @@ import {
 import { useNavigate, useLocation } from 'react-router-dom';
 import { getCurrentUser, signOut, callFunction } from '../lib/cloudbase';
 import { usePermission } from '../contexts/PermissionContext';
+import { hasUnreceivedPayment, OrderProductSource } from '../utils/orderProducts';
 
 const { Header, Content, Aside } = TLayout;
 
@@ -48,10 +49,8 @@ const navItems = [
 
 type NavItem = typeof navItems[number];
 
-interface OrderMessageRecord {
+interface OrderMessageRecord extends OrderProductSource {
   salesperson?: string;
-  paymentAccount?: string;
-  paymentSplits?: Array<{ account?: string }> | string;
   orderType?: string;
   returnStatus?: string;
 }
@@ -67,24 +66,6 @@ const ORDER_MESSAGE_MAX_SCAN = 10000;
 
 function getUserDisplayName(user: { id?: string; user_metadata?: { username?: string; nickName?: string } } | null) {
   return user?.user_metadata?.nickName || user?.user_metadata?.username || user?.id?.slice(0, 8) || '';
-}
-
-function hasUnreceivedPayment(order: OrderMessageRecord) {
-  if (order.paymentAccount === '未收款') return true;
-  const value = order.paymentSplits;
-  const splits = Array.isArray(value)
-    ? value
-    : typeof value === 'string'
-      ? (() => {
-          try {
-            const parsed = JSON.parse(value);
-            return Array.isArray(parsed) ? parsed : [];
-          } catch {
-            return [];
-          }
-        })()
-      : [];
-  return splits.some(split => split?.account === '未收款');
 }
 
 export function AppLayout({ children }: { children: React.ReactNode }) {

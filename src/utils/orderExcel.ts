@@ -1,6 +1,10 @@
 import * as XLSX from 'xlsx';
-import { OrderRecord, PaymentSplit } from '../types';
+import { OrderRecord, PaymentSplit, ProductItem } from '../types';
 import { getBrandLabel, getDictLabel, getProductLabel, ORDER_SOURCE_MAP, ORDER_ATTRIBUTE_MAP, ORDER_TYPE_MAP, SALES_CHANNEL_MAP, CHANNEL_CATEGORY_MAP, ORDER_STATUS_MAP } from '../data/dict';
+import { getOrderProducts } from './orderProducts';
+
+/** 货品级字段（Excel 一行一条货品，其余列为订单公共字段） */
+const PRODUCT_FIELD_KEYS = new Set<keyof OrderRecord>(['brand', 'productName', 'specification', 'quantity', 'unitPrice', 'amount', 'paymentAccount']);
 
 /** Excel 列名 → OrderRecord 字段映射 */
 const EXCEL_COLUMN_MAP: Record<string, keyof OrderRecord> = {
@@ -121,12 +125,12 @@ function parsePaymentSplits(value: OrderRecord['paymentSplits']): PaymentSplit[]
   return [];
 }
 
-function formatPaymentAccount(record: OrderRecord): string {
-  const splits = parsePaymentSplits(record.paymentSplits)
+function formatPaymentAccount(item: ProductItem): string {
+  const splits = parsePaymentSplits(item.paymentSplits)
     .map(split => ({ account: String(split.account || '').trim(), amount: Math.max(0, Number(split.amount) || 0) }))
     .filter(split => split.account || split.amount > 0);
-  if (splits.length === 0) return record.paymentAccount || '';
-  if (splits.length === 1) return splits[0].account || record.paymentAccount || '';
+  if (splits.length === 0) return item.paymentAccount || '';
+  if (splits.length === 1) return splits[0].account || item.paymentAccount || '';
   return splits.map(split => `${split.account || '-'} ¥${split.amount || 0}`).join('；');
 }
 
@@ -142,7 +146,7 @@ export function parseOrderExcel(file: File): Promise<OrderRecord[]> {
         const sheet = workbook.Sheets[sheetName];
         const json = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '' });
 
-        const records: OrderRecord[] = json
+        const flatRows = json
           .map((row, idx) => {
             const record: Record<string, unknown> = { _id: `import_${idx}` };
             for (const [colName, fieldKey] of Object.entries(EXCEL_COLUMN_MAP)) {
@@ -153,7 +157,35 @@ export function parseOrderExcel(file: File): Promise<OrderRecord[]> {
           })
           .filter(r => r.date && r.date.trim() !== '');
 
-        resolve(records);
+        // 同一序号的多行 = 同一订单的多条货品，归组为一条带 products 数组的记录
+        const grouped: OrderRecord[] = [];
+        const bySerial = new Map<string, OrderRecord>();
+        for (const row of flatRows) {
+          const item: ProductItem = {
+            brand: row.brand || '',
+            productName: row.productName || '',
+            specification: row.specification || '',
+            quantity: Number(row.quantity) || 0,
+            unitPrice: Number(row.unitPrice) || 0,
+            amount: Number(row.amount) || 0,
+            paymentAccount: row.paymentAccount || '',
+          };
+          // 序号为空/0 的行无法归组，各自成单
+          const groupKey = row.serialNumber ? `${row.serialNumber}|${row.date}|${row.customerName}` : `__row_${row._id}`;
+          const existing = bySerial.get(groupKey);
+          if (existing && existing.products) {
+            existing.products.push(item);
+          } else {
+            const record: OrderRecord = { ...row, products: [item] };
+            for (const key of PRODUCT_FIELD_KEYS) {
+              delete (record as unknown as Record<string, unknown>)[key];
+            }
+            bySerial.set(groupKey, record);
+            grouped.push(record);
+          }
+        }
+
+        resolve(grouped);
       } catch (err) {
         reject(err);
       }
@@ -176,18 +208,25 @@ export function exportOrderExcel(records: OrderRecord[], filename?: string): voi
     status: ORDER_STATUS_MAP,
   };
 
-  const dataRows = records.map(r =>
-    EXPORT_COLUMNS.map(c => {
-      const val = r[c.key];
-      if (c.key === 'date') return val || '';
-      if (c.key === 'brand' && typeof val === 'string') return getBrandLabel(val);
-      if ((c.key === 'productName' || c.key === 'transferProductName') && typeof val === 'string') return getProductLabel(val);
-      if (c.key === 'paymentAccount') return formatPaymentAccount(r);
-      const dict = DICT_FIELDS[c.key];
-      if (dict && typeof val === 'string' && val) return getDictLabel(dict, val);
-      return val ?? '';
-    })
-  );
+  // 一条货品一行：多货品订单展开为多行，公共列重复
+  const dataRows = records.flatMap(r => {
+    const items = getOrderProducts(r);
+    const rows = items.length > 0 ? items : [undefined];
+    return rows.map(item =>
+      EXPORT_COLUMNS.map(c => {
+        const val = PRODUCT_FIELD_KEYS.has(c.key)
+          ? (item ? item[c.key as keyof ProductItem] : '')
+          : r[c.key];
+        if (c.key === 'date') return val || '';
+        if (c.key === 'brand' && typeof val === 'string') return getBrandLabel(val);
+        if ((c.key === 'productName' || c.key === 'transferProductName') && typeof val === 'string') return getProductLabel(val);
+        if (c.key === 'paymentAccount') return item ? formatPaymentAccount(item) : '';
+        const dict = DICT_FIELDS[c.key];
+        if (dict && typeof val === 'string' && val) return getDictLabel(dict, val);
+        return val ?? '';
+      })
+    );
+  });
 
   const wsData = [headerRow, ...dataRows];
   const ws = XLSX.utils.aoa_to_sheet(wsData);

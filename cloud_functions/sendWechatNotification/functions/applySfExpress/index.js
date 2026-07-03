@@ -194,6 +194,20 @@ function getSenderConfig(order) {
   return sender;
 }
 
+// 读取订单货品明细：新结构 products 数组，旧扁平字段回退为单货品
+function getOrderProducts(order) {
+  if (Array.isArray(order.products) && order.products.length > 0) return order.products;
+  if (order.productName || order.brand || order.quantity) {
+    return [{
+      brand: order.brand || '',
+      productName: order.productName || '',
+      specification: order.specification || '',
+      quantity: Number(order.quantity) || 0,
+    }];
+  }
+  return [];
+}
+
 function validateOrder(order) {
   if (!order) throw new Error('订单不存在');
   if (order.sfWaybillNo || order.trackingNumber) throw new Error('订单已存在快递单号，请勿重复申请');
@@ -202,7 +216,7 @@ function validateOrder(order) {
   if (!trimString(order.consignee)) throw new Error('收货人名称不能为空');
   if (!trimString(order.consigneePhone)) throw new Error('收货人电话不能为空');
   if (!trimString(order.consigneeAddress)) throw new Error('收货人地址不能为空');
-  if (!trimString(order.productName)) throw new Error('货品名称不能为空');
+  if (!getOrderProducts(order).some(item => trimString(item.productName))) throw new Error('货品名称不能为空');
 }
 
 function buildContactInfoList(order, sender) {
@@ -237,19 +251,19 @@ function buildContactInfoList(order, sender) {
 }
 
 function buildCargoDetails(order) {
-  const productName = trimString(order.productName);
-  const specification = trimString(order.specification);
-  const name = specification && specification !== '默认'
-    ? `${productName} ${specification}`.slice(0, 128)
-    : productName.slice(0, 128);
-
-  return [
-    {
+  const items = getOrderProducts(order).filter(item => trimString(item.productName));
+  return items.map(item => {
+    const productName = trimString(item.productName);
+    const specification = trimString(item.specification);
+    const name = specification && specification !== '默认'
+      ? `${productName} ${specification}`.slice(0, 128)
+      : productName.slice(0, 128);
+    return {
       name,
-      count: Number(order.quantity || 1) || 1,
+      count: Number(item.quantity || 1) || 1,
       unit: '件',
-    },
-  ];
+    };
+  });
 }
 
 function buildMsgData(order, orderId, sender, config) {
