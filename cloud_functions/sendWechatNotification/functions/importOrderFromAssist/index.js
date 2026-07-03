@@ -13,6 +13,7 @@ const cloud = require('wx-server-sdk');
 cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 
 const db = cloud.database();
+const _ = db.command;
 
 const ORDERS_COLLECTION = 'orders';
 const LOG_COLLECTION = 'order_import_logs';
@@ -22,7 +23,9 @@ const ORDER_SERIAL_COUNTER = 'orderSerialNumber';
 const SOURCE = 'zanchenzu';
 const PENDING_SHIPMENT_TEXT = '待发货';
 // 货品三级（brand/productName/specification）、销售渠道、人员（responsiblePerson）由插件选择后传入
-const REQUIRED_FIELDS = ['sourceOrderNo', 'sourceOrderItemNo', 'recipient', 'recipientPhone', 'recipientAddress', 'salesChannel', 'responsiblePerson', 'brand', 'productName', 'specification'];
+// 订单级必填（公共字段）与货品级必填（items[] 每项）分开校验
+const REQUIRED_ORDER_FIELDS = ['sourceOrderNo', 'recipient', 'recipientPhone', 'recipientAddress', 'salesChannel', 'responsiblePerson'];
+const REQUIRED_ITEM_FIELDS = ['sourceOrderItemNo', 'brand', 'productName', 'specification'];
 
 const SALESPERSON_DICT_GROUP = 'salesperson';
 
@@ -189,12 +192,68 @@ async function fetchProductModels() {
   }).filter((b) => b.brand && b.products.length > 0);
 }
 
-// 插件 normalized 字段 -> orders 集合字段（扁平结构，与前端建单一致）
-function mapToOrder(order, serialNumber, now) {
-  const quantity = Number(order.goodsQuantity) || 1;
-  const goodsTitle = String(order.goodsTitle || '').trim();
-  // 原始页面商品名作为参考写入客服备注
-  const remark = goodsTitle ? `【赞晨租导入】原商品：${goodsTitle}` : '【赞晨租导入】';
+// 归一化货品明细：新契约 order.items[] 一次多货品；不带 items 时兼容旧形态（顶层货品字段视为唯一条目）
+function normalizeItems(order) {
+  const rawItems = Array.isArray(order.items) && order.items.length > 0 ? order.items : [order];
+  return rawItems.map((item) => ({
+    sourceOrderItemNo: String((item && item.sourceOrderItemNo) || '').trim(),
+    brand: String((item && item.brand) || '').trim(),          // 插件从 manageProductModels 选择
+    productName: String((item && item.productName) || '').trim(),
+    specification: String((item && item.specification) || '').trim(),
+    goodsQuantity: Number(item && item.goodsQuantity) || 1,
+    goodsTitle: String((item && item.goodsTitle) || '').trim(),
+    raw: (item && item.raw) || null,
+  }));
+}
+
+// 归一化后的货品项 -> 货品条目（orders.products 数组的一项）
+function mapToProductItem(item) {
+  return {
+    brand: item.brand,
+    productName: item.productName,
+    specification: item.specification,
+    quantity: item.goodsQuantity,
+    unitPrice: 0,
+    amount: 0,
+    paymentAccount: '',
+    paymentSplits: [],
+    sourceOrderItemNo: item.sourceOrderItemNo, // 货品项幂等键（追加去重用）
+  };
+}
+
+// 批量回写本次抢占的导入日志（成功/失败）；单条失败仅记录，不阻断主流程
+async function updateImportLogs(lockedItems, data) {
+  for (const { importKey } of lockedItems) {
+    try {
+      await db.collection(LOG_COLLECTION).doc(importKey).update({ data });
+    } catch (err) {
+      console.error('[importOrderFromAssist] 回写导入日志失败:', importKey, err);
+    }
+  }
+}
+
+// 旧扁平结构订单文档 -> 货品条目（追加货品前先把原扁平货品收进 products，避免被数组遮蔽丢失）
+function legacyOrderToProductItem(doc) {
+  return {
+    brand: doc.brand || '',
+    productName: doc.productName || '',
+    specification: doc.specification || '',
+    quantity: Number(doc.quantity) || 0,
+    unitPrice: Number(doc.unitPrice) || 0,
+    amount: Number(doc.amount) || 0,
+    paymentAccount: doc.paymentAccount || '',
+    paymentSplits: Array.isArray(doc.paymentSplits) ? doc.paymentSplits : [],
+    sourceOrderItemNo: doc.sourceOrderItemNo || '',
+  };
+}
+
+// 插件 normalized 字段 -> orders 集合字段（一条订单含 products 数组，同源订单多货品共用一条）
+function mapToOrder(order, items, serialNumber, now) {
+  // 原始页面商品名作为参考写入客服备注（多货品去重后合并）
+  const titles = Array.from(new Set(
+    items.map((it) => it.goodsTitle).concat([String(order.goodsTitle || '').trim()]).filter(Boolean)
+  ));
+  const remark = titles.length > 0 ? `【赞晨租导入】原商品：${titles.join('；')}` : '【赞晨租导入】';
   return {
     serialNumber,
     date: todayInBeijing(),                // 订单日期固定为当天
@@ -206,16 +265,9 @@ function mapToOrder(order, serialNumber, now) {
     channelCategory: 'platform',           // 固定：平台
     onlineOrderNumber: order.sourceOrderNo || '',
     customerName: order.recipient || '',
-    brand: order.brand || '',              // 插件从 manageProductModels 选择
-    productName: order.productName || '',  // 选中的货品名
-    specification: order.specification || '', // 选中的规格
-    quantity,
-    unitPrice: 0,
-    amount: 0,
-    paymentAccount: '',
-    paymentSplits: [],
+    products: items.map(mapToProductItem),
     trackingNumber: '',
-    sourceOrderItemNo: order.sourceOrderItemNo || '',
+    sourceOrderItemNo: (items[0] && items[0].sourceOrderItemNo) || '',
     consignee: order.recipient || '',
     consigneePhone: order.recipientPhone || '',
     consigneeAddress: order.recipientAddress || '',
@@ -309,84 +361,143 @@ exports.main = async (event) => {
   const order = (payload && payload.order) || {};
   const operator = (payload && payload.operator) || {};
   const sourceOrderNo = String(order.sourceOrderNo || '').trim();
-  const sourceOrderItemNo = String(order.sourceOrderItemNo || '').trim();
 
   // 2. 状态校验
   if (!isPendingShipment(order)) {
     return fail(400, 'INVALID_STATUS', '只有待发货订单允许导入');
   }
 
-  // 3. 字段校验
-  const missing = REQUIRED_FIELDS.filter((f) => !String(order[f] || '').trim());
+  // 3. 字段校验：订单级公共字段 + 货品级每项字段
+  const missing = REQUIRED_ORDER_FIELDS.filter((f) => !String(order[f] || '').trim());
   if (missing.length > 0) {
     return fail(422, 'MISSING_FIELDS', '缺少必填字段: ' + missing.join(', '));
   }
   if (!SALES_CHANNEL_KEYS.has(String(order.salesChannel))) {
     return fail(422, 'INVALID_FIELD', `salesChannel 非法: ${order.salesChannel}`);
   }
-
-  const importKey = `${SOURCE}_${sourceOrderItemNo}`;
-  const now = db.serverDate();
-
-  // 4. 幂等锁：先抢占日志 _id，重复则直接返回已有订单
-  try {
-    await db.collection(LOG_COLLECTION).add({
-      data: {
-        _id: importKey,
-        source: SOURCE,
-        sourceOrderNo,
-        sourceOrderItemNo,
-        operatorId: operator.uid || '',
-        operatorName: operator.username || '',
-        rawPayload: order.raw || null,
-        status: 'pending',
-        createdOrderId: '',
-        errorMessage: '',
-        createTime: now,
-      },
-    });
-  } catch (err) {
-    if (isDuplicateId(err)) {
-      let existingOrderId = '';
-      try {
-        const existing = await db.collection(LOG_COLLECTION).doc(importKey).get();
-        existingOrderId = (existing.data && existing.data.createdOrderId) || '';
-      } catch (readErr) {
-        if (!isNotFound(readErr)) throw readErr;
-      }
-      return ok('DUPLICATED', '订单已存在', { orderId: existingOrderId, duplicated: true });
+  const items = normalizeItems(order);
+  for (let i = 0; i < items.length; i++) {
+    const missingItem = REQUIRED_ITEM_FIELDS.filter((f) => !items[i][f]);
+    if (missingItem.length > 0) {
+      return fail(422, 'MISSING_FIELDS', `货品[${i + 1}] 缺少必填字段: ` + missingItem.join(', '));
     }
-    console.error('[importOrderFromAssist] 写入幂等锁失败:', err);
-    return fail(500, 'INTERNAL_ERROR', err.message || '导入失败');
+  }
+  const itemNos = items.map((it) => it.sourceOrderItemNo);
+  if (new Set(itemNos).size !== itemNos.length) {
+    return fail(422, 'INVALID_FIELD', '货品明细存在重复的 sourceOrderItemNo');
   }
 
-  // 5. 映射并写入 orders
+  const now = db.serverDate();
+
+  // 4. 幂等锁：逐货品项抢占日志 _id；全部已存在则整单视为重复
+  const lockedItems = []; // [{ item, importKey }]
+  let duplicatedCount = 0;
+  for (const item of items) {
+    const importKey = `${SOURCE}_${item.sourceOrderItemNo}`;
+    try {
+      await db.collection(LOG_COLLECTION).add({
+        data: {
+          _id: importKey,
+          source: SOURCE,
+          sourceOrderNo,
+          sourceOrderItemNo: item.sourceOrderItemNo,
+          operatorId: operator.uid || '',
+          operatorName: operator.username || '',
+          rawPayload: item.raw || order.raw || null,
+          status: 'pending',
+          createdOrderId: '',
+          errorMessage: '',
+          createTime: now,
+        },
+      });
+      lockedItems.push({ item, importKey });
+    } catch (err) {
+      if (isDuplicateId(err)) { duplicatedCount += 1; continue; }
+      console.error('[importOrderFromAssist] 写入幂等锁失败:', err);
+      await updateImportLogs(lockedItems, { status: 'failed', errorMessage: err.message || '写入幂等锁失败' });
+      return fail(500, 'INTERNAL_ERROR', err.message || '导入失败');
+    }
+  }
+
+  if (lockedItems.length === 0) {
+    // 所有货品项此前都已导入
+    let existingOrderId = '';
+    try {
+      const existing = await db.collection(LOG_COLLECTION).doc(`${SOURCE}_${itemNos[0]}`).get();
+      existingOrderId = (existing.data && existing.data.createdOrderId) || '';
+    } catch (readErr) {
+      if (!isNotFound(readErr)) console.error('[importOrderFromAssist] 读取已有导入日志失败:', readErr);
+    }
+    return ok('DUPLICATED', '订单已存在', { orderId: existingOrderId, duplicated: true, duplicatedCount });
+  }
+
+  // 5. 映射并写入 orders：同一来源订单已存在时追加货品，否则新建（一条订单含全部货品）
   let createdOrderId = '';
   try {
+    const existingRes = await db.collection(ORDERS_COLLECTION)
+      .where({ importSource: 'hc-order-assist', onlineOrderNumber: sourceOrderNo })
+      .limit(1)
+      .get();
+    const existingOrder = (existingRes.data || [])[0];
+
+    if (existingOrder) {
+      createdOrderId = existingOrder._id;
+      const hasProductsArray = Array.isArray(existingOrder.products) && existingOrder.products.length > 0;
+      // 旧扁平结构订单：原货品在文档扁平字段上，需先折算为条目参与去重与合并
+      const legacyItem = !hasProductsArray && (existingOrder.brand || existingOrder.productName || existingOrder.quantity)
+        ? legacyOrderToProductItem(existingOrder)
+        : null;
+      const existingItems = hasProductsArray ? existingOrder.products : (legacyItem ? [legacyItem] : []);
+      const existingItemNos = new Set(
+        existingItems.map((item) => String((item && item.sourceOrderItemNo) || '')).filter(Boolean)
+      );
+      const toAppend = lockedItems.filter(({ item }) => !existingItemNos.has(item.sourceOrderItemNo));
+
+      if (toAppend.length > 0) {
+        const newProducts = toAppend.map(({ item }) => mapToProductItem(item));
+        const updateData = hasProductsArray
+          ? { products: _.push(newProducts), updateTime: now }
+          : {
+              products: existingItems.concat(newProducts),
+              // 清空旧扁平货品字段，避免与 products 并存产生歧义
+              brand: '',
+              productName: '',
+              specification: '',
+              quantity: 0,
+              unitPrice: 0,
+              amount: 0,
+              paymentAccount: '',
+              paymentSplits: [],
+              updateTime: now,
+            };
+        await db.collection(ORDERS_COLLECTION).doc(createdOrderId).update({ data: updateData });
+      }
+
+      await updateImportLogs(lockedItems, { status: 'success', createdOrderId });
+      const appendedCount = toAppend.length;
+      return ok(
+        'CREATED',
+        appendedCount > 0 ? `货品已追加到已有订单（${appendedCount} 条）` : '货品已存在',
+        { orderId: createdOrderId, appended: appendedCount > 0, appendedCount, duplicatedCount: items.length - appendedCount }
+      );
+    }
+
     const serialNumber = await getNextSerialNumber();
-    const orderDoc = mapToOrder(order, serialNumber, now);
+    const orderDoc = mapToOrder(order, lockedItems.map((l) => l.item), serialNumber, now);
     const addRes = await db.collection(ORDERS_COLLECTION).add({ data: orderDoc });
     createdOrderId = addRes._id;
 
-    await db.collection(LOG_COLLECTION).doc(importKey).update({
-      data: {
-        status: 'success',
-        createdOrderId,
-        normalizedPayload: orderDoc,
-      },
-    });
+    await updateImportLogs(lockedItems, { status: 'success', createdOrderId, normalizedPayload: orderDoc });
 
-    return ok('CREATED', '订单创建成功', { orderId: createdOrderId });
+    return ok(
+      'CREATED',
+      lockedItems.length > 1 ? `订单创建成功，含 ${lockedItems.length} 条货品` : '订单创建成功',
+      { orderId: createdOrderId, importedCount: lockedItems.length, duplicatedCount }
+    );
   } catch (err) {
     console.error('[importOrderFromAssist] 创建订单失败:', err);
     // 回写失败原因，便于排查；保留锁避免脏数据反复写入
-    try {
-      await db.collection(LOG_COLLECTION).doc(importKey).update({
-        data: { status: 'failed', errorMessage: err.message || '创建订单失败' },
-      });
-    } catch (logErr) {
-      console.error('[importOrderFromAssist] 回写失败日志出错:', logErr);
-    }
+    await updateImportLogs(lockedItems, { status: 'failed', errorMessage: err.message || '创建订单失败' });
     return fail(500, 'INTERNAL_ERROR', err.message || '创建订单失败');
   }
 };

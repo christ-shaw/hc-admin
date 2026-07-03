@@ -41,7 +41,9 @@ hc-admin 是 CloudBase 应用：React 前端 + 云函数（`wx-server-sdk`）+ N
 
 ## 5. 字段映射（插件 normalized → orders 集合）
 
-`orders` 集合是**扁平结构**（已核对 `OrderRecord` 类型与数据库真实记录）：货品字段 `brand/productName/specification/quantity/unitPrice/amount/paymentAccount` 都在顶层，**不是 `products[]` 数组**。`status` 真实枚举见 `ORDER_STATUS_MAP`，顶层同时有 `amount`（金额）与 `paidRent`（已交租金）两个字段。
+> ⚠️ **2026-07 更新**：`orders` 已重构为「一条订单 = `products[]` 多货品」结构，导入契约同步升级为一次多货品、同源订单合并一条文档，见 **§14**。本节的扁平映射仍适用于「货品条目字段」与「订单公共字段」的对应关系，但"每个货品项各建一条订单"的描述已过时。
+
+`orders` 集合原为**扁平结构**（已核对 `OrderRecord` 类型与数据库真实记录）：货品字段 `brand/productName/specification/quantity/unitPrice/amount/paymentAccount` 都在顶层，**不是 `products[]` 数组**。`status` 真实枚举见 `ORDER_STATUS_MAP`，顶层同时有 `amount`（金额）与 `paidRent`（已交租金）两个字段。
 
 | 插件字段 | orders 字段（顶层） | 说明 |
 | --- | --- | --- |
@@ -121,7 +123,7 @@ hc-admin 是 CloudBase 应用：React 前端 + 云函数（`wx-server-sdk`）+ N
 CloudBase NoSQL 没有原生复合唯一约束，`unique(source, source_order_no)` 不能直接声明。采用 **`_id` 幂等锁**（推荐）：
 
 - 在 `order_import_logs` 集合中 `_id = 'zanchenzu_' + sourceOrderItemNo`，`_id` 天然唯一。
-- `sourceOrderItemNo` 自带 `sourceOrderNo` 前缀（`<sourceOrderNo>#<n>`），全局唯一；同一 `sourceOrderNo` 的多个货品项各自建一条订单，互不冲突。
+- `sourceOrderItemNo` 自带 `sourceOrderNo` 前缀（`<sourceOrderNo>#<n>`），全局唯一。~~同一 `sourceOrderNo` 的多个货品项各自建一条订单，互不冲突。~~（2026-07 起同源订单合并为一条 `products[]` 订单，幂等仍按货品项，见 §14。）
 - 流程：
   1. 先 `add` 一条日志占位（成功 = 首次导入）。
   2. 创建 `orders` 订单。
@@ -206,7 +208,7 @@ CloudBase NoSQL 没有原生复合唯一约束，`unique(source, source_order_no
   - 状态校验：`sourceStatusCode === 'PENDING_SHIPMENT'`，兜底 `sourceStatus.includes('待发货')`。
   - 字段校验：`sourceOrderNo / sourceOrderItemNo / recipient / recipientPhone / recipientAddress / salesChannel / brand / productName / specification`；`salesChannel` 校验枚举合法性。
   - `getProductModels` 动作：token 鉴权返回货品三级树 + 销售渠道选项（见 §5.1）。
-  - 幂等：`order_import_logs` 以 `_id = zanchenzu_<sourceOrderItemNo>` 抢占锁；`sourceOrderItemNo` 全局唯一，同一赞晨租订单的每个货品项各建一条 hc-admin 订单，重复返回 `DUPLICATED`。
+  - 幂等：`order_import_logs` 以 `_id = zanchenzu_<sourceOrderItemNo>` 抢占锁；`sourceOrderItemNo` 全局唯一，逐货品项加锁，整单全部重复返回 `DUPLICATED`（同源订单合并规则见 §14）。
   - 序号经 `system_counters`/`orderSerialNumber` 事务自增生成 `serialNumber`。
   - 按扁平结构映射写入 `orders`：固定 `date=当天 / orderSource='new' / orderAttribute='rental1' / orderType='newBusiness' / status='unknown'`，`salesChannel`、`brand/productName/specification` 取自插件选择，原 `goodsTitle` 入 `customerRemark`，`paidRent` 暂忽略；并回写导入日志。
   - 返回 CloudBase「HTTP 访问服务」集成响应（带真实状态码 + `{success,code,message,data}`）。
@@ -235,3 +237,48 @@ CloudBase NoSQL 没有原生复合唯一约束，`unique(source, source_order_no
 - background.js / content-script 现有逻辑已满足；`sourceStatusCode` 为可选（云函数有中文兜底）。
 
 后续升级到方案 A（CloudBase 身份贯通）时，仅需把鉴权从静态 token 换成 `getCurrentUser(event)`，其余校验/幂等/映射逻辑可复用。
+
+## 14. 多货品导入与 products[] 结构（2026-07 更新）
+
+`orders` 集合已重构为「一条订单 = `products[]` 多货品」（见 `src/utils/orderProducts.ts` 与 `migrateOrdersToProducts` 云函数）。导入契约相应升级：
+
+### 14.1 请求契约
+
+`payload.order` 新增可选 **`items[]`**，一次携带同一赞晨订单的多条货品：
+
+```json
+{
+  "order": {
+    "sourceOrderNo": "ME2026...",
+    "sourceStatusCode": "PENDING_SHIPMENT",
+    "recipient": "张三", "recipientPhone": "138...", "recipientAddress": "...",
+    "salesChannel": "yuntu", "responsiblePerson": "李四",
+    "items": [
+      { "sourceOrderItemNo": "ME2026...#1", "brand": "苹果", "productName": "iPhone 15", "specification": "256G", "goodsQuantity": 1, "goodsTitle": "页面原始商品名" },
+      { "sourceOrderItemNo": "ME2026...#2", "brand": "苹果", "productName": "iPad Air", "specification": "128G", "goodsQuantity": 2 }
+    ]
+  },
+  "operator": { "uid": "...", "username": "..." }
+}
+```
+
+- 订单级必填：`sourceOrderNo / recipient / recipientPhone / recipientAddress / salesChannel / responsiblePerson`；货品级必填：`sourceOrderItemNo / brand / productName / specification`（`goodsQuantity` 默认 1）。
+- `items` 内 `sourceOrderItemNo` 不得重复，否则 422 `INVALID_FIELD`。
+- **兼容旧形态**：不带 `items` 时，顶层货品字段（`sourceOrderItemNo/brand/productName/specification/goodsQuantity/goodsTitle`）视为唯一条目，行为与升级前一致。
+
+### 14.2 合并与幂等规则
+
+- 同一 `sourceOrderNo`（且 `importSource = 'hc-order-assist'`）在 `orders` 中只存在一条文档：首次导入建单（`serialNumber` 只自增一次，全部货品写入 `products[]`）；再次导入（无论新旧形态、单条多条）把未导入过的货品**追加**进该文档的 `products[]`。
+- 旧扁平结构的存量导入单在追加时先把原扁平货品折算为 `products[]` 条目并清空扁平字段。
+- 幂等粒度仍是**货品项**：`order_import_logs` 逐项以 `_id = zanchenzu_<sourceOrderItemNo>` 抢锁；products 内亦按 `sourceOrderItemNo` 去重兜底。
+- 多货品订单的 `customerRemark` 为各货品 `goodsTitle` 去重后以「；」拼接。
+
+### 14.3 响应
+
+| 场景 | code | data |
+| --- | --- | --- |
+| 全部货品为新，建单 | `CREATED` | `{ orderId, importedCount, duplicatedCount }` |
+| 部分/全部新货品追加到已有订单 | `CREATED` | `{ orderId, appended, appendedCount, duplicatedCount }` |
+| 所有货品项此前均已导入 | `DUPLICATED` | `{ orderId, duplicated: true, duplicatedCount }` |
+
+插件侧（hc-order-assist）配套：导入弹窗支持勾选同一订单的多条货品项、一次提交 `items[]`；旧版插件逐项调用仍然有效（服务端自动合并到同一订单）。
