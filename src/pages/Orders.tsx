@@ -1520,12 +1520,12 @@ export function Orders() {
           <div className="space-y-2 text-sm">
             <DetailRow label="序号" value={currentRecord.serialNumber} />
             <DetailRow label="日期" value={formatDate(currentRecord.date, false)} />
-            <DetailRow label="订单来源" value={currentRecord.orderSource} />
-            <DetailRow label="订单属性" value={currentRecord.orderAttribute} />
-            <DetailRow label="订单类型" value={currentRecord.orderType} />
-            <DetailRow label="销售渠道" value={currentRecord.salesChannel} />
-            <DetailRow label="人员" value={currentRecord.salesperson} />
-            <DetailRow label="渠道类别" value={currentRecord.channelCategory} />
+            <DetailRow label="订单来源" value={getDictLabel(ORDER_SOURCE_MAP, currentRecord.orderSource)} />
+            <DetailRow label="订单属性" value={getDictLabel(ORDER_ATTRIBUTE_MAP, currentRecord.orderAttribute)} />
+            <DetailRow label="订单类型" value={getDictLabel(ORDER_TYPE_MAP, currentRecord.orderType)} />
+            <DetailRow label="销售渠道" value={getDictLabel(SALES_CHANNEL_MAP, currentRecord.salesChannel)} />
+            <DetailRow label="人员" value={dictionaries.getLabel(DICT_CODES.salesperson, currentRecord.salesperson)} />
+            <DetailRow label="渠道类别" value={getDictLabel(CHANNEL_CATEGORY_MAP, currentRecord.channelCategory)} />
             {currentRecord.channelCategory === 'platform' && <DetailRow label="网店订单号" value={currentRecord.onlineOrderNumber} />}
             {getOrderProducts(currentRecord).map((product, index, items) => {
               const showPayment = shouldShowProductPaymentFields(currentRecord.orderSource, currentRecord.orderType, currentRecord.orderAttribute, product.brand);
