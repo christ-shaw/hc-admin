@@ -1,7 +1,7 @@
 {
   "envId": "cloud1-8gvbotkt966e5e19",
   "version": "2.0",
-  "functionRoot": "cloud_functions/sendWechatNotification/functions",
+  "functionRoot": "cloud_functions",
   "functions": [
     {
       "name": "getAndIncrementCounter",
@@ -30,6 +30,11 @@
     },
     {
       "name": "cancelSfExpress",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
+      "name": "manageSfConfig",
       "handler": "index.main",
       "runtime": "Nodejs18.15"
     },

@@ -6,14 +6,14 @@
 
 - `git status --short --branch`
 - `rg -n "phoneModels|manageProductModels|product_models|phone_models" src cloud_functions cloudbaserc.json -g '!node_modules'`
-- `find cloud_functions/sendWechatNotification/functions -maxdepth 2 -type f -path '*phoneModels*' -o -path '*manageProductModels*'`
+- `find cloud_functions -maxdepth 2 -type f -path '*phoneModels*' -o -path '*manageProductModels*'`
 - `rg -n "phoneModels|manageProductModels|product_models|phone_models" src cloud_functions cloudbaserc.json 云函数文档.md -g '!node_modules'`
-- `find cloud_functions/sendWechatNotification/functions -maxdepth 3 -type f -path '*phoneModels*' -o -path '*manageProductModels*'`
+- `find cloud_functions -maxdepth 3 -type f -path '*phoneModels*' -o -path '*manageProductModels*'`
 - `sed -n '1,35p' 云函数文档.md`
 - `sed -n '1620,1685p' 云函数文档.md`
 - `rg -n "phoneModels|manageProductModels|product_models|phone_models" src cloud_functions cloudbaserc.json 云函数文档.md -g '!node_modules'`
-- `find cloud_functions/sendWechatNotification/functions -maxdepth 3 -type f -path '*phoneModels*' -o -path '*manageProductModels*'`
-- `node --check cloud_functions/sendWechatNotification/functions/manageProductModels/index.js`
+- `find cloud_functions -maxdepth 3 -type f -path '*phoneModels*' -o -path '*manageProductModels*'`
+- `node --check cloud_functions/manageProductModels/index.js`
 - `npm run build`
 - `git diff --check`
 - `cloudbase hosting:deploy dist / -e cloud1-8gvbotkt966e5e19`
@@ -27,7 +27,7 @@
 - `sed -n '1,260p' src/pages/Dashboard.tsx`
 - `sed -n '1,170p' src/components/Layout.tsx`
 - `sed -n '1,220p' src/hooks/useStats.ts`
-- `sed -n '1,220p' cloud_functions/sendWechatNotification/functions/queryOrders/index.js`
+- `sed -n '1,220p' cloud_functions/queryOrders/index.js`
 - `sed -n '260,360p' src/pages/Dashboard.tsx`
 - `rg -n "limit: 100|DYNAMIC_MESSAGE|ORDER_MESSAGE|messageCounts|fetchOrdersForDynamicMessages" src/pages/Dashboard.tsx src/components/Layout.tsx`
 - `npm run build`
@@ -48,7 +48,7 @@
 - `cloudbase db nosql execute --command '[{"TableName":"product_models","CommandType":"QUERY","Command":"{\"find\":\"product_models\",\"filter\":{\"brand\":{\"$in\":[\"无\",\"虚拟产品\"]}},\"limit\":10}"}]' --json`
 - `cloudbase db nosql execute --command "$(cat tmp/merge-virtual-product-command.json)" --json`
 - `node -e "JSON.parse(require('fs').readFileSync('tmp/merge-virtual-product-command.json','utf8')); console.log('ok')"`
-- `node --check cloud_functions/sendWechatNotification/functions/manageProductModels/index.js`
+- `node --check cloud_functions/manageProductModels/index.js`
 - `npm run build`
 - `git diff --check`
 - `git status --short --branch`
@@ -65,8 +65,8 @@
 - `sed -n '2200,2320p' src/pages/Orders.tsx`
 - `sed -n '1660,1730p' src/pages/Orders.tsx`
 - `sed -n '240,330p' src/pages/Orders.tsx`
-- `rg -n "BRAND_OPTIONS|STATIC_BRAND_OPTIONS|brandOptions|manageProductModels|getCatalogProductsByBrand|getCatalogSpecsByProduct" src/pages/Orders.tsx cloud_functions/sendWechatNotification/functions/manageProductModels/index.js 云函数文档.md`
-- `node --check cloud_functions/sendWechatNotification/functions/manageProductModels/index.js`
+- `rg -n "BRAND_OPTIONS|STATIC_BRAND_OPTIONS|brandOptions|manageProductModels|getCatalogProductsByBrand|getCatalogSpecsByProduct" src/pages/Orders.tsx cloud_functions/manageProductModels/index.js 云函数文档.md`
+- `node --check cloud_functions/manageProductModels/index.js`
 - `npm run build`
 - `git diff --check`
 - `git status --short --branch`
@@ -95,10 +95,10 @@
 - `sed -n '1,140p' cloudbaserc.json`
 - `sed -n '1,220p' src/contexts/PermissionContext.tsx`
 - `sed -n '1,120p' src/lib/cloudbase.ts`
-- `sed -n '1,220p' cloud_functions/sendWechatNotification/functions/manageDictionaries/permissionAuth.js`
-- `sed -n '1,260p' cloud_functions/sendWechatNotification/functions/manageDictionaries/index.js`
+- `sed -n '1,220p' cloud_functions/manageDictionaries/permissionAuth.js`
+- `sed -n '1,260p' cloud_functions/manageDictionaries/index.js`
 - `rg -n "<Dialog|Dialog" src/components src/pages -g '!node_modules'`
-- `node --check cloud_functions/sendWechatNotification/functions/phoneModels/index.js`
+- `node --check cloud_functions/phoneModels/index.js`
 - `npm run build`
 - `git diff --check`
 - `git status --short --branch`
@@ -107,7 +107,7 @@
 - `git status --short --branch`
 - `git diff --stat`
 - `git status --short --branch`
-- `rg -n "phoneModels|phonemodels|PhoneModels|型号管理|product_models" 云函数文档.md docs cloud_functions/sendWechatNotification/functions cloudbaserc.json src -g '!node_modules'`
+- `rg -n "phoneModels|phonemodels|PhoneModels|型号管理|product_models" 云函数文档.md docs cloud_functions cloudbaserc.json src -g '!node_modules'`
 - `cloudbase fn list --json`
 - `cloudbase fn detail phoneModels --json`
 - `cloudbase fn code download phoneModels`
@@ -118,8 +118,8 @@
 - `find tmp/remote-phoneModels -maxdepth 3 -type f | sort`
 - `sed -n '1,260p' tmp/remote-phoneModels/index.js`
 - `cloudbase db nosql execute --command '[{"TableName":"phone_models","CommandType":"COMMAND","Command":"{\"count\":\"phone_models\",\"query\":{}}"},{"TableName":"phone_models","CommandType":"QUERY","Command":"{\"find\":\"phone_models\",\"filter\":{},\"limit\":3}"}]' --json`
-- `rg -n "product_models|phone_models" cloud_functions/sendWechatNotification/functions/phoneModels src/data/productDict.ts src/hooks/usePhoneModels.ts src/pages/PhoneModels.tsx`
-- `node --check cloud_functions/sendWechatNotification/functions/phoneModels/index.js`
+- `rg -n "product_models|phone_models" cloud_functions/phoneModels src/data/productDict.ts src/hooks/usePhoneModels.ts src/pages/PhoneModels.tsx`
+- `node --check cloud_functions/phoneModels/index.js`
 - `npm run build`
 - `git diff --check`
 - `git status --short --branch`

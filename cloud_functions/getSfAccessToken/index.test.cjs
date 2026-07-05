@@ -295,7 +295,7 @@ test('rejects when caller expected env differs from token function env', async (
   });
 });
 
-test('returns a clear error when token cache document does not exist', async () => {
+test('creates token cache document when it does not exist', async () => {
   await withFunctionRuntime({
     initialDocs: {},
     env: {
@@ -318,10 +318,60 @@ test('returns a clear error when token cache document does not exist', async () 
   }, async (main, mockCloud) => {
     const result = await main({ data: { forceRefresh: true } });
 
-    assert.equal(result.success, false);
-    assert.match(result.errMsg, /sf_tokens\/sandbox/);
+    assert.equal(result.success, true);
+    assert.equal(result.cached, false);
+    assert.equal(result.env, 'sandbox');
+    assert.equal(result.apiResponseID, 'response-2');
+    assert.equal(mockCloud.calls.adds.length, 1);
     assert.equal(mockCloud.calls.sets.length, 0);
-    assert.equal(mockCloud.docs.has('sandbox'), false);
+    assert.equal(mockCloud.docs.get('sandbox').accessToken, 'created-token-abcdef');
+  });
+});
+
+test('uses database sf_express env before SF_ENV fallback', async () => {
+  let capturedUrl = '';
+
+  await withFunctionRuntime({
+    initialDocs: {
+      sf_express: { env: 'production' },
+      production: {
+        env: 'production',
+        accessToken: 'expired-prod-token',
+        expiresIn: 7199,
+        expiresAt: Date.now() - 1000,
+      },
+    },
+    env: {
+      SF_ENV: 'sandbox',
+      SF_CLIENT_CODE: 'fallback-partner',
+      SF_PROD_CLIENT_CODE: 'prod-partner',
+      SF_PROD_CHECK_WORD: 'prod-secret',
+      SF_SANDBOX_CHECK_WORD: 'sandbox-secret',
+    },
+    fetchImpl: async (url) => {
+      capturedUrl = url;
+
+      return {
+        ok: true,
+        status: 200,
+        async text() {
+          return JSON.stringify({
+            apiResultCode: 'A1000',
+            apiErrorMsg: 'success',
+            apiResponseID: 'prod-response-db',
+            accessToken: 'prod-token-from-db-env',
+            expiresIn: 7199,
+          });
+        },
+      };
+    },
+  }, async (main, mockCloud) => {
+    const result = await main({ data: { forceRefresh: true } });
+
+    assert.equal(result.success, true);
+    assert.equal(result.env, 'production');
+    assert.equal(capturedUrl, 'https://bspgw.sf-express.com/oauth2/accessToken');
+    assert.equal(mockCloud.docs.get('production').accessToken, 'prod-token-from-db-env');
   });
 });
 

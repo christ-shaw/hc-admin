@@ -149,6 +149,23 @@ function isExpressApplicableStatus(status: string | undefined): boolean {
   return isPendingShipmentStatus(status);
 }
 
+function canApplySfExpressOrder(record: OrderRecord): boolean {
+  return isExpressApplicableStatus(record.status)
+    && !record.trackingNumber
+    && !record.sfWaybillNo
+    && record.expressApplyStatus !== 'applying';
+}
+
+function canCancelExpressOrder(record: OrderRecord): boolean {
+  const hasSfOrderInfo = !!(record.sfOrderId || record.sfWaybillNo || (record.expressProvider === 'sf' && record.trackingNumber));
+  return hasSfOrderInfo && !['applying', 'cancelled'].includes(record.expressApplyStatus || '');
+}
+
+function canQuerySfOrder(record: OrderRecord): boolean {
+  const hasSfTrace = !!(record.sfOrderId || record.sfWaybillNo || record.expressProvider === 'sf');
+  return hasSfTrace && record.expressApplyStatus !== 'cancelled';
+}
+
 function isVirtualProductOrder(products: ProductItem[]): boolean {
   const selectedBrands = products.map(product => product.brand).filter(Boolean);
   return selectedBrands.length > 0 && selectedBrands.every(brand => brand === '虚拟产品');
@@ -531,14 +548,18 @@ export function Orders() {
 
   const handleQuerySfOrderResult = useCallback(async (record: OrderRecord) => {
     if (!record._id || queryingSfResultId) return;
+    if (!canQuerySfOrder(record)) {
+      MessagePlugin.warning('请先申请快递，生成顺丰订单后再查询');
+      return;
+    }
 
     setQueryingSfResultId(record._id);
     try {
       const result = await orders.querySfOrderResult(record._id);
       if (result.success) {
-        MessagePlugin.success(`顺丰下单结果已更新，运单号：${result.waybillNo || '-'}`);
+        MessagePlugin.success(`顺丰订单已更新，运单号：${result.waybillNo || '-'}`);
       } else {
-        MessagePlugin.error(result.errMsg || '查询顺丰下单结果失败');
+        MessagePlugin.error(result.errMsg || '查询顺丰订单失败');
       }
     } finally {
       setQueryingSfResultId(null);
@@ -1246,35 +1267,31 @@ export function Orders() {
       },
     },
     {
-      colKey: 'op', title: '操作', width: 330, fixed: 'right' as const,
+      colKey: 'op', title: '操作', width: 390, fixed: 'right' as const,
       cell: ({ row }: { row: OrderRecord }) => (
         <div className="flex gap-1 flex-wrap">
           <Button variant="text" theme="primary" size="small"
             onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleDetail(row); }}>
             详情
           </Button>
-          {false && isExpressApplicableStatus(row.status) && row.expressApplyStatus !== 'cancelled' && (
-            <Button variant="text" theme="primary" size="small"
-              loading={applyingExpressId === row._id}
-              disabled={!!applyingExpressId && applyingExpressId !== row._id}
-              onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleApplyExpress(row); }}>
-              申请快递
-            </Button>
-          )}
-          {false && !row.trackingNumber && !['applied', 'cancelled'].includes(row.expressApplyStatus || '') && (
-            <Button variant="text" theme="primary" size="small"
-              loading={queryingSfResultId === row._id}
-              disabled={!!queryingSfResultId && queryingSfResultId !== row._id}
-              onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleQuerySfOrderResult(row); }}>
-              查顺丰
-            </Button>
-          )}
-          {row.expressApplyStatus === 'applied' && (row.sfOrderId || row.sfWaybillNo || row.trackingNumber) && (
+          <Button variant="text" theme="primary" size="small"
+            loading={applyingExpressId === row._id}
+            disabled={!canApplySfExpressOrder(row) || (!!applyingExpressId && applyingExpressId !== row._id)}
+            onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleApplyExpress(row); }}>
+            生成顺丰单
+          </Button>
+          <Button variant="text" theme="primary" size="small"
+            loading={queryingSfResultId === row._id}
+            disabled={!canQuerySfOrder(row) || (!!queryingSfResultId && queryingSfResultId !== row._id)}
+            onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleQuerySfOrderResult(row); }}>
+            查询顺丰
+          </Button>
+          {canCancelExpressOrder(row) && (
             <Button variant="text" theme="danger" size="small"
               loading={cancelingSfId === row._id}
               disabled={!!cancelingSfId && cancelingSfId !== row._id}
               onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleCancelSfExpress(row); }}>
-              取消顺丰
+              取消快递单
             </Button>
           )}
           <Button variant="text" theme="primary" size="small"

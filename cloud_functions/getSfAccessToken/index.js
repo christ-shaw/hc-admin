@@ -1,8 +1,12 @@
 /**
  * getSfAccessToken - 获取顺丰 OAuth2 accessToken
  *
+ * 环境切换：
+ * 优先读数据库 system_config/sf_express 的 env 字段（sandbox | production），
+ * 改这条文档即可动态切换环境，无需重新部署；文档不存在时回退到 SF_ENV 环境变量。
+ *
  * 云函数环境变量：
- * SF_ENV                      sandbox | production，默认 sandbox
+ * SF_ENV                      sandbox | production，默认 sandbox（仅作为数据库配置缺失时的回退）
  * SF_CLIENT_CODE              默认顺丰客户编码
  * SF_SANDBOX_CLIENT_CODE      沙箱客户编码（可选，优先于 SF_CLIENT_CODE）
  * SF_PROD_CLIENT_CODE         生产客户编码（可选，优先于 SF_CLIENT_CODE）
@@ -25,6 +29,8 @@ cloud.init({
 const db = cloud.database();
 
 const TOKEN_COLLECTION = 'sf_tokens';
+const CONFIG_COLLECTION = 'system_config';
+const SF_CONFIG_DOC_ID = 'sf_express';
 const REFRESH_BUFFER_MS = 5 * 60 * 1000;
 const DEFAULT_ACCESS_TOKEN_URLS = {
   sandbox: 'https://sfapi-sbox.sf-express.com/oauth2/accessToken',
@@ -50,8 +56,18 @@ function getFirstEnv(names) {
   return '';
 }
 
-function getSfConfig(expectedEnv) {
-  const env = normalizeSfEnv();
+async function resolveSfEnv() {
+  let raw = '';
+  try {
+    const result = await db.collection(CONFIG_COLLECTION).doc(SF_CONFIG_DOC_ID).get();
+    raw = trimString(result.data && result.data.env);
+  } catch (err) {
+    raw = '';
+  }
+  return raw ? normalizeSfEnv(raw) : normalizeSfEnv();
+}
+
+function getSfConfig(env, expectedEnv) {
   if (expectedEnv && normalizeSfEnv(expectedEnv) !== env) {
     throw new Error(`顺丰环境配置不一致: 调用方期望 ${normalizeSfEnv(expectedEnv)}，getSfAccessToken 当前为 ${env}`);
   }
@@ -127,7 +143,13 @@ async function saveToken(config, tokenData) {
     await collection.doc(config.tokenDocId).update({ data: updateData });
   } catch (err) {
     if (!isNotFoundError(err)) throw err;
-    throw new Error(`缺少 token 缓存文档 sf_tokens/${config.tokenDocId}，请先在 sf_tokens 集合中创建 _id 为 ${config.tokenDocId} 的占位文档`);
+    await collection.add({
+      data: {
+        _id: config.tokenDocId,
+        ...updateData,
+        createTime: db.serverDate(),
+      },
+    });
   }
 }
 
@@ -180,7 +202,8 @@ exports.main = async (event) => {
   const { forceRefresh = false, sfEnv } = event.data || {};
 
   try {
-    const config = getSfConfig(sfEnv);
+    const env = await resolveSfEnv();
+    const config = getSfConfig(env, sfEnv);
 
     if (!forceRefresh) {
       const cached = await getCachedToken(config.tokenDocId);

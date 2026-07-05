@@ -4,8 +4,12 @@
  * 依赖云函数：
  * getSfAccessToken
  *
+ * 环境切换：
+ * 优先读数据库 system_config/sf_express 的 env 字段（sandbox | production），
+ * 改这条文档即可动态切换环境，无需重新部署；文档不存在时回退到 SF_ENV 环境变量。
+ *
  * 云函数环境变量：
- * SF_ENV                   sandbox | production，默认 sandbox
+ * SF_ENV                   sandbox | production，默认 sandbox（仅作为数据库配置缺失时的回退）
  * SF_CLIENT_CODE           默认顺丰客户编码
  * SF_SANDBOX_CLIENT_CODE   沙箱客户编码（可选，优先于 SF_CLIENT_CODE）
  * SF_PROD_CLIENT_CODE      生产客户编码（可选，优先于 SF_CLIENT_CODE）
@@ -39,6 +43,8 @@ const db = cloud.database();
 
 const ORDERS_COLLECTION = 'orders';
 const TOKEN_COLLECTION = 'sf_tokens';
+const CONFIG_COLLECTION = 'system_config';
+const SF_CONFIG_DOC_ID = 'sf_express';
 const SERVICE_CODE = 'EXP_RECE_CREATE_ORDER';
 const DEFAULT_SERVICE_URLS = {
   sandbox: 'https://sfapi-sbox.sf-express.com/std/service',
@@ -76,8 +82,18 @@ function getPositiveIntegerEnv(name, defaultValue) {
   return parsed;
 }
 
-function getSfConfig() {
-  const env = normalizeSfEnv();
+async function resolveSfEnv() {
+  let raw = '';
+  try {
+    const result = await db.collection(CONFIG_COLLECTION).doc(SF_CONFIG_DOC_ID).get();
+    raw = trimString(result.data && result.data.env);
+  } catch (err) {
+    raw = '';
+  }
+  return raw ? normalizeSfEnv(raw) : normalizeSfEnv();
+}
+
+function getSfConfig(env) {
   const partnerID = env === 'production'
     ? getFirstEnv(['SF_PROD_CLIENT_CODE', 'SF_PRODUCTION_CLIENT_CODE', 'SF_CLIENT_CODE'])
     : getFirstEnv(['SF_SANDBOX_CLIENT_CODE', 'SF_CLIENT_CODE']);
@@ -99,6 +115,7 @@ function getSfConfig() {
     monthlyCard: getFirstEnv(['SF_MONTHLY_CARD', 'SF_MONTHLY_CARD_NO']),
     expressTypeId: getPositiveIntegerEnv('SF_EXPRESS_TYPE_ID', 1),
     parcelQty: getPositiveIntegerEnv('SF_PARCEL_QTY', 1),
+    duplicateRetryLimit: getPositiveIntegerEnv('SF_DUPLICATE_ORDER_RETRY_LIMIT', 5),
   };
 }
 
@@ -119,9 +136,43 @@ function buildRequestID() {
   return crypto.randomUUID().replace(/-/g, '');
 }
 
-function buildSfOrderId(orderId) {
+function buildSfOrderId(orderId, seq = 1) {
   const normalized = trimString(orderId).replace(/[^a-zA-Z0-9_-]/g, '');
-  return `HC_${normalized}`.slice(0, 64);
+  // 顺丰规定客户订单号取消后不可复用，取消重下时用 _2/_3 序号生成新单号
+  const suffix = seq > 1 ? `_${seq}` : '';
+  return `HC_${normalized}`.slice(0, 64 - suffix.length) + suffix;
+}
+
+function inferSfOrderIdSeq(order, orderId) {
+  const configuredSeq = Math.max(1, Number(order.sfOrderIdSeq || 1) || 1);
+  const sfOrderId = trimString(order.sfOrderId);
+  if (!sfOrderId) return configuredSeq;
+
+  const firstOrderId = buildSfOrderId(orderId, 1);
+  if (sfOrderId === firstOrderId) return configuredSeq;
+
+  const matched = sfOrderId.match(/_(\d+)$/);
+  if (!matched) return configuredSeq;
+
+  const suffixSeq = Number(matched[1]);
+  if (!Number.isInteger(suffixSeq) || suffixSeq <= 1) return configuredSeq;
+  return Math.max(configuredSeq, suffixSeq);
+}
+
+function hasCancelledSfOrder(order) {
+  return order.expressApplyStatus === 'cancelled'
+    || Boolean(order.expressCancelTime)
+    || Boolean(order.sfCancelRequestId);
+}
+
+function resolveSfOrderId(order, orderId) {
+  const wasCancelled = hasCancelledSfOrder(order);
+  const currentSeq = inferSfOrderIdSeq(order, orderId);
+  const seq = wasCancelled ? currentSeq + 1 : currentSeq;
+  const sfOrderId = !wasCancelled && trimString(order.sfOrderId)
+    ? trimString(order.sfOrderId)
+    : buildSfOrderId(orderId, seq);
+  return { sfOrderId, seq };
 }
 
 function normalizeSenderConfig(raw = {}) {
@@ -252,10 +303,10 @@ function buildCargoDetails(order) {
   ];
 }
 
-function buildMsgData(order, orderId, sender, config) {
+function buildMsgData(order, sfOrderId, sender, config) {
   const msgData = {
     language: 'zh-CN',
-    orderId: order.sfOrderId || buildSfOrderId(orderId),
+    orderId: sfOrderId,
     cargoDetails: buildCargoDetails(order),
     contactInfoList: buildContactInfoList(order, sender),
     payMethod: config.payMethod,
@@ -324,12 +375,40 @@ function parseJsonMaybe(value) {
   }
 }
 
+function isDuplicateOrderError(errorCode, message) {
+  const code = trimString(errorCode);
+  const text = trimString(message).toLowerCase();
+  return code === '8016'
+    || text.includes('重复')
+    || text.includes('duplicate')
+    || text.includes('已存在')
+    || text.includes('客户订单号');
+}
+
+function normalizeWaybillNoInfoList(waybillNoInfoList = []) {
+  if (!Array.isArray(waybillNoInfoList)) return [];
+  return waybillNoInfoList
+    .map(item => ({
+      waybillType: item.waybillType,
+      waybillNo: trimString(item.waybillNo),
+    }))
+    .filter(item => item.waybillNo);
+}
+
+function getPrimaryWaybillNo(waybillNoInfoList = []) {
+  const list = normalizeWaybillNoInfoList(waybillNoInfoList);
+  const primary = list.find(item => String(item.waybillType || '') === '1');
+  return trimString((primary || list[0] || {}).waybillNo);
+}
+
 function parseSfCreateOrderResponse(result) {
   if (result.apiResultCode !== 'A1000') {
+    const errMsg = result.apiErrorMsg || `顺丰平台调用失败: ${result.apiResultCode || 'UNKNOWN'}`;
     return {
       success: false,
       authFailed: result.apiResultCode === 'A1011',
-      errMsg: result.apiErrorMsg || `顺丰平台调用失败: ${result.apiResultCode || 'UNKNOWN'}`,
+      duplicateOrder: isDuplicateOrderError(result.apiResultCode, errMsg),
+      errMsg,
       raw: result,
     };
   }
@@ -340,16 +419,19 @@ function parseSfCreateOrderResponse(result) {
   const errorCode = apiResultData.errorCode || '';
 
   if (!businessSuccess || errorCode !== 'S0000') {
+    const errMsg = apiResultData.errorMsg || `顺丰业务下单失败: ${errorCode || 'UNKNOWN'}`;
     return {
       success: false,
-      errMsg: apiResultData.errorMsg || `顺丰业务下单失败: ${errorCode || 'UNKNOWN'}`,
+      duplicateOrder: isDuplicateOrderError(errorCode, errMsg),
+      errMsg,
       errorCode,
       raw: result,
       apiResultData,
     };
   }
 
-  const waybillNo = msgData.waybillNoInfoList?.[0]?.waybillNo || '';
+  const waybillNoInfoList = normalizeWaybillNoInfoList(msgData.waybillNoInfoList);
+  const waybillNo = getPrimaryWaybillNo(waybillNoInfoList);
   if (!waybillNo) {
     return {
       success: false,
@@ -364,6 +446,7 @@ function parseSfCreateOrderResponse(result) {
   return {
     success: true,
     waybillNo,
+    waybillNoInfoList,
     sfOrderId: msgData.orderId || apiResultData.orderId || '',
     raw: result,
     apiResultData,
@@ -419,6 +502,47 @@ async function applyCreateOrder({ config, requestID, msgData }) {
   return parsed;
 }
 
+async function recoverDuplicateOrder({ orderId }) {
+  const result = await cloud.callFunction({
+    name: 'querySfOrderResult',
+    data: { orderId, searchType: '1' },
+  });
+  return result.result || {};
+}
+
+function shouldRetryWithNextSfOrderId(recovered) {
+  const errorCode = trimString(recovered.errorCode);
+  const errMsg = trimString(recovered.errMsg);
+  return errorCode === '8018'
+    || errorCode === '6150'
+    || errMsg.includes('未获取到订单信息')
+    || errMsg.includes('找不到该订单')
+    || errMsg.includes('未查询到订单')
+    || errMsg.includes('订单不存在');
+}
+
+async function markApplyingOrder({ orderId, config, requestID, msgData, seq, sender }) {
+  await updateOrder(orderId, {
+    expressProvider: 'sf',
+    sfEnv: config.env,
+    expressApplyStatus: 'applying',
+    expressErrorMsg: '',
+    sfRequestId: requestID,
+    sfOrderId: msgData.orderId,
+    sfOrderIdSeq: seq,
+    sfSenderContact: sender.contact,
+    sfSenderTel: maskPhone(sender.tel),
+  });
+}
+
+async function markFailedOrder({ orderId, parsed }) {
+  await updateOrder(orderId, {
+    expressApplyStatus: 'failed',
+    expressErrorMsg: parsed.errMsg,
+    sfRawResponse: parsed.raw || null,
+  });
+}
+
 exports.main = async (event) => {
   const { orderId } = event.data || {};
 
@@ -432,64 +556,100 @@ exports.main = async (event) => {
   let hasMarkedApplying = false;
 
   try {
-    const config = getSfConfig();
+    const env = await resolveSfEnv();
+    const config = getSfConfig(env);
     const order = await getOrder(orderId);
     validateOrder(order);
     const sender = getSenderConfig(order);
 
-    const requestID = buildRequestID();
-    const msgData = buildMsgData(order, orderId, sender, config);
+    const resolved = resolveSfOrderId(order, orderId);
+    let nextSeq = resolved.seq;
+    let lastParsed = null;
 
-    await updateOrder(orderId, {
-      expressProvider: 'sf',
-      sfEnv: config.env,
-      expressApplyStatus: 'applying',
-      expressErrorMsg: '',
-      sfRequestId: requestID,
-      sfOrderId: msgData.orderId,
-      sfSenderContact: sender.contact,
-      sfSenderTel: maskPhone(sender.tel),
-    });
-    hasMarkedApplying = true;
+    for (let attempt = 1; attempt <= config.duplicateRetryLimit; attempt += 1) {
+      const sfOrderId = attempt === 1 ? resolved.sfOrderId : buildSfOrderId(orderId, nextSeq);
+      const requestID = buildRequestID();
+      const msgData = buildMsgData(order, sfOrderId, sender, config);
 
-    const parsed = await applyCreateOrder({ config, requestID, msgData });
+      await markApplyingOrder({ orderId, config, requestID, msgData, seq: nextSeq, sender });
+      hasMarkedApplying = true;
 
-    if (!parsed.success) {
-      await updateOrder(orderId, {
-        expressApplyStatus: 'failed',
-        expressErrorMsg: parsed.errMsg,
-        sfRawResponse: parsed.raw || null,
-      });
+      const parsed = await applyCreateOrder({ config, requestID, msgData });
+      lastParsed = parsed;
+
+      if (parsed.success) {
+        await updateOrder(orderId, {
+          status: 'shipped',
+          trackingNumber: parsed.waybillNo,
+          shippingFee: order.shippingFee || 'prepaid',
+          expressProvider: 'sf',
+          sfEnv: config.env,
+          expressApplyStatus: 'applied',
+          expressApplyTime: new Date().toISOString(),
+          expressErrorMsg: '',
+          sfRequestId: requestID,
+          sfOrderId: parsed.sfOrderId || msgData.orderId,
+          sfWaybillNo: parsed.waybillNo,
+          sfWaybillNoInfoList: parsed.waybillNoInfoList || [],
+          sfRawResponse: parsed.raw,
+        });
+
+        return {
+          success: true,
+          env: config.env,
+          orderId,
+          sfOrderId: parsed.sfOrderId || msgData.orderId,
+          waybillNo: parsed.waybillNo,
+          waybillNoInfoList: parsed.waybillNoInfoList || [],
+        };
+      }
+
+      if (parsed.duplicateOrder) {
+        const recovered = await recoverDuplicateOrder({ orderId }).catch(err => ({
+          success: false,
+          errMsg: err.message || String(err),
+        }));
+        if (recovered.success) {
+          return {
+            success: true,
+            env: recovered.env || config.env,
+            orderId,
+            sfOrderId: recovered.sfOrderId || msgData.orderId,
+            waybillNo: recovered.waybillNo,
+            waybillNoInfoList: recovered.waybillNoInfoList || [],
+            recoveredFromDuplicate: true,
+          };
+        }
+
+        if (shouldRetryWithNextSfOrderId(recovered) && attempt < config.duplicateRetryLimit) {
+          nextSeq += 1;
+          continue;
+        }
+
+        parsed.errMsg = `${parsed.errMsg}；已自动查询顺丰订单但未恢复成功：${recovered.errMsg || '未知错误'}`;
+      }
+
+      await markFailedOrder({ orderId, parsed });
 
       return {
         success: false,
         env: config.env,
+        orderId,
+        sfOrderId: msgData.orderId,
         errMsg: parsed.errMsg,
         errorCode: parsed.errorCode || '',
       };
     }
 
-    await updateOrder(orderId, {
-      status: 'shipped',
-      trackingNumber: parsed.waybillNo,
-      shippingFee: order.shippingFee || 'prepaid',
-      expressProvider: 'sf',
-      sfEnv: config.env,
-      expressApplyStatus: 'applied',
-      expressApplyTime: new Date().toISOString(),
-      expressErrorMsg: '',
-      sfRequestId: requestID,
-      sfOrderId: parsed.sfOrderId || msgData.orderId,
-      sfWaybillNo: parsed.waybillNo,
-      sfRawResponse: parsed.raw,
-    });
+    const errMsg = lastParsed?.errMsg || '顺丰下单失败，已达到重复客户订单号自动换号重试上限';
+    await markFailedOrder({ orderId, parsed: { ...(lastParsed || {}), errMsg } });
 
     return {
-      success: true,
+      success: false,
       env: config.env,
       orderId,
-      sfOrderId: parsed.sfOrderId || msgData.orderId,
-      waybillNo: parsed.waybillNo,
+      errMsg,
+      errorCode: lastParsed?.errorCode || '',
     };
   } catch (err) {
     console.error('顺丰下快递单失败:', {

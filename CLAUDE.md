@@ -16,7 +16,7 @@ npm run test:sf-token  # Run SF access token test
 **Never auto-deploy.** Only deploy when the user explicitly asks (e.g., "部署", "deploy", "上线"). After `npm run build`, just report success — do not trigger any CloudBase upload or deploy tools.
 
 To deploy frontend: upload `dist/` to CloudBase static hosting via the CloudBase MCP tool or `cloudbase` CLI.
-To deploy a cloud function: update its source in `cloud_functions/sendWechatNotification/functions/<name>/index.js` and deploy via CloudBase MCP or CLI.
+To deploy a cloud function: update its source in `cloud_functions/<name>/index.js` and deploy via CloudBase MCP or CLI.
 
 CloudBase env ID: `cloud1-8gvbotkt966e5e19` (Shanghai region). Environment variables in `.env`:
 - `VITE_CLOUDBASE_ENV` — env ID
@@ -42,7 +42,7 @@ This is a React 18 + TypeScript + Vite SPA backed entirely by **Tencent CloudBas
 
 ### Cloud Functions
 
-All cloud functions live in `cloud_functions/sendWechatNotification/functions/<name>/index.js`. The `cloudbaserc.json` at the repo root lists all deployed functions.
+All cloud functions live in `cloud_functions/<name>/index.js`. The `cloudbaserc.json` at the repo root lists all deployed functions.
 
 Key function groups:
 - **Records**: `queryRecords`, `updateRecord`, `deleteInboundRecord`, `deleteOutboundRecord`

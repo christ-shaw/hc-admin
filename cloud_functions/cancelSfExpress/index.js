@@ -1,11 +1,15 @@
 /**
- * querySfOrderResult - 查询顺丰下单结果
+ * cancelSfExpress - 取消顺丰发货
  *
  * 依赖云函数：
  * getSfAccessToken
  *
+ * 环境切换：
+ * 优先读数据库 system_config/sf_express 的 env 字段（sandbox | production），
+ * 改这条文档即可动态切换环境，无需重新部署；文档不存在时回退到 SF_ENV 环境变量。
+ *
  * 云函数环境变量：
- * SF_ENV                   sandbox | production，默认 sandbox
+ * SF_ENV                   sandbox | production，默认 sandbox（仅作为数据库配置缺失时的回退）
  * SF_CLIENT_CODE           默认顺丰客户编码
  * SF_SANDBOX_CLIENT_CODE   沙箱客户编码（可选，优先于 SF_CLIENT_CODE）
  * SF_PROD_CLIENT_CODE      生产客户编码（可选，优先于 SF_CLIENT_CODE）
@@ -14,7 +18,6 @@
  *
  * event.data:
  * orderId: string          orders 集合的 _id
- * searchType?: string      1 正向单，2 退货单，默认 1
  */
 
 const crypto = require('node:crypto');
@@ -28,7 +31,9 @@ const db = cloud.database();
 
 const ORDERS_COLLECTION = 'orders';
 const TOKEN_COLLECTION = 'sf_tokens';
-const SERVICE_CODE = 'EXP_RECE_SEARCH_ORDER_RESP';
+const CONFIG_COLLECTION = 'system_config';
+const SF_CONFIG_DOC_ID = 'sf_express';
+const SERVICE_CODE = 'EXP_RECE_UPDATE_ORDER';
 const DEFAULT_SERVICE_URLS = {
   sandbox: 'https://sfapi-sbox.sf-express.com/std/service',
   production: 'https://bspgw.sf-express.com/std/service',
@@ -53,8 +58,18 @@ function getFirstEnv(names) {
   return '';
 }
 
-function getSfConfig() {
-  const env = normalizeSfEnv();
+async function resolveSfEnv() {
+  let raw = '';
+  try {
+    const result = await db.collection(CONFIG_COLLECTION).doc(SF_CONFIG_DOC_ID).get();
+    raw = trimString(result.data && result.data.env);
+  } catch (err) {
+    raw = '';
+  }
+  return raw ? normalizeSfEnv(raw) : normalizeSfEnv();
+}
+
+function getSfConfig(env) {
   const partnerID = env === 'production'
     ? getFirstEnv(['SF_PROD_CLIENT_CODE', 'SF_PRODUCTION_CLIENT_CODE', 'SF_CLIENT_CODE'])
     : getFirstEnv(['SF_SANDBOX_CLIENT_CODE', 'SF_CLIENT_CODE']);
@@ -78,6 +93,18 @@ function buildRequestID() {
 function buildSfOrderId(orderId) {
   const normalized = trimString(orderId).replace(/[^a-zA-Z0-9_-]/g, '');
   return `HC_${normalized}`.slice(0, 64);
+}
+
+function getSfEnvLabel(env) {
+  return env === 'production' ? '生产环境' : '沙箱测试环境';
+}
+
+function assertOrderEnvMatchesConfig(order, config) {
+  if (!trimString(order.sfEnv)) return;
+  const orderEnv = normalizeSfEnv(order.sfEnv);
+  if (orderEnv !== config.env) {
+    throw new Error(`该订单是在${getSfEnvLabel(orderEnv)}下申请的，当前系统为${getSfEnvLabel(config.env)}，请先切换顺丰环境后再取消`);
+  }
 }
 
 async function getOrder(orderId) {
@@ -138,12 +165,22 @@ function isBusinessSuccess(apiResultData) {
 }
 
 function getPrimaryWaybillNo(waybillNoInfoList = []) {
-  if (!Array.isArray(waybillNoInfoList)) return '';
-  const primary = waybillNoInfoList.find(item => String(item.waybillType || '') === '1');
-  return trimString((primary || waybillNoInfoList[0] || {}).waybillNo);
+  const list = normalizeWaybillNoInfoList(waybillNoInfoList);
+  const primary = list.find(item => String(item.waybillType || '') === '1');
+  return trimString((primary || list[0] || {}).waybillNo);
 }
 
-function parseSfSearchOrderResponse(result) {
+function normalizeWaybillNoInfoList(waybillNoInfoList = []) {
+  if (!Array.isArray(waybillNoInfoList)) return [];
+  return waybillNoInfoList
+    .map(item => ({
+      waybillType: item.waybillType,
+      waybillNo: trimString(item.waybillNo),
+    }))
+    .filter(item => item.waybillNo);
+}
+
+function parseSfCancelResponse(result) {
   if (result.apiResultCode !== 'A1000') {
     return {
       success: false,
@@ -156,23 +193,25 @@ function parseSfSearchOrderResponse(result) {
   const apiResultData = parseJsonMaybe(result.apiResultData);
   const msgData = parseJsonMaybe(apiResultData.msgData);
   const errorCode = trimString(apiResultData.errorCode);
+  const resStatus = trimString(msgData.resStatus);
 
   if (!isBusinessSuccess(apiResultData) || errorCode !== 'S0000') {
     return {
       success: false,
-      errMsg: apiResultData.errorMsg || `顺丰业务查询失败: ${errorCode || 'UNKNOWN'}`,
+      errMsg: apiResultData.errorMsg || `顺丰取消发货失败: ${errorCode || 'UNKNOWN'}`,
       errorCode,
       raw: result,
       apiResultData,
+      msgData,
     };
   }
 
-  const waybillNo = getPrimaryWaybillNo(msgData.waybillNoInfoList);
-  if (!waybillNo) {
+  if (resStatus && resStatus !== '2') {
     return {
       success: false,
-      errMsg: '顺丰查询成功但未返回运单号',
+      errMsg: `顺丰取消发货未成功，resStatus=${resStatus}`,
       errorCode,
+      resStatus,
       raw: result,
       apiResultData,
       msgData,
@@ -181,15 +220,17 @@ function parseSfSearchOrderResponse(result) {
 
   return {
     success: true,
-    waybillNo,
     sfOrderId: trimString(msgData.orderId || apiResultData.orderId),
+    waybillNoInfoList: normalizeWaybillNoInfoList(msgData.waybillNoInfoList),
+    waybillNo: getPrimaryWaybillNo(msgData.waybillNoInfoList),
+    resStatus: resStatus || '2',
     raw: result,
     apiResultData,
     msgData,
   };
 }
 
-async function callSearchOrder({ config, accessToken, requestID, msgData }) {
+async function callUpdateOrder({ config, accessToken, requestID, msgData }) {
   const body = new URLSearchParams({
     partnerID: config.partnerID,
     requestID,
@@ -213,32 +254,32 @@ async function callSearchOrder({ config, accessToken, requestID, msgData }) {
   try {
     result = JSON.parse(text);
   } catch (err) {
-    throw new Error(`顺丰订单结果查询接口返回非 JSON，HTTP ${response.status}`);
+    throw new Error(`顺丰订单确认/取消接口返回非 JSON，HTTP ${response.status}`);
   }
 
   if (!response.ok) {
-    throw new Error(`顺丰订单结果查询接口 HTTP ${response.status}: ${result.apiErrorMsg || result.message || text}`);
+    throw new Error(`顺丰订单确认/取消接口 HTTP ${response.status}: ${result.apiErrorMsg || result.message || text}`);
   }
 
   return result;
 }
 
-async function searchOrderResult({ config, requestID, msgData }) {
+async function cancelOrder({ config, requestID, msgData }) {
   let accessToken = await getAccessToken(config, false);
-  let result = await callSearchOrder({ config, accessToken, requestID, msgData });
-  let parsed = parseSfSearchOrderResponse(result);
+  let result = await callUpdateOrder({ config, accessToken, requestID, msgData });
+  let parsed = parseSfCancelResponse(result);
 
   if (parsed.authFailed) {
     accessToken = await getAccessToken(config, true);
-    result = await callSearchOrder({ config, accessToken, requestID, msgData });
-    parsed = parseSfSearchOrderResponse(result);
+    result = await callUpdateOrder({ config, accessToken, requestID, msgData });
+    parsed = parseSfCancelResponse(result);
   }
 
   return parsed;
 }
 
 exports.main = async (event) => {
-  const { orderId, searchType = '1' } = event.data || {};
+  const { orderId } = event.data || {};
 
   if (!orderId) {
     return {
@@ -248,31 +289,41 @@ exports.main = async (event) => {
   }
 
   try {
-    const config = getSfConfig();
+    const env = await resolveSfEnv();
+    const config = getSfConfig(env);
     const order = await getOrder(orderId);
     if (!order) throw new Error('订单不存在');
+    assertOrderEnvMatchesConfig(order, config);
 
     const sfOrderId = trimString(order.sfOrderId) || buildSfOrderId(orderId);
     if (!sfOrderId) throw new Error('订单缺少顺丰客户订单号');
 
+    const storedWaybillNoInfoList = normalizeWaybillNoInfoList(order.sfWaybillNoInfoList);
+    const waybillNo = trimString(order.sfWaybillNo || order.trackingNumber);
+    const waybillNoInfoList = storedWaybillNoInfoList.length
+      ? storedWaybillNoInfoList
+      : (waybillNo ? [{ waybillType: 1, waybillNo }] : []);
     const requestID = buildRequestID();
     const msgData = {
       orderId: sfOrderId,
-      searchType: String(searchType || '1'),
+      dealType: 2,
       language: 'zh-CN',
     };
 
-    const parsed = await searchOrderResult({ config, requestID, msgData });
+    if (waybillNoInfoList.length) {
+      msgData.waybillNoInfoList = waybillNoInfoList;
+    }
+
+    const parsed = await cancelOrder({ config, requestID, msgData });
 
     if (!parsed.success) {
       await updateOrder(orderId, {
         expressProvider: 'sf',
         sfEnv: config.env,
-        expressApplyStatus: 'failed',
         expressErrorMsg: parsed.errMsg,
-        sfSearchRequestId: requestID,
+        sfCancelRequestId: requestID,
         sfOrderId,
-        sfSearchRawResponse: parsed.raw || null,
+        sfCancelRawResponse: parsed.raw || null,
       });
 
       return {
@@ -280,24 +331,27 @@ exports.main = async (event) => {
         env: config.env,
         orderId,
         sfOrderId,
+        waybillNo,
         errMsg: parsed.errMsg,
         errorCode: parsed.errorCode || '',
+        resStatus: parsed.resStatus || '',
       };
     }
 
     await updateOrder(orderId, {
-      status: 'shipped',
-      trackingNumber: parsed.waybillNo,
-      shippingFee: order.shippingFee || 'prepaid',
+      status: 'unknown',
+      trackingNumber: '',
+      shippingFee: '',
       expressProvider: 'sf',
       sfEnv: config.env,
-      expressApplyStatus: 'applied',
-      expressApplyTime: order.expressApplyTime || new Date().toISOString(),
+      expressApplyStatus: 'cancelled',
+      expressCancelTime: new Date().toISOString(),
       expressErrorMsg: '',
-      sfSearchRequestId: requestID,
+      sfCancelRequestId: requestID,
       sfOrderId: parsed.sfOrderId || sfOrderId,
-      sfWaybillNo: parsed.waybillNo,
-      sfSearchRawResponse: parsed.raw,
+      sfWaybillNo: '',
+      sfWaybillNoInfoList: [],
+      sfCancelRawResponse: parsed.raw,
     });
 
     return {
@@ -305,10 +359,11 @@ exports.main = async (event) => {
       env: config.env,
       orderId,
       sfOrderId: parsed.sfOrderId || sfOrderId,
-      waybillNo: parsed.waybillNo,
+      waybillNo: parsed.waybillNo || waybillNo,
+      resStatus: parsed.resStatus,
     };
   } catch (err) {
-    console.error('查询顺丰下单结果失败:', {
+    console.error('取消顺丰发货失败:', {
       orderId,
       message: err.message,
     });

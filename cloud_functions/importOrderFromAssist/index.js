@@ -15,6 +15,7 @@ cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 const db = cloud.database();
 
 const ORDERS_COLLECTION = 'orders';
+const OUTBOUND_COLLECTION = 'outbound_records';
 const LOG_COLLECTION = 'order_import_logs';
 const COUNTER_COLLECTION = 'system_counters';
 const PRODUCT_MODELS_COLLECTION = 'product_models';
@@ -189,6 +190,56 @@ async function fetchProductModels() {
   }).filter((b) => b.brand && b.products.length > 0);
 }
 
+function uniqueStrings(values) {
+  return Array.from(new Set((values || [])
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)));
+}
+
+async function getCloudTempFileUrls(fileIds) {
+  const ids = uniqueStrings(fileIds);
+  if (ids.length === 0) return [];
+
+  const cloudFileIds = ids.filter((id) => id.startsWith('cloud://'));
+  const directUrls = ids.filter((id) => !id.startsWith('cloud://'));
+  if (cloudFileIds.length === 0) return directUrls;
+
+  try {
+    const res = await cloud.getTempFileURL({ fileList: cloudFileIds });
+    const urlMap = {};
+    (res.fileList || []).forEach((item) => {
+      if (item.fileID && item.tempFileURL) urlMap[item.fileID] = item.tempFileURL;
+    });
+    return ids.map((id) => urlMap[id] || id);
+  } catch (err) {
+    console.warn('[importOrderFromAssist] 转换出库照片临时链接失败:', err);
+    return ids;
+  }
+}
+
+async function findOutboundRecord(orderDoc) {
+  const orderId = String(orderDoc && orderDoc._id || '').trim();
+  const trackingNumber = String(orderDoc && orderDoc.trackingNumber || '').trim();
+
+  if (orderId) {
+    const byOrderId = await db.collection(OUTBOUND_COLLECTION)
+      .where({ orderIds: orderId })
+      .limit(1)
+      .get();
+    if (byOrderId.data && byOrderId.data[0]) return byOrderId.data[0];
+  }
+
+  if (trackingNumber) {
+    const byTracking = await db.collection(OUTBOUND_COLLECTION)
+      .where({ trackingNumber })
+      .limit(1)
+      .get();
+    if (byTracking.data && byTracking.data[0]) return byTracking.data[0];
+  }
+
+  return null;
+}
+
 // 插件 normalized 字段 -> orders 集合字段（扁平结构，与前端建单一致）
 function mapToOrder(order, serialNumber, now) {
   const quantity = Number(order.goodsQuantity) || 1;
@@ -276,11 +327,19 @@ exports.main = async (event) => {
       // 优先取已有快递单号的那条
       const withTracking = docs.find((d) => String(d.trackingNumber || '').trim());
       const doc = withTracking || docs[0];
+      const outbound = await findOutboundRecord(doc);
+      const phonePhotos = await getCloudTempFileUrls(outbound && outbound.phonePhotos);
       return ok('OK', '查询成功', {
         found: true,
         trackingNumber: String(doc.trackingNumber || '').trim(),
         sfWaybillNo: String(doc.sfWaybillNo || '').trim(),
-        expressProvider: doc.expressProvider || '',
+        expressProvider: doc.expressProvider || outbound?.expressProvider || outbound?.expressCompany || '',
+        customerName: outbound?.customerName || doc.customerName || doc.consignee || '',
+        shipmentPhotos: phonePhotos,
+        phonePhotos,
+        outboundId: outbound?._id || '',
+        outboundDate: outbound?.outboundDate || '',
+        completedBy: outbound?.completedBy || '',
         status: doc.status || '',
         serialNumber: doc.serialNumber,
       });
