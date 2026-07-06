@@ -228,6 +228,13 @@ function shouldShowProductPaymentFields(orderSource?: string, orderType?: string
   return true;
 }
 
+/** 多订单客服备注去重拼接（生成出库单时带入出库备注） */
+function mergeCustomerRemarks(records: Array<Pick<OrderRecord, 'customerRemark'>>): string {
+  return Array.from(new Set(
+    records.map(r => String(r.customerRemark || '').trim()).filter(Boolean)
+  )).join('；');
+}
+
 function formatPhoneModels(phoneModels?: PhoneModelItem[]): string {
   if (!phoneModels || phoneModels.length === 0) return '-';
   return phoneModels.map(item => `${item.model || '-'} x${item.quantity || 0}`).join('，');
@@ -903,7 +910,7 @@ export function Orders() {
         // 勾选了"保存后自动生成待出库单"且订单为待发货时，自动生成；失败不影响订单已创建
         const newOrderId = result.savedIds?.[0];
         if (addAutoOutbound.enabled && addForm.needsOutbound && newOrderId && isPendingShipmentStatus(shipmentFields.status)) {
-          const gen = await orders.generateOutbound([newOrderId], addAutoOutbound.shippingMethod);
+          const gen = await orders.generateOutbound([newOrderId], addAutoOutbound.shippingMethod, addForm.customerRemark.trim());
           if (gen.success) {
             MessagePlugin.success('已自动生成待出库单');
           } else {
@@ -989,7 +996,8 @@ export function Orders() {
   const openGenerateDialog = useCallback((records: OrderRecord[]) => {
     setGenOutOrders(records);
     setGenOutShippingMethod(records[0]?.shippingFee || 'prepaid');
-    setGenOutRemark('');
+    // 客服备注带入出库备注（多订单去重拼接），可编辑
+    setGenOutRemark(mergeCustomerRemarks(records));
     setGenOutVisible(true);
   }, []);
 

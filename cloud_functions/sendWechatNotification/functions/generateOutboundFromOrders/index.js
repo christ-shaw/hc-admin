@@ -189,10 +189,13 @@ exports.main = async (event) => {
       return { success: false, code: 'MIXED_CUSTOMER', errMsg: '合并的订单必须属于同一客户' };
     }
 
-    // 3. 聚合货品并建出库单
+    // 3. 聚合货品并建出库单；备注缺省时带入各订单客服备注（去重拼接）
     const phoneModels = aggregatePhoneModels(orders);
     const first = orders[0];
     const now = db.serverDate();
+    const effectiveRemark = remark || Array.from(new Set(
+      orders.map(o => String(o.customerRemark || '').trim()).filter(Boolean)
+    )).join('；');
     const addRes = await transaction.collection(OUTBOUND).add({
       data: {
         customerName,
@@ -200,7 +203,7 @@ exports.main = async (event) => {
         source: 'order',
         orderIds,
         shippingMethod,
-        remark,
+        remark: effectiveRemark,
         salesperson: first.salesperson || '',
         consignee: first.consignee || '',
         consigneePhone: first.consigneePhone || '',

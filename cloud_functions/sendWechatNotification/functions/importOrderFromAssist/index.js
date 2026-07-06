@@ -380,7 +380,7 @@ async function syncOutboundAfterImport({ orderId, orderDoc, appendedProducts, au
         source: 'order',
         orderIds: [orderId],
         shippingMethod: normalizeShippingMethod(autoOutbound.shippingMethod),
-        remark: '',
+        remark: String(orderDoc.customerRemark || '').trim(), // 客服备注（含原商品名）带入出库单
         salesperson: orderDoc.salesperson || '',
         consignee: orderDoc.consignee || '',
         consigneePhone: orderDoc.consigneePhone || '',
