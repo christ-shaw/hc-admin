@@ -148,7 +148,7 @@
     {
       "name": "sendWechatNotification",
       "handler": "index.main",
-      "runtime": "Nodejs18.15"
+      "runtime": "Nodejs24.11"
     },
     {
       "name": "queryInvoices",
@@ -197,11 +197,6 @@
     },
     {
       "name": "completeOutbound",
-      "handler": "index.main",
-      "runtime": "Nodejs18.15"
-    },
-    {
-      "name": "migrateOrdersToProducts",
       "handler": "index.main",
       "runtime": "Nodejs18.15"
     }
