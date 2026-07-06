@@ -1,9 +1,0 @@
-{
-  "name": "migrateOrdersToProducts",
-  "version": "1.0.0",
-  "description": "订单数据结构迁移：扁平单货品文档合并为带 products 数组的单文档",
-  "main": "index.js",
-  "dependencies": {
-    "wx-server-sdk": "~2.6.3"
-  }
-}
