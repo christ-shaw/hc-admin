@@ -27,6 +27,7 @@ exports.main = async (event, context) => {
   try {
     const now = db.serverDate();
     let savedCount = 0;
+    const savedIds = [];
     const errors = [];
 
     // 逐条插入，支持大批量数据
@@ -35,11 +36,12 @@ exports.main = async (event, context) => {
       try {
         // 移除 _id 字段（如果存在），让数据库自动生成
         const { _id, ...orderData } = order;
-        
+
         // 添加创建时间
         orderData.createTime = now;
 
-        await db.collection('orders').add({ data: orderData });
+        const addRes = await db.collection('orders').add({ data: orderData });
+        savedIds.push(addRes._id);
         savedCount++;
       } catch (err) {
         console.error(`保存第 ${i + 1} 条订单失败:`, err);
@@ -55,6 +57,7 @@ exports.main = async (event, context) => {
     return {
       success: savedCount > 0,
       savedCount,
+      savedIds,
       failedCount: orders.length - savedCount,
       errors: errors.length > 0 ? errors : undefined,
       errMsg: savedCount === orders.length 

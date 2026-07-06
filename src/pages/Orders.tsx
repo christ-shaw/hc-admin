@@ -8,7 +8,7 @@ import { useOrders } from '../hooks/useOrders';
 import { usePhoneModels } from '../hooks/usePhoneModels';
 import { formatDate, getTotalQuantity } from '../utils/format';
 import { parseOrderExcel, exportOrderExcel } from '../utils/orderExcel';
-import { getOrderProducts, getOrderTotalAmount, getOrderTotalQuantity, hasUnreceivedPayment } from '../utils/orderProducts';
+import { getOrderProducts, getOrderTotalAmount, getOrderTotalQuantity, getOrderPaymentSplits, hasUnreceivedPayment } from '../utils/orderProducts';
 import { getBrandLabel, getProductLabel } from '../data/dict';
 import {
   parseConsigneeInfo,
@@ -54,8 +54,6 @@ const EMPTY_PRODUCT: ProductItem = {
   quantity: 0,
   unitPrice: 0,
   amount: 0,
-  paymentAccount: '',
-  paymentSplits: [],
 };
 
 /** 转租赁2货品条目默认值 */
@@ -88,11 +86,21 @@ interface OrderFormData {
   customerRemark: string;
   transferProducts: TransferProductItem[];
   products: ProductItem[];
+  paymentAccount: string;           // 订单级收款账户（展示值，由拆分推导）
+  paymentSplits: PaymentSplit[];    // 订单级多账户拆分，合计对齐订单总金额
   attachments: OrderAttachment[];
   returnStatus: string;
   returnTrackingNumbers: string;
   needsOutbound: boolean;
 }
+
+/** 新建订单时"保存后自动生成待出库单"选项 */
+interface AutoOutboundOption {
+  enabled: boolean;
+  shippingMethod: string;
+}
+
+const DEFAULT_AUTO_OUTBOUND: AutoOutboundOption = { enabled: true, shippingMethod: 'prepaid' };
 
 interface OrderWizardDictionaries {
   ORDER_SOURCE_MAP: Record<string, string>;
@@ -134,6 +142,8 @@ const EMPTY_ORDER: OrderFormData = {
   customerRemark: '',
   transferProducts: [],
   products: [{ ...EMPTY_PRODUCT }],
+  paymentAccount: '',
+  paymentSplits: [],
   attachments: [],
   returnStatus: '',
   returnTrackingNumbers: '',
@@ -219,6 +229,13 @@ function shouldShowProductPaymentFields(orderSource?: string, orderType?: string
   return true;
 }
 
+/** 多订单客服备注去重拼接（生成出库单时带入出库备注） */
+function mergeCustomerRemarks(records: Array<Pick<OrderRecord, 'customerRemark'>>): string {
+  return Array.from(new Set(
+    records.map(r => String(r.customerRemark || '').trim()).filter(Boolean)
+  )).join('；');
+}
+
 function formatPhoneModels(phoneModels?: PhoneModelItem[]): string {
   if (!phoneModels || phoneModels.length === 0) return '-';
   return phoneModels.map(item => `${item.model || '-'} x${item.quantity || 0}`).join('，');
@@ -246,10 +263,20 @@ function clearHiddenProductPaymentFields(form: Pick<OrderFormData, 'orderSource'
       ...product,
       unitPrice: 0,
       amount: 0,
-      paymentAccount: '',
-      paymentSplits: [],
     };
   });
+}
+
+/** 订单级收款区是否显示：任一货品的收款字段可见即显示 */
+function shouldShowOrderPaymentSection(form: Pick<OrderFormData, 'orderSource' | 'orderType' | 'orderAttribute' | 'products'>): boolean {
+  return form.products.some(product =>
+    shouldShowProductPaymentFields(form.orderSource, form.orderType, form.orderAttribute, product.brand)
+  );
+}
+
+/** 订单总金额 = 各货品金额之和（隐藏收款的货品金额已被清零） */
+function getFormTotalAmount(form: Pick<OrderFormData, 'products'>): number {
+  return form.products.reduce((sum, product) => sum + (Number(product.amount) || 0), 0);
 }
 
 function parsePaymentSplits(value: OrderRecord['paymentSplits'] | ProductItem['paymentSplits']): PaymentSplit[] {
@@ -274,15 +301,17 @@ function normalizePaymentSplits(source: Pick<ProductItem, 'paymentAccount' | 'am
   return source.paymentAccount ? [{ account: source.paymentAccount, amount: Math.max(0, Number(source.amount) || 0) }] : [];
 }
 
-function getEditablePaymentSplits(product: ProductItem): PaymentSplit[] {
-  const rawSplits = parsePaymentSplits(product.paymentSplits)
+/** 订单级收款拆分的可编辑视图：无拆分时给一行默认（金额=订单总额） */
+function getEditableOrderPaymentSplits(form: Pick<OrderFormData, 'paymentAccount' | 'paymentSplits' | 'products'>): PaymentSplit[] {
+  const total = getFormTotalAmount(form);
+  const rawSplits = parsePaymentSplits(form.paymentSplits)
     .map(split => ({
       account: String(split.account || ''),
       amount: Math.max(0, Number(split.amount) || 0),
     }));
   if (rawSplits.length > 0) return rawSplits;
-  if (product.paymentAccount) return [{ account: product.paymentAccount, amount: Math.max(0, Number(product.amount) || 0) }];
-  return [{ account: '', amount: Math.max(0, Number(product.amount) || 0) }];
+  if (form.paymentAccount) return [{ account: form.paymentAccount, amount: total }];
+  return [{ account: '', amount: total }];
 }
 
 function getPaymentAccountValue(splits: PaymentSplit[]): string {
@@ -291,14 +320,13 @@ function getPaymentAccountValue(splits: PaymentSplit[]): string {
   return Array.from(new Set(accounts)).join('、');
 }
 
-function getPaymentSplitTotal(product: ProductItem): number {
-  return normalizePaymentSplits(product).reduce((sum, split) => sum + (Number(split.amount) || 0), 0);
-}
-
-function isPaymentSplitValid(product: ProductItem): boolean {
-  const splits = normalizePaymentSplits(product);
+/** 订单级收款校验：每笔拆分账户+金额齐全，合计等于订单总金额 */
+function isOrderPaymentValid(form: Pick<OrderFormData, 'paymentAccount' | 'paymentSplits' | 'products'>): boolean {
+  const total = getFormTotalAmount(form);
+  const splits = normalizePaymentSplits({ paymentAccount: form.paymentAccount, amount: total, paymentSplits: form.paymentSplits });
   if (splits.length === 0 || splits.some(split => !split.account || split.amount <= 0)) return false;
-  return Math.abs(getPaymentSplitTotal(product) - (Number(product.amount) || 0)) < 0.01;
+  const splitTotal = splits.reduce((sum, split) => sum + (Number(split.amount) || 0), 0);
+  return Math.abs(splitTotal - total) < 0.01;
 }
 
 function formatPaymentSplits(source: Pick<OrderRecord, 'paymentAccount' | 'amount' | 'paymentSplits'>): string {
@@ -308,19 +336,26 @@ function formatPaymentSplits(source: Pick<OrderRecord, 'paymentAccount' | 'amoun
   return splits.map(split => `${split.account || '-'} ¥${split.amount || 0}`).join('；');
 }
 
+/** 保存时剥离货品级收款字段（收款在订单级） */
 function serializeProductForSave(product: ProductItem): ProductItem {
-  const paymentSplits = normalizePaymentSplits(product);
-  return {
-    ...product,
-    paymentSplits,
-    paymentAccount: getPaymentAccountValue(paymentSplits),
-  };
+  const { paymentAccount: _pa, paymentSplits: _ps, ...rest } = product;
+  return rest;
 }
 
-function syncSinglePaymentSplitAmount(product: ProductItem, amount: number): PaymentSplit[] {
-  const splits = normalizePaymentSplits(product);
+/** 货品金额变化后同步订单级收款：单一拆分自动跟随订单总额，多拆分保持人工填写 */
+function syncOrderPaymentSplits(form: Pick<OrderFormData, 'paymentAccount' | 'paymentSplits' | 'products'>): PaymentSplit[] {
+  const total = getFormTotalAmount(form);
+  const splits = normalizePaymentSplits({ paymentAccount: form.paymentAccount, amount: total, paymentSplits: form.paymentSplits });
   if (splits.length > 1) return splits;
-  return [{ account: splits[0]?.account || product.paymentAccount || '', amount }];
+  return [{ account: splits[0]?.account || form.paymentAccount || '', amount: total }];
+}
+
+/** 保存前归一化订单级收款：区块隐藏时清空 */
+function serializeOrderPayment(form: Pick<OrderFormData, 'orderSource' | 'orderType' | 'orderAttribute' | 'products' | 'paymentAccount' | 'paymentSplits'>): { paymentAccount: string; paymentSplits: PaymentSplit[] } {
+  if (!shouldShowOrderPaymentSection(form)) return { paymentAccount: '', paymentSplits: [] };
+  const total = getFormTotalAmount(form);
+  const paymentSplits = normalizePaymentSplits({ paymentAccount: form.paymentAccount, amount: total, paymentSplits: form.paymentSplits });
+  return { paymentAccount: getPaymentAccountValue(paymentSplits), paymentSplits };
 }
 
 function buildEditFormFromRecord(record: OrderRecord): OrderFormData {
@@ -362,7 +397,12 @@ function buildEditFormFromRecord(record: OrderRecord): OrderFormData {
     products: (() => {
       const items = getOrderProducts(record);
       if (items.length === 0) return [{ ...EMPTY_PRODUCT }];
-      return items.map(item => ({ ...item, paymentSplits: normalizePaymentSplits(item) }));
+      return items.map(item => ({ ...item }));
+    })(),
+    // 订单级收款：新数据直接读，旧货品级收款自动折算合并（编辑保存后即收敛为订单级）
+    ...(() => {
+      const paymentSplits = getOrderPaymentSplits(record);
+      return { paymentSplits, paymentAccount: getPaymentAccountValue(paymentSplits) };
     })(),
     attachments: record.attachments || [],
     returnStatus: record.returnStatus || '',
@@ -458,6 +498,7 @@ export function Orders() {
   const [cancelingSfId, setCancelingSfId] = useState<string | null>(null);
   const [addVisible, setAddVisible] = useState(false);
   const [addForm, setAddForm] = useState<OrderFormData>(EMPTY_ORDER);
+  const [addAutoOutbound, setAddAutoOutbound] = useState<AutoOutboundOption>(DEFAULT_AUTO_OUTBOUND);
   const [saving, setSaving] = useState(false);
   const [editVisible, setEditVisible] = useState(false);
   const [editForm, setEditForm] = useState<OrderFormData>(EMPTY_ORDER);
@@ -737,6 +778,7 @@ export function Orders() {
     const operatorName = await getCurrentOperatorName();
     const nickname = operatorName || SALESPERSONS[0];
     setAddForm({ ...EMPTY_ORDER, date: dateStr, salesperson: nickname, products: [{ ...EMPTY_PRODUCT }] });
+    setAddAutoOutbound(DEFAULT_AUTO_OUTBOUND);
     setAddAttachFiles([]);
     setAddStep(1);
     setAddVisible(true);
@@ -762,7 +804,7 @@ export function Orders() {
       if (addForm.products.some(p => !p.specification)) { MessagePlugin.warning('请选择规格'); return; }
       if (addForm.products.some(p => !p.quantity || p.quantity <= 0)) { MessagePlugin.warning('请填写数量'); return; }
       if (addForm.products.some(p => shouldShowProductPaymentFields(addForm.orderSource, addForm.orderType, addForm.orderAttribute, p.brand) && (!p.unitPrice || p.unitPrice <= 0))) { MessagePlugin.warning('请填写单价'); return; }
-      if (addForm.products.some(p => shouldShowProductPaymentFields(addForm.orderSource, addForm.orderType, addForm.orderAttribute, p.brand) && !isPaymentSplitValid(p))) { MessagePlugin.warning('请填写收款账户，并确保收款金额合计等于货品金额'); return; }
+      if (shouldShowOrderPaymentSection(addForm) && !isOrderPaymentValid(addForm)) { MessagePlugin.warning('请填写收款账户，并确保收款金额合计等于订单总金额'); return; }
       if (addForm.products.some(p => p.productName === '部分转租赁2' || p.productName === '全部转租赁2') && addForm.transferProducts.some(t => !t.paidPeriod || t.paidPeriod <= 0)) { MessagePlugin.warning('转租赁2请填写已交租期'); return; }
       if (addForm.products.some(p => p.productName === '部分转租赁2' || p.productName === '全部转租赁2') && addForm.transferProducts.some(t => !t.paidRent || t.paidRent <= 0)) { MessagePlugin.warning('转租赁2请填写已交租金'); return; }
     }
@@ -790,8 +832,9 @@ export function Orders() {
         addForm.customerRemark.trim() ||
         addForm.transferProducts.some(t => t.brand || t.productName || t.specification || t.paidPeriod || t.paidRent) ||
         addAttachFiles.length > 0) return true;
-    // 检查货品是否有数据
-    return addForm.products.some(p => p.brand || p.productName || p.specification || p.quantity || p.unitPrice || p.paymentAccount || normalizePaymentSplits(p).length > 0);
+    // 检查货品/订单收款是否有数据
+    if (addForm.paymentSplits.some(split => split.account || split.amount > 0)) return true;
+    return addForm.products.some(p => p.brand || p.productName || p.specification || p.quantity || p.unitPrice);
   };
 
   const handleRequestCloseAdd = () => {
@@ -852,6 +895,7 @@ export function Orders() {
         onlineOrderNumber: addForm.onlineOrderNumber,
         customerName: addForm.customerName,
         products: addForm.products.map(serializeProductForSave),
+        ...serializeOrderPayment(addForm),
         trackingNumber: shipmentFields.trackingNumber,
         consignee: addForm.consignee,
         consigneePhone: addForm.consigneePhone,
@@ -874,6 +918,16 @@ export function Orders() {
       const result = await orders.importOrders([newRecord]);
       if (result.success) {
         MessagePlugin.success(newRecord.products && newRecord.products.length > 1 ? `新增订单成功，含 ${newRecord.products.length} 条货品` : '新增订单成功');
+        // 勾选了"保存后自动生成待出库单"且订单为待发货时，自动生成；失败不影响订单已创建
+        const newOrderId = result.savedIds?.[0];
+        if (addAutoOutbound.enabled && addForm.needsOutbound && newOrderId && isPendingShipmentStatus(shipmentFields.status)) {
+          const gen = await orders.generateOutbound([newOrderId], addAutoOutbound.shippingMethod, addForm.customerRemark.trim());
+          if (gen.success) {
+            MessagePlugin.success('已自动生成待出库单');
+          } else {
+            MessagePlugin.warning(`订单已创建，但自动生成出库单失败：${gen.errMsg || '未知错误'}，可稍后在列表手动生成`);
+          }
+        }
         setAddVisible(false);
         setAddStep(1);
         setAddForm(EMPTY_ORDER);
@@ -983,7 +1037,8 @@ export function Orders() {
   const openGenerateDialog = useCallback((records: OrderRecord[]) => {
     setGenOutOrders(records);
     setGenOutShippingMethod(records[0]?.shippingFee || 'prepaid');
-    setGenOutRemark('');
+    // 客服备注带入出库备注（多订单去重拼接），可编辑
+    setGenOutRemark(mergeCustomerRemarks(records));
     setGenOutVisible(true);
   }, []);
 
@@ -1207,7 +1262,7 @@ export function Orders() {
       if (editForm.products.some(p => !p.specification)) { MessagePlugin.warning('请选择规格'); return; }
       if (editForm.products.some(p => !p.quantity || p.quantity <= 0)) { MessagePlugin.warning('请填写数量'); return; }
       if (editForm.products.some(p => shouldShowProductPaymentFields(editForm.orderSource, editForm.orderType, editForm.orderAttribute, p.brand) && (!p.unitPrice || p.unitPrice <= 0))) { MessagePlugin.warning('请填写单价'); return; }
-      if (editForm.products.some(p => shouldShowProductPaymentFields(editForm.orderSource, editForm.orderType, editForm.orderAttribute, p.brand) && !isPaymentSplitValid(p))) { MessagePlugin.warning('请填写收款账户，并确保收款金额合计等于货品金额'); return; }
+      if (shouldShowOrderPaymentSection(editForm) && !isOrderPaymentValid(editForm)) { MessagePlugin.warning('请填写收款账户，并确保收款金额合计等于订单总金额'); return; }
       const editHasTransfer = editForm.products.some(p => p.productName === '部分转租赁2' || p.productName === '全部转租赁2');
       if (editHasTransfer && editForm.transferProducts.some(t => !t.paidPeriod || t.paidPeriod <= 0)) { MessagePlugin.warning('转租赁2请填写已交租期'); return; }
       if (editHasTransfer && editForm.transferProducts.some(t => !t.paidRent || t.paidRent <= 0)) { MessagePlugin.warning('转租赁2请填写已交租金'); return; }
@@ -1254,15 +1309,14 @@ export function Orders() {
         onlineOrderNumber: editForm.onlineOrderNumber,
         customerName: editForm.customerName,
         products: editForm.products.map(serializeProductForSave),
-        // 清空旧扁平货品字段，避免与 products 并存产生歧义
+        // 收款在订单级；清空旧扁平货品字段，避免与 products 并存产生歧义
+        ...serializeOrderPayment(editForm),
         brand: '',
         productName: '',
         specification: '',
         quantity: 0,
         unitPrice: 0,
         amount: 0,
-        paymentAccount: '',
-        paymentSplits: [],
         trackingNumber: shipmentFields.trackingNumber,
         consignee: editForm.consignee,
         consigneePhone: editForm.consigneePhone,
@@ -1585,10 +1639,19 @@ export function Orders() {
                   <DetailRow label="数量" value={product.quantity} />
                   {showPayment && <DetailRow label="单价" value={product.unitPrice ? `¥${product.unitPrice}` : '-'} />}
                   {showPayment && <DetailRow label="金额" value={product.amount ? `¥${product.amount}` : '-'} />}
-                  {showPayment && <DetailRow label="收款账户" value={formatPaymentSplits(product)} />}
                 </div>
               );
             })}
+            {/* 收款在订单级；旧数据货品级收款由 getOrderPaymentSplits 自动折算展示 */}
+            {shouldShowOrderPaymentSection({ ...currentRecord, products: getOrderProducts(currentRecord) }) && (() => {
+              const splits = getOrderPaymentSplits(currentRecord);
+              const text = splits.length === 0
+                ? '-'
+                : splits.length === 1
+                  ? (splits[0].account || '-')
+                  : splits.map(split => `${split.account || '-'} ¥${split.amount || 0}`).join('；');
+              return <DetailRow label="收款账户" value={text} />;
+            })()}
             <DetailRow label="收货人名称" value={currentRecord.consignee} />
             <DetailRow label="收货人电话" value={currentRecord.consigneePhone} />
             <DetailRow label="收货人地址" value={currentRecord.consigneeAddress} />
@@ -2034,6 +2097,8 @@ export function Orders() {
           productModelBrands={productModels.brands}
           productModelLoading={productModels.loading}
           productModelLoadError={productModels.loadError}
+          autoOutbound={addAutoOutbound}
+          onAutoOutboundChange={setAddAutoOutbound}
         />
       </Dialog>
 
@@ -2268,7 +2333,7 @@ export function Orders() {
 
 /** 新增订单 6 步向导 */
 function AddOrderWizard({
-  step, form, attachFiles, attachInputRef, onChange, onAttachFilesChange, dictionaries, productModelBrands, productModelLoading = false, productModelLoadError = '', mode = 'add',
+  step, form, attachFiles, attachInputRef, onChange, onAttachFilesChange, dictionaries, productModelBrands, productModelLoading = false, productModelLoadError = '', mode = 'add', autoOutbound, onAutoOutboundChange,
 }: {
   step: number;
   form: OrderFormData;
@@ -2281,6 +2346,8 @@ function AddOrderWizard({
   productModelLoading?: boolean;
   productModelLoadError?: string;
   mode?: 'add' | 'edit';
+  autoOutbound?: AutoOutboundOption;
+  onAutoOutboundChange?: (value: AutoOutboundOption) => void;
 }) {
   const {
     ORDER_SOURCE_MAP,
@@ -2342,42 +2409,47 @@ function AddOrderWizard({
   const updateField = useCallback(<K extends keyof OrderFormData>(key: K, val: OrderFormData[K]) => {
     onChange(prev => ({ ...prev, [key]: val }));
   }, [onChange]);
+  /** 货品变更后统一收敛：清理隐藏字段、联动虚拟单状态、同步订单级收款金额 */
+  const applyProductsChange = useCallback((prev: OrderFormData, products: ProductItem[]): OrderFormData => {
+    const cleanedProducts = clearHiddenProductPaymentFields({ ...prev, products });
+    const next = applyVirtualProductStatus(prev, cleanedProducts);
+    return { ...next, paymentSplits: syncOrderPaymentSplits(next) };
+  }, []);
   const updateProduct = useCallback((index: number, patch: Partial<ProductItem>) => {
     onChange(prev => {
       const products = [...prev.products];
       products[index] = { ...products[index], ...patch };
-      const cleanedProducts = clearHiddenProductPaymentFields({ ...prev, products });
-      return applyVirtualProductStatus(prev, cleanedProducts);
+      return applyProductsChange(prev, products);
     });
-  }, [onChange]);
+  }, [onChange, applyProductsChange]);
   const addProduct = useCallback(() => {
-    onChange(prev => applyVirtualProductStatus(prev, [...prev.products, { ...EMPTY_PRODUCT }]));
-  }, [onChange]);
+    onChange(prev => applyProductsChange(prev, [...prev.products, { ...EMPTY_PRODUCT }]));
+  }, [onChange, applyProductsChange]);
   const removeProduct = useCallback((index: number) => {
     onChange(prev => {
       if (prev.products.length <= 1) return prev;
-      return applyVirtualProductStatus(prev, prev.products.filter((_, i) => i !== index));
+      return applyProductsChange(prev, prev.products.filter((_, i) => i !== index));
     });
-  }, [onChange]);
-  const updateProductPaymentSplits = useCallback((index: number, splits: PaymentSplit[]) => {
+  }, [onChange, applyProductsChange]);
+  // 订单级收款拆分编辑
+  const updateOrderPaymentSplits = useCallback((splits: PaymentSplit[]) => {
     const cleanedSplits = splits.map(split => ({
       account: split.account,
       amount: Math.max(0, Number(split.amount) || 0),
     }));
-    updateProduct(index, {
+    onChange(prev => ({
+      ...prev,
       paymentSplits: cleanedSplits,
       paymentAccount: getPaymentAccountValue(cleanedSplits),
-    });
-  }, [updateProduct]);
-  const addProductPaymentSplit = useCallback((index: number) => {
-    const product = form.products[index];
-    updateProductPaymentSplits(index, [...getEditablePaymentSplits(product), { account: '', amount: 0 }]);
-  }, [form.products, updateProductPaymentSplits]);
-  const removeProductPaymentSplit = useCallback((index: number, splitIndex: number) => {
-    const product = form.products[index];
-    const nextSplits = getEditablePaymentSplits(product).filter((_, i) => i !== splitIndex);
-    updateProductPaymentSplits(index, nextSplits.length > 0 ? nextSplits : [{ account: '', amount: product.amount || 0 }]);
-  }, [form.products, updateProductPaymentSplits]);
+    }));
+  }, [onChange]);
+  const addOrderPaymentSplit = useCallback(() => {
+    updateOrderPaymentSplits([...getEditableOrderPaymentSplits(form), { account: '', amount: 0 }]);
+  }, [form, updateOrderPaymentSplits]);
+  const removeOrderPaymentSplit = useCallback((splitIndex: number) => {
+    const nextSplits = getEditableOrderPaymentSplits(form).filter((_, i) => i !== splitIndex);
+    updateOrderPaymentSplits(nextSplits.length > 0 ? nextSplits : [{ account: '', amount: getFormTotalAmount(form) }]);
+  }, [form, updateOrderPaymentSplits]);
 
   // 转租赁2货品 CRUD
   const updateTransferProduct = useCallback((index: number, patch: Partial<TransferProductItem>) => {
@@ -2673,8 +2745,7 @@ function AddOrderWizard({
                       <Input type="number" placeholder="数量"
                         value={product.quantity ? String(product.quantity) : ''} onChange={val => {
                           const q = Math.max(0, Number(val));
-                          const amount = q * product.unitPrice;
-                          updateProduct(idx, { quantity: q, amount, paymentSplits: syncSinglePaymentSplitAmount(product, amount) });
+                          updateProduct(idx, { quantity: q, amount: q * product.unitPrice });
                         }} />
                     </div>
                     {shouldShowPaymentFields && (
@@ -2683,8 +2754,7 @@ function AddOrderWizard({
                         <Input type="number" placeholder="单价"
                           value={product.unitPrice ? String(product.unitPrice) : ''} onChange={val => {
                             const p = Math.max(0, Number(val));
-                            const amount = product.quantity * p;
-                            updateProduct(idx, { unitPrice: p, amount, paymentSplits: syncSinglePaymentSplitAmount(product, amount) });
+                            updateProduct(idx, { unitPrice: p, amount: product.quantity * p });
                           }} />
                       </div>
                     )}
@@ -2695,46 +2765,49 @@ function AddOrderWizard({
                           value={product.amount ? String(product.amount) : ''} readOnly />
                       </div>
                     )}
-                    {shouldShowPaymentFields && (
-                      <div className="grid grid-cols-1 gap-2 md:col-span-3">
-                        <div className="flex items-center justify-between">
-                          <label className="block text-xs text-gray-500">收款账户 <span className="text-red-500">*</span></label>
-                          <Button size="small" variant="outline" icon={<Plus size={14} />} onClick={() => addProductPaymentSplit(idx)}>添加收款</Button>
-                        </div>
-                        {getEditablePaymentSplits(product).map((split, splitIndex) => {
-                          const splits = getEditablePaymentSplits(product);
-                          const splitTotal = splits.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
-                          const diff = (product.amount || 0) - splitTotal;
-                          return (
-                            <div key={splitIndex} className="grid grid-cols-[1fr_160px_36px] items-center gap-2">
-                              <Select placeholder="请选择收款账户" value={split.account || ''}
-                                onChange={val => {
-                                  const nextSplits = [...splits];
-                                  nextSplits[splitIndex] = { ...nextSplits[splitIndex], account: val as string };
-                                  updateProductPaymentSplits(idx, nextSplits);
-                                }} options={PAYMENT_ACCOUNT_OPTIONS} />
-                              <Input type="number" placeholder="金额" value={split.amount ? String(split.amount) : ''}
-                                onChange={val => {
-                                  const nextSplits = [...splits];
-                                  nextSplits[splitIndex] = { ...nextSplits[splitIndex], amount: Math.max(0, Number(val) || 0) };
-                                  updateProductPaymentSplits(idx, nextSplits);
-                                }} />
-                              <Button size="small" variant="text" theme="danger" icon={<Minus size={14} />} disabled={splits.length <= 1} onClick={() => removeProductPaymentSplit(idx, splitIndex)} />
-                              {splitIndex === splits.length - 1 && (
-                                <div className={`col-span-3 text-xs ${Math.abs(diff) < 0.01 ? 'text-gray-400' : 'text-red-500'}`}>
-                                  收款合计 ¥{splitTotal || 0}，货品金额 ¥{product.amount || 0}{Math.abs(diff) >= 0.01 ? `，差额 ¥${diff}` : ''}
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
                   </div>
                 </div>
               );
             })()
           ))}
+
+          {/* 订单级收款：与货品解耦，只填一次，拆分合计对齐订单总金额 */}
+          {shouldShowOrderPaymentSection(form) && (
+            <div className="mt-4 pt-4 border-t-2 border-gray-200">
+              <div className="flex items-center justify-between mb-2">
+                <h4 className="text-sm font-medium text-gray-600">订单收款 <span className="text-red-500">*</span></h4>
+                <Button size="small" variant="outline" icon={<Plus size={14} />} onClick={addOrderPaymentSplit}>添加收款</Button>
+              </div>
+              {getEditableOrderPaymentSplits(form).map((split, splitIndex) => {
+                const splits = getEditableOrderPaymentSplits(form);
+                const splitTotal = splits.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+                const orderTotal = getFormTotalAmount(form);
+                const diff = orderTotal - splitTotal;
+                return (
+                  <div key={splitIndex} className="grid grid-cols-[1fr_160px_36px] items-center gap-2 mb-2">
+                    <Select placeholder="请选择收款账户" value={split.account || ''}
+                      onChange={val => {
+                        const nextSplits = [...splits];
+                        nextSplits[splitIndex] = { ...nextSplits[splitIndex], account: val as string };
+                        updateOrderPaymentSplits(nextSplits);
+                      }} options={PAYMENT_ACCOUNT_OPTIONS} />
+                    <Input type="number" placeholder="金额" value={split.amount ? String(split.amount) : ''}
+                      onChange={val => {
+                        const nextSplits = [...splits];
+                        nextSplits[splitIndex] = { ...nextSplits[splitIndex], amount: Math.max(0, Number(val) || 0) };
+                        updateOrderPaymentSplits(nextSplits);
+                      }} />
+                    <Button size="small" variant="text" theme="danger" icon={<Minus size={14} />} disabled={splits.length <= 1} onClick={() => removeOrderPaymentSplit(splitIndex)} />
+                    {splitIndex === splits.length - 1 && (
+                      <div className={`col-span-3 text-xs ${Math.abs(diff) < 0.01 ? 'text-gray-400' : 'text-red-500'}`}>
+                        收款合计 ¥{splitTotal || 0}，订单总金额 ¥{orderTotal || 0}{Math.abs(diff) >= 0.01 ? `，差额 ¥${diff}` : ''}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
           {/* 条件显示的转租赁字段 */}
           {hasTransferProduct && (
@@ -2813,6 +2886,36 @@ function AddOrderWizard({
               />
             </div>
           </div>
+
+          {/* 保存后自动生成待出库单（仅新建，且需要出库时） */}
+          {mode === 'add' && form.needsOutbound && autoOutbound && onAutoOutboundChange && (
+            <div className="mb-4 p-3 rounded-lg border border-gray-200 bg-gray-50">
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-sm text-gray-700">保存后自动生成待出库单</div>
+                  <div className="text-xs text-gray-400 mt-0.5">
+                    {autoOutbound.enabled
+                      ? '订单创建成功后自动生成待出库单，小程序端可直接发货'
+                      : '不自动生成，可稍后在订单列表点"生成出库单"'}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  {autoOutbound.enabled && (
+                    <Select
+                      value={autoOutbound.shippingMethod}
+                      style={{ width: 96 }}
+                      options={dictToOptions(SHIPPING_FEE_MAP)}
+                      onChange={val => onAutoOutboundChange({ ...autoOutbound, shippingMethod: val as string })}
+                    />
+                  )}
+                  <Switch
+                    value={autoOutbound.enabled}
+                    onChange={val => onAutoOutboundChange({ ...autoOutbound, enabled: !!val })}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
 
           {form.needsOutbound ? (
             <>
@@ -2967,10 +3070,17 @@ function AddOrderWizard({
                 return (
                   <div key={i} className="text-xs text-gray-600 ml-2 border-l-2 border-blue-200 pl-2 mb-1">
                     货品{i + 1}：{p.brand ? getBrandLabel(p.brand) : '-'} / {p.productName ? getProductLabel(p.productName) : '-'} / {p.specification || '-'}，
-                    数量 {p.quantity || 0}{shouldShowPaymentFields ? `，单价 ¥${p.unitPrice || 0}，金额 ¥${p.amount || 0}，收款账户 ${formatPaymentSplits(p as unknown as OrderRecord)}` : ''}
+                    数量 {p.quantity || 0}{shouldShowPaymentFields ? `，单价 ¥${p.unitPrice || 0}，金额 ¥${p.amount || 0}` : ''}
                   </div>
                 );
               })}
+              {shouldShowOrderPaymentSection(form) && (
+                <PreviewItem label="收款账户" value={formatPaymentSplits({
+                  paymentAccount: form.paymentAccount,
+                  amount: getFormTotalAmount(form),
+                  paymentSplits: form.paymentSplits,
+                })} />
+              )}
             </PreviewSection>
             {hasTransferProduct && form.transferProducts.length > 0 && (
               <PreviewSection title="转租赁2 信息">

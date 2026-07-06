@@ -191,10 +191,8 @@ export interface OrderRecord {
   unitPrice?: number;               // 单价
   /** @deprecated 见 brand */
   amount?: number;                  // 金额
-  /** @deprecated 见 brand */
-  paymentAccount?: string;          // 收款账户
-  /** @deprecated 见 brand */
-  paymentSplits?: PaymentSplit[] | string; // 多账户收款明细（兼容旧数据）
+  paymentAccount?: string;          // 收款账户（订单级；旧数据可能存在货品级收款，读取用 getOrderPaymentSplits）
+  paymentSplits?: PaymentSplit[] | string; // 多账户收款明细（订单级，合计对齐订单总额；兼容旧字符串数据）
   trackingNumber: string;           // 物流单号
   expressProvider?: string;         // 快递服务商
   sfEnv?: string;                   // 顺丰环境
@@ -242,7 +240,7 @@ export interface TransferProductItem {
   paidRent: number;
 }
 
-/** 货品条目（新增订单时支持多条） */
+/** 货品条目（新增订单时支持多条）；收款已上移订单级，货品级收款字段仅旧数据存在 */
 export interface ProductItem {
   brand: string;
   productName: string;
@@ -250,7 +248,9 @@ export interface ProductItem {
   quantity: number;
   unitPrice: number;
   amount: number;
-  paymentAccount: string;
+  /** @deprecated 收款在订单级 paymentAccount，旧数据回退读取用 */
+  paymentAccount?: string;
+  /** @deprecated 收款在订单级 paymentSplits，旧数据回退读取用 */
   paymentSplits?: PaymentSplit[];
 }
 
