@@ -254,11 +254,13 @@ function legacyOrderToProductItem(doc) {
 
 // 插件 normalized 字段 -> orders 集合字段（一条订单含 products 数组，同源订单多货品共用一条）
 function mapToOrder(order, items, serialNumber, now) {
-  // 原始页面商品名作为参考写入客服备注（多货品去重后合并）
+  // 客服备注 = 用户在导入弹窗填写的备注（可选）+ 原始页面商品名参考（多货品去重后合并）
   const titles = Array.from(new Set(
     items.map((it) => it.goodsTitle).concat([String(order.goodsTitle || '').trim()]).filter(Boolean)
   ));
-  const remark = titles.length > 0 ? `【赞晨租导入】原商品：${titles.join('；')}` : '【赞晨租导入】';
+  const autoRemark = titles.length > 0 ? `【赞晨租导入】原商品：${titles.join('；')}` : '【赞晨租导入】';
+  const userRemark = String(order.remark || '').trim();
+  const remark = userRemark ? `${userRemark}；${autoRemark}` : autoRemark;
   return {
     serialNumber,
     date: todayInBeijing(),                // 订单日期固定为当天
@@ -566,10 +568,17 @@ exports.main = async (event) => {
       );
       const toAppend = lockedItems.filter(({ item }) => !existingItemNos.has(item.sourceOrderItemNo));
 
+      // 用户填写的备注：追加进已有订单客服备注（已包含时不重复）
+      const appendUserRemark = String(order.remark || '').trim();
+      const existingRemark = String(existingOrder.customerRemark || '');
+      const remarkPatch = appendUserRemark && !existingRemark.includes(appendUserRemark)
+        ? { customerRemark: existingRemark ? `${existingRemark}；${appendUserRemark}` : appendUserRemark }
+        : {};
+
       if (toAppend.length > 0) {
         const newProducts = toAppend.map(({ item }) => mapToProductItem(item));
         const updateData = hasProductsArray
-          ? { products: _.push(newProducts), updateTime: now }
+          ? { products: _.push(newProducts), ...remarkPatch, updateTime: now }
           : {
               products: existingItems.concat(newProducts),
               // 清空旧扁平货品字段，避免与 products 并存产生歧义
@@ -581,9 +590,12 @@ exports.main = async (event) => {
               amount: 0,
               paymentAccount: '',
               paymentSplits: [],
+              ...remarkPatch,
               updateTime: now,
             };
         await db.collection(ORDERS_COLLECTION).doc(createdOrderId).update({ data: updateData });
+      } else if (Object.keys(remarkPatch).length > 0) {
+        await db.collection(ORDERS_COLLECTION).doc(createdOrderId).update({ data: { ...remarkPatch, updateTime: now } });
       }
 
       await updateImportLogs(lockedItems, { status: 'success', createdOrderId });
