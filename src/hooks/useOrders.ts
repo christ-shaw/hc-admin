@@ -13,6 +13,7 @@ interface QueryResult {
 interface SaveResult {
   success: boolean;
   savedCount?: number;
+  savedIds?: string[];
   errMsg?: string;
 }
 

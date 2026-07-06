@@ -93,6 +93,14 @@ interface OrderFormData {
   needsOutbound: boolean;
 }
 
+/** 新建订单时"保存后自动生成待出库单"选项 */
+interface AutoOutboundOption {
+  enabled: boolean;
+  shippingMethod: string;
+}
+
+const DEFAULT_AUTO_OUTBOUND: AutoOutboundOption = { enabled: true, shippingMethod: 'prepaid' };
+
 interface OrderWizardDictionaries {
   ORDER_SOURCE_MAP: Record<string, string>;
   ORDER_ATTRIBUTE_MAP: Record<string, string>;
@@ -451,6 +459,7 @@ export function Orders() {
   const [cancelingSfId, setCancelingSfId] = useState<string | null>(null);
   const [addVisible, setAddVisible] = useState(false);
   const [addForm, setAddForm] = useState<OrderFormData>(EMPTY_ORDER);
+  const [addAutoOutbound, setAddAutoOutbound] = useState<AutoOutboundOption>(DEFAULT_AUTO_OUTBOUND);
   const [saving, setSaving] = useState(false);
   const [editVisible, setEditVisible] = useState(false);
   const [editForm, setEditForm] = useState<OrderFormData>(EMPTY_ORDER);
@@ -726,6 +735,7 @@ export function Orders() {
     const operatorName = await getCurrentOperatorName();
     const nickname = operatorName || SALESPERSONS[0];
     setAddForm({ ...EMPTY_ORDER, date: dateStr, salesperson: nickname, products: [{ ...EMPTY_PRODUCT }] });
+    setAddAutoOutbound(DEFAULT_AUTO_OUTBOUND);
     setAddAttachFiles([]);
     setAddStep(1);
     setAddVisible(true);
@@ -863,6 +873,16 @@ export function Orders() {
       const result = await orders.importOrders([newRecord]);
       if (result.success) {
         MessagePlugin.success(newRecord.products && newRecord.products.length > 1 ? `新增订单成功，含 ${newRecord.products.length} 条货品` : '新增订单成功');
+        // 勾选了"保存后自动生成待出库单"且订单为待发货时，自动生成；失败不影响订单已创建
+        const newOrderId = result.savedIds?.[0];
+        if (addAutoOutbound.enabled && addForm.needsOutbound && newOrderId && isPendingShipmentStatus(shipmentFields.status)) {
+          const gen = await orders.generateOutbound([newOrderId], addAutoOutbound.shippingMethod);
+          if (gen.success) {
+            MessagePlugin.success('已自动生成待出库单');
+          } else {
+            MessagePlugin.warning(`订单已创建，但自动生成出库单失败：${gen.errMsg || '未知错误'}，可稍后在列表手动生成`);
+          }
+        }
         setAddVisible(false);
         setAddStep(1);
         setAddForm(EMPTY_ORDER);
@@ -1948,6 +1968,8 @@ export function Orders() {
           productModelBrands={productModels.brands}
           productModelLoading={productModels.loading}
           productModelLoadError={productModels.loadError}
+          autoOutbound={addAutoOutbound}
+          onAutoOutboundChange={setAddAutoOutbound}
         />
       </Dialog>
 
@@ -2182,7 +2204,7 @@ export function Orders() {
 
 /** 新增订单 6 步向导 */
 function AddOrderWizard({
-  step, form, attachFiles, attachInputRef, onChange, onAttachFilesChange, dictionaries, productModelBrands, productModelLoading = false, productModelLoadError = '', mode = 'add',
+  step, form, attachFiles, attachInputRef, onChange, onAttachFilesChange, dictionaries, productModelBrands, productModelLoading = false, productModelLoadError = '', mode = 'add', autoOutbound, onAutoOutboundChange,
 }: {
   step: number;
   form: OrderFormData;
@@ -2195,6 +2217,8 @@ function AddOrderWizard({
   productModelLoading?: boolean;
   productModelLoadError?: string;
   mode?: 'add' | 'edit';
+  autoOutbound?: AutoOutboundOption;
+  onAutoOutboundChange?: (value: AutoOutboundOption) => void;
 }) {
   const {
     ORDER_SOURCE_MAP,
@@ -2727,6 +2751,36 @@ function AddOrderWizard({
               />
             </div>
           </div>
+
+          {/* 保存后自动生成待出库单（仅新建，且需要出库时） */}
+          {mode === 'add' && form.needsOutbound && autoOutbound && onAutoOutboundChange && (
+            <div className="mb-4 p-3 rounded-lg border border-gray-200 bg-gray-50">
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-sm text-gray-700">保存后自动生成待出库单</div>
+                  <div className="text-xs text-gray-400 mt-0.5">
+                    {autoOutbound.enabled
+                      ? '订单创建成功后自动生成待出库单，小程序端可直接发货'
+                      : '不自动生成，可稍后在订单列表点"生成出库单"'}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  {autoOutbound.enabled && (
+                    <Select
+                      value={autoOutbound.shippingMethod}
+                      style={{ width: 96 }}
+                      options={dictToOptions(SHIPPING_FEE_MAP)}
+                      onChange={val => onAutoOutboundChange({ ...autoOutbound, shippingMethod: val as string })}
+                    />
+                  )}
+                  <Switch
+                    value={autoOutbound.enabled}
+                    onChange={val => onAutoOutboundChange({ ...autoOutbound, enabled: !!val })}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
 
           {form.needsOutbound ? (
             <>

@@ -16,6 +16,7 @@ const db = cloud.database();
 const _ = db.command;
 
 const ORDERS_COLLECTION = 'orders';
+const OUTBOUND_COLLECTION = 'outbound_records';
 const LOG_COLLECTION = 'order_import_logs';
 const COUNTER_COLLECTION = 'system_counters';
 const PRODUCT_MODELS_COLLECTION = 'product_models';
@@ -28,6 +29,10 @@ const REQUIRED_ORDER_FIELDS = ['sourceOrderNo', 'recipient', 'recipientPhone', '
 const REQUIRED_ITEM_FIELDS = ['sourceOrderItemNo', 'brand', 'productName', 'specification'];
 
 const SALESPERSON_DICT_GROUP = 'salesperson';
+
+// 自动生成出库单的快递方式（与 dict.ts SHIPPING_FEE_MAP 的 key 一致），非法值回退寄付
+const SHIPPING_METHOD_KEYS = new Set(['prepaid', 'cod', 'pickup']);
+const DEFAULT_SHIPPING_METHOD = 'prepaid';
 
 // 固定业务字段（按需求）
 const FIXED_ORDER_SOURCE = 'new';        // 订单来源：新增
@@ -290,6 +295,113 @@ function mapToOrder(order, items, serialNumber, now) {
   };
 }
 
+// ============ 出库单联动 ============
+
+// 货品条目 → model 字符串（与 generateOutboundFromOrders / 小程序拼法一致：规格非"默认"时带规格）
+function buildModel(item) {
+  const brand = String(item.brand || '').trim();
+  const product = String(item.productName || '').trim();
+  const spec = String(item.specification || '').trim();
+  const base = [brand, product].filter(Boolean).join(' / ');
+  if (!base) return '';
+  return spec && spec !== '默认' ? `${base} / ${spec}` : base;
+}
+
+// 货品数组聚合为 phoneModels：相同 model 累加数量
+function productsToPhoneModels(products, base) {
+  const map = new Map();
+  const orderKeys = [];
+  for (const entry of base || []) {
+    map.set(entry.model, Number(entry.quantity) || 0);
+    orderKeys.push(entry.model);
+  }
+  for (const item of products || []) {
+    const model = buildModel(item);
+    if (!model) continue;
+    const qty = Number(item.quantity) || Number(item.goodsQuantity) || 0;
+    if (map.has(model)) {
+      map.set(model, map.get(model) + qty);
+    } else {
+      map.set(model, qty);
+      orderKeys.push(model);
+    }
+  }
+  return orderKeys.map((model) => ({ model, quantity: map.get(model) }));
+}
+
+function normalizeShippingMethod(value) {
+  const method = String(value || '').trim();
+  return SHIPPING_METHOD_KEYS.has(method) ? method : DEFAULT_SHIPPING_METHOD;
+}
+
+/**
+ * 导入后的出库单联动：
+ * - 订单已有出库单且 pending → 把追加货品合并进 phoneModels（无论是否勾选自动生成）
+ * - 订单已有出库单但已完成/取消 → 不动，返回 skipped_completed 提示人工处理
+ * - 订单无出库单且勾选自动生成 → 按订单全量货品创建待出库单并回写 outboundRecordId
+ * 出库单联动失败不影响订单导入结果，仅在响应中标记 failed。
+ */
+async function syncOutboundAfterImport({ orderId, orderDoc, appendedProducts, autoOutbound, now }) {
+  const enabled = !!(autoOutbound && autoOutbound.enabled);
+  try {
+    if (orderDoc.outboundRecordId) {
+      if (!appendedProducts || appendedProducts.length === 0) {
+        return { outboundSync: 'none', outboundId: orderDoc.outboundRecordId };
+      }
+      let outbound = null;
+      try {
+        const res = await db.collection(OUTBOUND_COLLECTION).doc(orderDoc.outboundRecordId).get();
+        outbound = res.data || null;
+      } catch (err) {
+        if (!isNotFound(err)) throw err;
+      }
+      if (!outbound) return { outboundSync: 'none', outboundId: '' };
+      if (outbound.outboundStatus !== 'pending') {
+        return { outboundSync: 'skipped_completed', outboundId: orderDoc.outboundRecordId };
+      }
+      const phoneModels = productsToPhoneModels(appendedProducts, outbound.phoneModels || []);
+      await db.collection(OUTBOUND_COLLECTION).doc(orderDoc.outboundRecordId).update({
+        data: { phoneModels, updateTime: now },
+      });
+      return { outboundSync: 'updated', outboundId: orderDoc.outboundRecordId };
+    }
+
+    if (!enabled) return { outboundSync: 'none', outboundId: '' };
+    if (orderDoc.needsOutbound === false) return { outboundSync: 'none', outboundId: '' };
+
+    const allProducts = Array.isArray(orderDoc.products) ? orderDoc.products : [];
+    const phoneModels = productsToPhoneModels(allProducts, []);
+    if (phoneModels.length === 0) return { outboundSync: 'none', outboundId: '' };
+
+    const addRes = await db.collection(OUTBOUND_COLLECTION).add({
+      data: {
+        customerName: orderDoc.customerName || '',
+        outboundStatus: 'pending',
+        source: 'order',
+        orderIds: [orderId],
+        shippingMethod: normalizeShippingMethod(autoOutbound.shippingMethod),
+        remark: '',
+        salesperson: orderDoc.salesperson || '',
+        consignee: orderDoc.consignee || '',
+        consigneePhone: orderDoc.consigneePhone || '',
+        consigneeAddress: orderDoc.consigneeAddress || '',
+        phoneModels,
+        outboundDate: todayInBeijing(),
+        trackingNumber: '',
+        phonePhotos: [],
+        createTime: now,
+      },
+    });
+    await db.collection(ORDERS_COLLECTION).doc(orderId).update({
+      data: { outboundRecordId: addRes._id },
+    });
+    return { outboundSync: 'created', outboundId: addRes._id };
+  } catch (err) {
+    console.error('[importOrderFromAssist] 出库单联动失败:', err);
+    return { outboundSync: 'failed', outboundId: '', outboundError: err.message || '出库单联动失败' };
+  }
+}
+
 // ============ 主流程 ============
 
 exports.main = async (event) => {
@@ -360,6 +472,7 @@ exports.main = async (event) => {
 
   const order = (payload && payload.order) || {};
   const operator = (payload && payload.operator) || {};
+  const autoOutbound = (payload && payload.autoOutbound) || null;
   const sourceOrderNo = String(order.sourceOrderNo || '').trim();
 
   // 2. 状态校验
@@ -475,10 +588,20 @@ exports.main = async (event) => {
 
       await updateImportLogs(lockedItems, { status: 'success', createdOrderId });
       const appendedCount = toAppend.length;
+      const appendSync = await syncOutboundAfterImport({
+        orderId: createdOrderId,
+        orderDoc: { ...existingOrder, products: existingItems.concat(toAppend.map(({ item }) => mapToProductItem(item))) },
+        appendedProducts: toAppend.map(({ item }) => mapToProductItem(item)),
+        autoOutbound,
+        now,
+      });
       return ok(
         'CREATED',
         appendedCount > 0 ? `货品已追加到已有订单（${appendedCount} 条）` : '货品已存在',
-        { orderId: createdOrderId, appended: appendedCount > 0, appendedCount, duplicatedCount: items.length - appendedCount }
+        {
+          orderId: createdOrderId, appended: appendedCount > 0, appendedCount,
+          duplicatedCount: items.length - appendedCount, ...appendSync,
+        }
       );
     }
 
@@ -489,10 +612,18 @@ exports.main = async (event) => {
 
     await updateImportLogs(lockedItems, { status: 'success', createdOrderId, normalizedPayload: orderDoc });
 
+    const createSync = await syncOutboundAfterImport({
+      orderId: createdOrderId,
+      orderDoc,
+      appendedProducts: [],
+      autoOutbound,
+      now,
+    });
+
     return ok(
       'CREATED',
       lockedItems.length > 1 ? `订单创建成功，含 ${lockedItems.length} 条货品` : '订单创建成功',
-      { orderId: createdOrderId, importedCount: lockedItems.length, duplicatedCount }
+      { orderId: createdOrderId, importedCount: lockedItems.length, duplicatedCount, ...createSync }
     );
   } catch (err) {
     console.error('[importOrderFromAssist] 创建订单失败:', err);

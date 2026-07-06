@@ -282,3 +282,26 @@ CloudBase NoSQL 没有原生复合唯一约束，`unique(source, source_order_no
 | 所有货品项此前均已导入 | `DUPLICATED` | `{ orderId, duplicated: true, duplicatedCount }` |
 
 插件侧（hc-order-assist）配套：导入弹窗支持勾选同一订单的多条货品项、一次提交 `items[]`；旧版插件逐项调用仍然有效（服务端自动合并到同一订单）。
+
+## 15. 导入后自动生成待出库单（2026-07 更新）
+
+`payload` 新增可选 **`autoOutbound`**（与 `order` 平级）：
+
+```json
+{ "order": { ... }, "operator": { ... }, "autoOutbound": { "enabled": true, "shippingMethod": "prepaid" } }
+```
+
+- `shippingMethod` ∈ `prepaid | cod | pickup`（与 dict.ts `SHIPPING_FEE_MAP` 一致），非法值回退 `prepaid`。
+- 插件导入弹窗提供「导入后自动生成待出库单」勾选（默认勾选）+ 快递方式下拉（默认寄付）。
+
+### 15.1 联动规则（`syncOutboundAfterImport`）
+
+| 场景 | 行为 | 响应 `outboundSync` |
+| --- | --- | --- |
+| 新建订单且 `enabled` | 创建 `outbound_records`（`pending`、`source='order'`、phoneModels 按 products 聚合），回写订单 `outboundRecordId` | `created` |
+| 追加货品，订单已有出库单且 `pending` | 追加货品合并进出库单 `phoneModels`（同 model 累加）——**与是否勾选无关** | `updated` |
+| 追加货品，出库单已完成/取消 | 不动出库单，提示人工处理 | `skipped_completed` |
+| 未勾选 / 订单标记无需出库 / 无有效货品 | 不生成 | `none` |
+| 联动出错 | 不影响订单导入结果，响应带 `outboundError` | `failed` |
+
+响应的 `data` 里同时带 `outboundId`（如有）。手工建单入口的对应能力由前端在保存成功后调用 `generateOutboundFromOrders` 实现（`saveOrders` 返回 `savedIds`），与本函数无关。
