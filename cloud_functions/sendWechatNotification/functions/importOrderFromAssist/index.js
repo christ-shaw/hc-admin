@@ -16,6 +16,7 @@ const db = cloud.database();
 const _ = db.command;
 
 const ORDERS_COLLECTION = 'orders';
+const OUTBOUND_COLLECTION = 'outbound_records';
 const LOG_COLLECTION = 'order_import_logs';
 const COUNTER_COLLECTION = 'system_counters';
 const PRODUCT_MODELS_COLLECTION = 'product_models';
@@ -108,6 +109,79 @@ function getBearerToken(headers) {
   const value = headers.authorization || headers.Authorization || '';
   const match = String(value).match(/^Bearer\s+(.+)$/i);
   return match ? match[1].trim() : '';
+}
+
+function unique(values) {
+  return Array.from(new Set((values || []).filter(Boolean).map((v) => String(v).trim()).filter(Boolean)));
+}
+
+function normalizePhotoList(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.flatMap((item) => normalizePhotoList(item));
+  if (typeof value === 'object') {
+    return normalizePhotoList(value.tempFileURL || value.tempFileUrl || value.url || value.fileUrl || value.path || value.fileID || value.fileId);
+  }
+  const text = String(value).trim();
+  if (!text) return [];
+  if ((text.startsWith('[') && text.endsWith(']')) || (text.startsWith('{') && text.endsWith('}'))) {
+    try { return normalizePhotoList(JSON.parse(text)); } catch (_) {}
+  }
+  return text.split(/[\n,，;；]+/).map((item) => item.trim()).filter(Boolean);
+}
+
+async function toTempPhotoUrls(photos) {
+  const list = unique(normalizePhotoList(photos));
+  const cloudFileIds = list.filter((url) => /^cloud:\/\//i.test(url));
+  const plainUrls = list.filter((url) => !/^cloud:\/\//i.test(url));
+  if (cloudFileIds.length === 0) return plainUrls;
+
+  try {
+    const result = await cloud.getTempFileURL({ fileList: cloudFileIds });
+    const tempUrls = (result.fileList || [])
+      .map((item) => item.tempFileURL || item.fileID || '')
+      .filter(Boolean);
+    return unique([...plainUrls, ...tempUrls]);
+  } catch (err) {
+    console.error('[importOrderFromAssist] 转换出库照片临时链接失败:', err);
+    return list;
+  }
+}
+
+async function getDocById(collectionName, id) {
+  if (!id) return null;
+  try {
+    const res = await db.collection(collectionName).doc(id).get();
+    return res.data || null;
+  } catch (err) {
+    if (isNotFound(err)) return null;
+    throw err;
+  }
+}
+
+async function queryFirst(collectionName, condition) {
+  const res = await db.collection(collectionName).where(condition).limit(1).get();
+  return (res.data || [])[0] || null;
+}
+
+async function findOutboundForOrder(orderDoc) {
+  if (!orderDoc) return null;
+
+  const direct = await getDocById(OUTBOUND_COLLECTION, String(orderDoc.outboundRecordId || '').trim());
+  if (direct) return direct;
+
+  const orderId = String(orderDoc._id || '').trim();
+  if (orderId) {
+    const byOrderIds = await queryFirst(OUTBOUND_COLLECTION, { orderIds: _.in([orderId]) });
+    if (byOrderIds) return byOrderIds;
+  }
+
+  const trackingNumber = String(orderDoc.trackingNumber || '').trim();
+  if (trackingNumber) {
+    const byTracking = await queryFirst(OUTBOUND_COLLECTION, { trackingNumber });
+    if (byTracking) return byTracking;
+  }
+
+  return null;
 }
 
 function isPendingShipment(order) {
@@ -330,13 +404,22 @@ exports.main = async (event) => {
       // 优先取已有快递单号的那条
       const withTracking = docs.find((d) => String(d.trackingNumber || '').trim());
       const doc = withTracking || docs[0];
+      const outbound = await findOutboundForOrder(doc);
+      const phonePhotos = normalizePhotoList(outbound && outbound.phonePhotos);
+      const shipmentPhotos = await toTempPhotoUrls(phonePhotos);
       return ok('OK', '查询成功', {
         found: true,
         trackingNumber: String(doc.trackingNumber || '').trim(),
         sfWaybillNo: String(doc.sfWaybillNo || '').trim(),
         expressProvider: doc.expressProvider || '',
+        customerName: (outbound && outbound.customerName) || doc.customerName || doc.consignee || '',
         status: doc.status || '',
         serialNumber: doc.serialNumber,
+        outboundId: outbound && outbound._id || '',
+        outboundDate: outbound && outbound.outboundDate || '',
+        completedBy: outbound && outbound.completedBy || '',
+        phonePhotos,
+        shipmentPhotos,
       });
     } catch (err) {
       console.error('[importOrderFromAssist] 查快递单号失败:', err);

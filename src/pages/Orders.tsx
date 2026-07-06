@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
-import { Table, Button, Input, Select, Tag, Dialog, MessagePlugin, Textarea, Switch } from 'tdesign-react';
+import { Table, Button, Input, Select, Tag, Dialog, Dropdown, MessagePlugin, Textarea, Switch } from 'tdesign-react';
+import type { DropdownOption } from 'tdesign-react';
 import { Search, RotateCcw, Upload, Download, Plus, Pencil, Trash2, Minus, X, ChevronRight, ChevronLeft, FileDown, Check } from 'lucide-react';
 import { OrderRecord, OrderFilters, InboundRecord, OutboundRecord, PhoneBrand, PhoneModelItem, ProductItem, TransferProductItem, OrderAttachment, PaymentSplit, dictToOptions, getDictLabel } from '../types';
 import { useOrders } from '../hooks/useOrders';
@@ -226,6 +227,12 @@ function formatPhoneModels(phoneModels?: PhoneModelItem[]): string {
 function getOutboundPhoneTotal(record?: OutboundRecord | null): number {
   return record?.phoneModels?.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0) || 0;
 }
+
+const OUTBOUND_STATUS_LABELS: Record<string, { label: string; theme: 'warning' | 'success' | 'default' }> = {
+  pending: { label: '待出库', theme: 'warning' },
+  completed: { label: '已出库', theme: 'success' },
+  cancelled: { label: '已取消', theme: 'default' },
+};
 
 function shouldShowAfterSaleInboundConfirm(record: OrderRecord): boolean {
   const needsReturnConfirm = ['postRentalShip', 'postRentalReturn', '租后发货', '租后退货', '售后发货'].includes(record.orderType);
@@ -456,6 +463,10 @@ export function Orders() {
   const [editForm, setEditForm] = useState<OrderFormData>(EMPTY_ORDER);
   const [editId, setEditId] = useState('');
   const [shipDialogVisible, setShipDialogVisible] = useState(false);
+  // 关联出库单详情弹窗
+  const [outboundDetailVisible, setOutboundDetailVisible] = useState(false);
+  const [outboundDetailLoading, setOutboundDetailLoading] = useState(false);
+  const [outboundDetail, setOutboundDetail] = useState<OutboundRecord | null>(null);
   const [shipTarget, setShipTarget] = useState<OrderRecord | null>(null);
   const [shipRecords, setShipRecords] = useState<OutboundRecord[]>([]);
   const [selectedShipRecord, setSelectedShipRecord] = useState<OutboundRecord | null>(null);
@@ -909,6 +920,36 @@ export function Orders() {
       .sort((a, b) => Number(b.customerName === keyword) - Number(a.customerName === keyword));
   }, []);
 
+  /** 查看订单关联的出库单 */
+  const handleViewOutbound = useCallback(async (record: OrderRecord) => {
+    const outboundId = record.outboundRecordId;
+    if (!outboundId) {
+      MessagePlugin.warning('该订单暂无关联出库单');
+      return;
+    }
+    setOutboundDetailVisible(true);
+    setOutboundDetailLoading(true);
+    setOutboundDetail(null);
+    try {
+      const currentUser = await getCurrentPermissionUserPayload().catch(() => null);
+      const result = await callFunction<{ success?: boolean; data?: OutboundRecord[]; errMsg?: string }>('queryRecords', {
+        data: { type: 'outbound', _id: outboundId, limit: 1, cursor: null, currentUser },
+      });
+      if (result.success === false) {
+        throw new Error(result.errMsg || '查询出库单失败');
+      }
+      const detail = (result.data || [])[0] || null;
+      setOutboundDetail(detail);
+      if (!detail) {
+        MessagePlugin.warning('关联的出库单不存在（可能已被删除）');
+      }
+    } catch (err) {
+      MessagePlugin.error('查询出库单失败: ' + String(err));
+    } finally {
+      setOutboundDetailLoading(false);
+    }
+  }, []);
+
   const handleShipOpen = useCallback(async (record: OrderRecord) => {
     if (!isPendingShipmentStatus(record.status)) {
       MessagePlugin.warning('仅订单状态为 -- 的订单允许发货');
@@ -1326,7 +1367,7 @@ export function Orders() {
       },
     },
     {
-      colKey: 'op', title: '操作', width: 330, fixed: 'right' as const,
+      colKey: 'op', title: '操作', width: 220, fixed: 'right' as const,
       cell: ({ row }: { row: OrderRecord }) => (
         <div className="flex gap-1 flex-wrap">
           <Button variant="text" theme="primary" size="small"
@@ -1357,10 +1398,6 @@ export function Orders() {
               取消顺丰
             </Button>
           )}
-          <Button variant="text" theme="primary" size="small"
-            onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleEditOpen(row); }}>
-            编辑
-          </Button>
           {row.needsOutbound && isPendingShipmentStatus(row.status) && !row.outboundRecordId && (
             <Button variant="text" theme="primary" size="small"
               onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleGenerateOutboundOpen(row); }}>
@@ -1373,20 +1410,30 @@ export function Orders() {
               发货
             </Button>
           )}
-          {shouldShowAfterSaleInboundConfirm(row) && (
+          <Dropdown
+            trigger="hover"
+            options={[
+              { content: '编辑', value: 'edit' },
+              ...(row.outboundRecordId ? [{ content: '出库单', value: 'viewOutbound' }] : []),
+              ...(shouldShowAfterSaleInboundConfirm(row) ? [{ content: '售后回库确认', value: 'afterSaleInbound' }] : []),
+              { content: '删除', value: 'delete', theme: 'error' as const },
+            ]}
+            onClick={(item: DropdownOption) => {
+              if (item.value === 'edit') handleEditOpen(row);
+              if (item.value === 'viewOutbound') handleViewOutbound(row);
+              if (item.value === 'afterSaleInbound') handleAfterSaleInboundOpen(row);
+              if (item.value === 'delete') handleDeleteConfirm(row);
+            }}
+          >
             <Button variant="text" theme="primary" size="small"
-              onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleAfterSaleInboundOpen(row); }}>
-              售后回库确认
+              onClick={(e: React.MouseEvent) => e.stopPropagation()}>
+              更多
             </Button>
-          )}
-          <Button variant="text" theme="danger" size="small"
-            onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleDeleteConfirm(row); }}>
-            删除
-          </Button>
+          </Dropdown>
         </div>
       ),
     },
-  ], [handleDetail, handleApplyExpress, handleQuerySfOrderResult, handleCancelSfExpress, handleEditOpen, handleShipOpen, handleGenerateOutboundOpen, handleAfterSaleInboundOpen, handleDeleteConfirm, applyingExpressId, queryingSfResultId, cancelingSfId, ORDER_TYPE_MAP, SALES_CHANNEL_MAP, ORDER_ATTRIBUTE_MAP, ORDER_STATUS_MAP]);
+  ], [handleDetail, handleViewOutbound, handleApplyExpress, handleQuerySfOrderResult, handleCancelSfExpress, handleEditOpen, handleShipOpen, handleGenerateOutboundOpen, handleAfterSaleInboundOpen, handleDeleteConfirm, applyingExpressId, queryingSfResultId, cancelingSfId, ORDER_TYPE_MAP, SALES_CHANNEL_MAP, ORDER_ATTRIBUTE_MAP, ORDER_STATUS_MAP]);
 
   const displayRecords = orders.getPageRecords(orders.currentPage);
   const hasLoadedNextPage = orders.currentPage * PAGE_SIZE < orders.records.length;
@@ -1591,6 +1638,45 @@ export function Orders() {
               }
               return null;
             })()}
+          </div>
+        )}
+      </Dialog>
+
+      {/* 关联出库单详情弹窗 */}
+      <Dialog
+        header="关联出库单"
+        visible={outboundDetailVisible}
+        onClose={() => { setOutboundDetailVisible(false); setOutboundDetail(null); }}
+        width="560px"
+        footer={<Button onClick={() => { setOutboundDetailVisible(false); setOutboundDetail(null); }}>关闭</Button>}
+      >
+        {outboundDetailLoading ? (
+          <div className="py-8 text-center text-gray-400">正在查询出库单...</div>
+        ) : !outboundDetail ? (
+          <div className="py-8 text-center text-gray-400">未找到关联的出库单（可能已被删除）</div>
+        ) : (
+          <div className="space-y-2 text-sm">
+            <DetailRow label="出库状态" value={(() => {
+              const status = OUTBOUND_STATUS_LABELS[outboundDetail.outboundStatus || ''];
+              return status
+                ? <Tag theme={status.theme} variant="light">{status.label}</Tag>
+                : <Tag theme="success" variant="light">已出库</Tag>;
+            })()} />
+            <DetailRow label="出库时间" value={formatDate(outboundDetail.outboundDate, false)} />
+            <DetailRow label="客户名称" value={outboundDetail.customerName} />
+            {outboundDetail.consignee && <DetailRow label="收货人" value={outboundDetail.consignee} />}
+            {outboundDetail.shippingMethod && <DetailRow label="快递方式" value={getDictLabel(SHIPPING_FEE_MAP, outboundDetail.shippingMethod)} />}
+            <DetailRow label="快递单号" value={outboundDetail.trackingNumber || '-'} />
+            <DetailRow label="手机型号" value={formatPhoneModels(outboundDetail.phoneModels)} />
+            <DetailRow label="出库数量" value={getOutboundPhoneTotal(outboundDetail) || '-'} />
+            {outboundDetail.remark && <DetailRow label="备注" value={outboundDetail.remark} />}
+            {(outboundDetail.phonePhotos?.length || 0) > 0 && (
+              <div className="pt-2">
+                <Button size="small" variant="outline" onClick={() => handlePreviewShipPhotos(outboundDetail)}>
+                  查看照片（{outboundDetail.phonePhotos?.length}）
+                </Button>
+              </div>
+            )}
           </div>
         )}
       </Dialog>
