@@ -1,10 +1,10 @@
 import * as XLSX from 'xlsx';
-import { OrderRecord, PaymentSplit, ProductItem } from '../types';
+import { OrderRecord, ProductItem } from '../types';
 import { getBrandLabel, getDictLabel, getProductLabel, ORDER_SOURCE_MAP, ORDER_ATTRIBUTE_MAP, ORDER_TYPE_MAP, SALES_CHANNEL_MAP, CHANNEL_CATEGORY_MAP, ORDER_STATUS_MAP } from '../data/dict';
-import { getOrderProducts } from './orderProducts';
+import { getOrderProducts, getOrderPaymentSplits } from './orderProducts';
 
-/** 货品级字段（Excel 一行一条货品，其余列为订单公共字段） */
-const PRODUCT_FIELD_KEYS = new Set<keyof OrderRecord>(['brand', 'productName', 'specification', 'quantity', 'unitPrice', 'amount', 'paymentAccount']);
+/** 货品级字段（Excel 一行一条货品，其余列为订单公共字段；收款账户在订单级） */
+const PRODUCT_FIELD_KEYS = new Set<keyof OrderRecord>(['brand', 'productName', 'specification', 'quantity', 'unitPrice', 'amount']);
 
 /** Excel 列名 → OrderRecord 字段映射 */
 const EXCEL_COLUMN_MAP: Record<string, keyof OrderRecord> = {
@@ -111,26 +111,11 @@ function parseValue(key: keyof OrderRecord, val: unknown): unknown {
   return String(val ?? '');
 }
 
-function parsePaymentSplits(value: OrderRecord['paymentSplits']): PaymentSplit[] {
-  if (!value) return [];
-  if (Array.isArray(value)) return value;
-  if (typeof value === 'string') {
-    try {
-      const parsed = JSON.parse(value);
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
-      return [];
-    }
-  }
-  return [];
-}
-
-function formatPaymentAccount(item: ProductItem): string {
-  const splits = parsePaymentSplits(item.paymentSplits)
-    .map(split => ({ account: String(split.account || '').trim(), amount: Math.max(0, Number(split.amount) || 0) }))
-    .filter(split => split.account || split.amount > 0);
-  if (splits.length === 0) return item.paymentAccount || '';
-  if (splits.length === 1) return splits[0].account || item.paymentAccount || '';
+/** 订单级收款账户展示（旧数据货品级收款由 getOrderPaymentSplits 折算） */
+function formatOrderPaymentAccount(record: OrderRecord): string {
+  const splits = getOrderPaymentSplits(record);
+  if (splits.length === 0) return record.paymentAccount || '';
+  if (splits.length === 1) return splits[0].account || record.paymentAccount || '';
   return splits.map(split => `${split.account || '-'} ¥${split.amount || 0}`).join('；');
 }
 
@@ -157,9 +142,11 @@ export function parseOrderExcel(file: File): Promise<OrderRecord[]> {
           })
           .filter(r => r.date && r.date.trim() !== '');
 
-        // 同一序号的多行 = 同一订单的多条货品，归组为一条带 products 数组的记录
+        // 同一序号的多行 = 同一订单的多条货品，归组为一条带 products 数组的记录；
+        // 各行的收款账户×金额合并为订单级拆分（同账户累加）
         const grouped: OrderRecord[] = [];
         const bySerial = new Map<string, OrderRecord>();
+        const paymentAgg = new Map<string, { accounts: string[]; amounts: Map<string, number> }>();
         for (const row of flatRows) {
           const item: ProductItem = {
             brand: row.brand || '',
@@ -168,10 +155,26 @@ export function parseOrderExcel(file: File): Promise<OrderRecord[]> {
             quantity: Number(row.quantity) || 0,
             unitPrice: Number(row.unitPrice) || 0,
             amount: Number(row.amount) || 0,
-            paymentAccount: row.paymentAccount || '',
           };
           // 序号为空/0 的行无法归组，各自成单
           const groupKey = row.serialNumber ? `${row.serialNumber}|${row.date}|${row.customerName}` : `__row_${row._id}`;
+
+          const account = String(row.paymentAccount || '').trim();
+          let agg = paymentAgg.get(groupKey);
+          if (!agg) {
+            agg = { accounts: [], amounts: new Map() };
+            paymentAgg.set(groupKey, agg);
+          }
+          if (account) {
+            const amount = Number(row.amount) || 0;
+            if (agg.amounts.has(account)) {
+              agg.amounts.set(account, agg.amounts.get(account)! + amount);
+            } else {
+              agg.amounts.set(account, amount);
+              agg.accounts.push(account);
+            }
+          }
+
           const existing = bySerial.get(groupKey);
           if (existing && existing.products) {
             existing.products.push(item);
@@ -183,6 +186,15 @@ export function parseOrderExcel(file: File): Promise<OrderRecord[]> {
             bySerial.set(groupKey, record);
             grouped.push(record);
           }
+        }
+
+        // 写回订单级收款
+        for (const [groupKey, agg] of paymentAgg) {
+          const record = bySerial.get(groupKey);
+          if (!record) continue;
+          const splits = agg.accounts.map(account => ({ account, amount: agg.amounts.get(account)! }));
+          record.paymentSplits = splits;
+          record.paymentAccount = Array.from(new Set(agg.accounts)).join('、');
         }
 
         resolve(grouped);
@@ -220,7 +232,7 @@ export function exportOrderExcel(records: OrderRecord[], filename?: string): voi
         if (c.key === 'date') return val || '';
         if (c.key === 'brand' && typeof val === 'string') return getBrandLabel(val);
         if ((c.key === 'productName' || c.key === 'transferProductName') && typeof val === 'string') return getProductLabel(val);
-        if (c.key === 'paymentAccount') return item ? formatPaymentAccount(item) : '';
+        if (c.key === 'paymentAccount') return formatOrderPaymentAccount(r);
         const dict = DICT_FIELDS[c.key];
         if (dict && typeof val === 'string' && val) return getDictLabel(dict, val);
         return val ?? '';
