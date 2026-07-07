@@ -581,9 +581,25 @@ exports.main = async (event) => {
 
   const now = db.serverDate();
 
-  // 4. 幂等锁：逐货品项抢占日志 _id；全部已存在则整单视为重复
+  // 4. 幂等锁：逐货品项抢占日志 _id；全部已存在则整单视为重复。
+  //    锁已存在但其指向的订单已被删除（或此前导入失败未建单）时，视为失效锁回收后重新导入。
   const lockedItems = []; // [{ item, importKey }]
   let duplicatedCount = 0;
+  const orderExistsCache = new Map();
+  const orderStillExists = async (orderId) => {
+    const id = String(orderId || '').trim();
+    if (!id) return false;
+    if (orderExistsCache.has(id)) return orderExistsCache.get(id);
+    let exists = false;
+    try {
+      const res = await db.collection(ORDERS_COLLECTION).doc(id).get();
+      exists = !!(res && res.data);
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+    }
+    orderExistsCache.set(id, exists);
+    return exists;
+  };
   for (const item of items) {
     const importKey = `${SOURCE}_${item.sourceOrderItemNo}`;
     try {
@@ -604,7 +620,34 @@ exports.main = async (event) => {
       });
       lockedItems.push({ item, importKey });
     } catch (err) {
-      if (isDuplicateId(err)) { duplicatedCount += 1; continue; }
+      if (isDuplicateId(err)) {
+        let staleLock = false;
+        try {
+          const existing = await db.collection(LOG_COLLECTION).doc(importKey).get();
+          const createdOrderId = existing.data && existing.data.createdOrderId;
+          staleLock = !(await orderStillExists(createdOrderId));
+        } catch (readErr) {
+          staleLock = isNotFound(readErr);
+          if (!staleLock) console.error('[importOrderFromAssist] 校验幂等锁失败:', readErr);
+        }
+        if (staleLock) {
+          await db.collection(LOG_COLLECTION).doc(importKey).update({
+            data: {
+              sourceOrderNo,
+              operatorId: operator.uid || '',
+              operatorName: operator.username || '',
+              status: 'pending',
+              createdOrderId: '',
+              errorMessage: '',
+              reclaimedAt: now,
+            },
+          });
+          lockedItems.push({ item, importKey });
+        } else {
+          duplicatedCount += 1;
+        }
+        continue;
+      }
       console.error('[importOrderFromAssist] 写入幂等锁失败:', err);
       await updateImportLogs(lockedItems, { status: 'failed', errorMessage: err.message || '写入幂等锁失败' });
       return fail(500, 'INTERNAL_ERROR', err.message || '导入失败');
