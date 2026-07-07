@@ -327,13 +327,8 @@ function legacyOrderToProductItem(doc) {
 
 // 插件 normalized 字段 -> orders 集合字段（一条订单含 products 数组，同源订单多货品共用一条）
 function mapToOrder(order, items, serialNumber, now) {
-  // 客服备注 = 用户在导入弹窗填写的备注（可选）+ 原始页面商品名参考（多货品去重后合并）
-  const titles = Array.from(new Set(
-    items.map((it) => it.goodsTitle).concat([String(order.goodsTitle || '').trim()]).filter(Boolean)
-  ));
-  const autoRemark = titles.length > 0 ? `【赞晨租导入】原商品：${titles.join('；')}` : '【赞晨租导入】';
-  const userRemark = String(order.remark || '').trim();
-  const remark = userRemark ? `${userRemark}；${autoRemark}` : autoRemark;
+  // 客服备注 = 用户在导入弹窗填写的备注（插件端必填；不拼接平台商品信息，旧版插件未传时为空）
+  const remark = String(order.remark || '').trim();
   return {
     serialNumber,
     date: todayInBeijing(),                // 订单日期固定为当天
