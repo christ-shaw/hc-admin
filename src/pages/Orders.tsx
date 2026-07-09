@@ -496,6 +496,7 @@ export function Orders() {
   const [applyingExpressId, setApplyingExpressId] = useState<string | null>(null);
   const [queryingSfResultId, setQueryingSfResultId] = useState<string | null>(null);
   const [cancelingSfId, setCancelingSfId] = useState<string | null>(null);
+  const [showMoreFilters, setShowMoreFilters] = useState(false);
   const [addVisible, setAddVisible] = useState(false);
   const [addForm, setAddForm] = useState<OrderFormData>(EMPTY_ORDER);
   const [addAutoOutbound, setAddAutoOutbound] = useState<AutoOutboundOption>(DEFAULT_AUTO_OUTBOUND);
@@ -582,9 +583,13 @@ export function Orders() {
 
   const handleReset = () => {
     setFilters({});
+    setShowMoreFilters(false);
     orders.resetFilters();
     orders.fetchRecords(null, {});
   };
+
+  // 折叠区内生效的筛选数，收起时在「更多筛选」按钮上提示，避免隐藏筛选无感知
+  const moreFilterCount = [filters.salesperson, filters.orderType, filters.status].filter(Boolean).length;
 
   const handleDetail = useCallback((record: OrderRecord) => {
     setCurrentRecord(record);
@@ -795,6 +800,7 @@ export function Orders() {
       if (addForm.channelCategory === 'platform' && !addForm.onlineOrderNumber.trim()) { MessagePlugin.warning('平台渠道请填写网店订单号'); return; }
       if (!addForm.orderSource) { MessagePlugin.warning('请选择订单来源'); return; }
       if (!addForm.orderAttribute) { MessagePlugin.warning('请选择订单属性'); return; }
+      if (!addForm.orderType) { MessagePlugin.warning('请选择订单类型'); return; }
       if (!addForm.salesChannel) { MessagePlugin.warning('请选择销售渠道'); return; }
     }
     if (addStep === 3) {
@@ -1253,6 +1259,7 @@ export function Orders() {
       if (editForm.channelCategory === 'platform' && !editForm.onlineOrderNumber.trim()) { MessagePlugin.warning('平台渠道请填写网店订单号'); return; }
       if (!editForm.orderSource) { MessagePlugin.warning('请选择订单来源'); return; }
       if (!editForm.orderAttribute) { MessagePlugin.warning('请选择订单属性'); return; }
+      if (!editForm.orderType) { MessagePlugin.warning('请选择订单类型'); return; }
       if (!editForm.salesChannel) { MessagePlugin.warning('请选择销售渠道'); return; }
     }
     if (editStep === 3) {
@@ -1417,7 +1424,23 @@ export function Orders() {
       colKey: 'status', title: '订单状态', width: 80,
       cell: ({ row }: { row: OrderRecord }) => {
         const theme = STATUS_TAG_THEME[row.status] || 'default';
-        return <Tag theme={theme} variant="light">{getDictLabel(ORDER_STATUS_MAP, row.status) || '--'}</Tag>;
+        const isUnreceived = hasUnreceivedPayment(row);
+        const isUnreturned = row.returnStatus === 'notReturned' || row.returnStatus === 'inTransit';
+        return (
+          <div>
+            <Tag theme={theme} variant="light">{getDictLabel(ORDER_STATUS_MAP, row.status) || '--'}</Tag>
+            {isUnreceived && (
+              <div className="mt-1 flex items-center gap-1 text-[11px] text-red-600">
+                <span className="w-1 h-1 rounded-full bg-red-600" />未收款
+              </div>
+            )}
+            {isUnreturned && (
+              <div className="mt-1 flex items-center gap-1 text-[11px] text-red-600">
+                <span className="w-1 h-1 rounded-full bg-red-600" />未退回
+              </div>
+            )}
+          </div>
+        );
       },
     },
     {
@@ -1551,24 +1574,6 @@ export function Orders() {
               onChange={(val) => setFilters(prev => ({ ...prev, customerName: val as string }))} />
           </div>
           <div className="w-40">
-            <label className="block text-xs text-gray-500 mb-1">人员</label>
-            <Select placeholder="请选择人员" value={filters.salesperson || ''}
-              onChange={(val) => setFilters(prev => ({ ...prev, salesperson: val as string }))}
-              options={FILTER_SALESPERSON_OPTIONS} />
-          </div>
-          <div className="w-40">
-            <label className="block text-xs text-gray-500 mb-1">订单类型</label>
-            <Select placeholder="请选择订单类型" value={filters.orderType || ''}
-              onChange={(val) => setFilters(prev => ({ ...prev, orderType: val as string }))}
-              options={ORDER_TYPE_OPTIONS} />
-          </div>
-          <div className="w-40">
-            <label className="block text-xs text-gray-500 mb-1">订单状态</label>
-            <Select placeholder="请选择订单状态" value={filters.status || ''}
-              onChange={(val) => setFilters(prev => ({ ...prev, status: val as string }))}
-              options={FILTER_ORDER_STATUS_OPTIONS} />
-          </div>
-          <div className="w-40">
             <label className="block text-xs text-gray-500 mb-1">日期</label>
             <input type="date" className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500"
               value={filters.startDate || ''}
@@ -1577,8 +1582,34 @@ export function Orders() {
           <div className="flex items-end gap-2">
             <Button theme="primary" icon={<Search size={16} />} onClick={handleSearch}>查询</Button>
             <Button variant="outline" icon={<RotateCcw size={16} />} onClick={handleReset}>重置</Button>
+            <Button variant="text" theme="primary" onClick={() => setShowMoreFilters(v => !v)}>
+              {showMoreFilters ? '收起筛选 ▴' : `更多筛选${moreFilterCount > 0 ? `(${moreFilterCount})` : ''} ▾`}
+            </Button>
           </div>
         </div>
+
+        {showMoreFilters && (
+          <div className="flex flex-wrap gap-3 items-end mt-3 pt-3 border-t border-dashed border-gray-200">
+            <div className="w-40">
+              <label className="block text-xs text-gray-500 mb-1">人员</label>
+              <Select placeholder="请选择人员" value={filters.salesperson || ''}
+                onChange={(val) => setFilters(prev => ({ ...prev, salesperson: val as string }))}
+                options={FILTER_SALESPERSON_OPTIONS} />
+            </div>
+            <div className="w-40">
+              <label className="block text-xs text-gray-500 mb-1">订单类型</label>
+              <Select placeholder="请选择订单类型" value={filters.orderType || ''}
+                onChange={(val) => setFilters(prev => ({ ...prev, orderType: val as string }))}
+                options={ORDER_TYPE_OPTIONS} />
+            </div>
+            <div className="w-40">
+              <label className="block text-xs text-gray-500 mb-1">订单状态</label>
+              <Select placeholder="请选择订单状态" value={filters.status || ''}
+                onChange={(val) => setFilters(prev => ({ ...prev, status: val as string }))}
+                options={FILTER_ORDER_STATUS_OPTIONS} />
+            </div>
+          </div>
+        )}
       </div>
 
       {/* 表格 */}
@@ -2648,7 +2679,7 @@ function AddOrderWizard({
               }} options={ORDER_ATTRIBUTE_OPTIONS} />
             </div>
             <div>
-              <label className="block text-xs text-gray-500 mb-1">订单类型</label>
+              <label className="block text-xs text-gray-500 mb-1">订单类型 <span className="text-red-500">*</span></label>
               <Select placeholder="请选择" value={form.orderType || ''} onChange={val => {
                 const newType = val as string;
                 onChange(prev => {
