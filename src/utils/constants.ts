@@ -6,3 +6,6 @@ export const ENABLE_WECHAT_PUSH = true;
 
 /** 每页条数 */
 export const PAGE_SIZE = 20;
+
+/** 顺丰快递功能开关：false 时隐藏订单列表的顺丰按钮与系统设置的顺丰环境卡片（云函数能力保留） */
+export const SF_EXPRESS_UI_ENABLED = false;

@@ -40,7 +40,9 @@ export default defineConfig({
   plugins: [patchTDesignCssWarnings(), react()],
   server: {
     host: '0.0.0.0',
-    allowedHosts: true
+    allowedHosts: true,
+    // PORT 由外部工具(如 IDE 预览)指定时优先生效,默认仍为 5173
+    port: Number((globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.PORT) || 5173
   },
   build: {
     rollupOptions: {

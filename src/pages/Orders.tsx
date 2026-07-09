@@ -2,7 +2,7 @@ import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
 import { Table, Button, Input, Select, Tag, Dialog, Dropdown, MessagePlugin, Textarea, Switch } from 'tdesign-react';
 import type { DropdownOption } from 'tdesign-react';
-import { Search, RotateCcw, Upload, Download, Plus, Pencil, Trash2, Minus, X, ChevronRight, ChevronLeft, FileDown, Check } from 'lucide-react';
+import { Search, RotateCcw, Upload, Plus, Pencil, Trash2, Minus, X, ChevronRight, ChevronLeft, FileDown, Check } from 'lucide-react';
 import { OrderRecord, OrderFilters, InboundRecord, OutboundRecord, PhoneBrand, PhoneModelItem, ProductItem, TransferProductItem, OrderAttachment, PaymentSplit, dictToOptions, getDictLabel } from '../types';
 import { useOrders } from '../hooks/useOrders';
 import { usePhoneModels } from '../hooks/usePhoneModels';
@@ -18,7 +18,7 @@ import {
   getCurrentPermissionUserPayload,
   uploadToCloudStorage,
 } from '../lib/cloudbase';
-import { PAGE_SIZE } from '../utils/constants';
+import { PAGE_SIZE, SF_EXPRESS_UI_ENABLED } from '../utils/constants';
 import { DICT_CODES, useDictionaries } from '../contexts/DictionaryContext';
 
 /** ========== 预计算静态 options（模块级常量，避免每次渲染重建） ========== */
@@ -155,6 +155,28 @@ const STATUS_TAG_THEME: Record<string, 'success' | 'warning' | 'danger' | 'defau
   unshipped: 'warning',
   unknown: 'default',
 };
+
+// 状态胶囊配色（取自设计稿 Records Redesign）
+const STATUS_PILL_COLORS: Record<'success' | 'warning' | 'danger' | 'default', { fg: string; bg: string }> = {
+  success: { fg: '#00854A', bg: '#E3F6EA' },
+  warning: { fg: '#B85C00', bg: '#FDEEDD' },
+  danger: { fg: '#C23616', bg: '#FDE8E8' },
+  default: { fg: '#6B7785', bg: '#F0F1F3' },
+};
+
+/** 圆点胶囊状态标签（设计稿样式：圆角胶囊 + currentColor 圆点） */
+function StatusPill({ theme, label }: { theme: 'success' | 'warning' | 'danger' | 'default'; label: string }) {
+  const colors = STATUS_PILL_COLORS[theme];
+  return (
+    <span
+      className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium whitespace-nowrap"
+      style={{ backgroundColor: colors.bg, color: colors.fg }}
+    >
+      <span className="w-1.5 h-1.5 rounded-full bg-current shrink-0" />
+      {label}
+    </span>
+  );
+}
 
 function isPendingShipmentStatus(status: string | undefined): boolean {
   return status === 'unknown' || status === '--' || status === 'unshipped';
@@ -1449,7 +1471,7 @@ export function Orders() {
         const isUnreturned = row.returnStatus === 'notReturned' || row.returnStatus === 'inTransit';
         return (
           <div>
-            <Tag theme={theme} variant="light">{getDictLabel(ORDER_STATUS_MAP, row.status) || '--'}</Tag>
+            <StatusPill theme={theme} label={getDictLabel(ORDER_STATUS_MAP, row.status) || '--'} />
             {isUnreceived && (
               <div className="mt-1 flex items-center gap-1 text-[11px] text-red-600">
                 <span className="w-1 h-1 rounded-full bg-red-600" />未收款
@@ -1465,26 +1487,30 @@ export function Orders() {
       },
     },
     {
-      colKey: 'op', title: '操作', width: 390, fixed: 'right' as const,
+      colKey: 'op', title: '操作', width: SF_EXPRESS_UI_ENABLED ? 390 : 240, fixed: 'right' as const,
       cell: ({ row }: { row: OrderRecord }) => (
         <div className="flex gap-1 flex-wrap">
           <Button variant="text" theme="primary" size="small"
             onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleDetail(row); }}>
             详情
           </Button>
-          <Button variant="text" theme="primary" size="small"
-            loading={applyingExpressId === row._id}
-            disabled={!canApplySfExpressOrder(row) || (!!applyingExpressId && applyingExpressId !== row._id)}
-            onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleApplyExpress(row); }}>
-            生成顺丰单
-          </Button>
-          <Button variant="text" theme="primary" size="small"
-            loading={queryingSfResultId === row._id}
-            disabled={!canQuerySfOrder(row) || (!!queryingSfResultId && queryingSfResultId !== row._id)}
-            onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleQuerySfOrderResult(row); }}>
-            查询顺丰
-          </Button>
-          {canCancelExpressOrder(row) && (
+          {SF_EXPRESS_UI_ENABLED && (
+            <Button variant="text" theme="primary" size="small"
+              loading={applyingExpressId === row._id}
+              disabled={!canApplySfExpressOrder(row) || (!!applyingExpressId && applyingExpressId !== row._id)}
+              onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleApplyExpress(row); }}>
+              生成顺丰单
+            </Button>
+          )}
+          {SF_EXPRESS_UI_ENABLED && (
+            <Button variant="text" theme="primary" size="small"
+              loading={queryingSfResultId === row._id}
+              disabled={!canQuerySfOrder(row) || (!!queryingSfResultId && queryingSfResultId !== row._id)}
+              onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleQuerySfOrderResult(row); }}>
+              查询顺丰
+            </Button>
+          )}
+          {SF_EXPRESS_UI_ENABLED && canCancelExpressOrder(row) && (
             <Button variant="text" theme="danger" size="small"
               loading={cancelingSfId === row._id}
               disabled={!!cancelingSfId && cancelingSfId !== row._id}
@@ -1568,12 +1594,18 @@ export function Orders() {
             aria-label="导入订单 Excel"
             onChange={handleFileSelect}
           />
-          <Button theme="default" icon={<Upload size={16} />} onClick={() => fileInputRef.current?.click()}>
-            导入Excel
-          </Button>
-          <Button theme="default" icon={<Download size={16} />} onClick={handleExport}>
-            导出Excel
-          </Button>
+          <Dropdown
+            options={[
+              { content: '导入 Excel', value: 'import' },
+              { content: '导出 Excel', value: 'export' },
+            ]}
+            onClick={(item: DropdownOption) => {
+              if (item.value === 'import') fileInputRef.current?.click();
+              else handleExport();
+            }}
+          >
+            <Button theme="default" icon={<Upload size={16} />}>导入 / 导出</Button>
+          </Dropdown>
         </div>
       </div>
 
@@ -1590,11 +1622,19 @@ export function Orders() {
             <Input placeholder="请输入客户名称" value={filters.customerName || ''}
               onChange={(val) => setFilters(prev => ({ ...prev, customerName: val as string }))} />
           </div>
-          <div className="w-40">
+          <div>
             <label className="block text-xs text-gray-500 mb-1">日期</label>
-            <input type="date" className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500"
-              value={filters.startDate || ''}
-              onChange={(e) => setFilters(prev => ({ ...prev, startDate: e.target.value }))} />
+            <div className="flex items-center gap-1">
+              <input type="date" className="w-36 px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500"
+                aria-label="开始日期" title="开始日期"
+                value={filters.startDate || ''}
+                onChange={(e) => setFilters(prev => ({ ...prev, startDate: e.target.value }))} />
+              <span className="text-gray-400 text-xs">至</span>
+              <input type="date" className="w-36 px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500"
+                aria-label="结束日期" title="结束日期"
+                value={filters.endDate || ''}
+                onChange={(e) => setFilters(prev => ({ ...prev, endDate: e.target.value }))} />
+            </div>
           </div>
           <div className="flex items-end gap-2">
             <Button theme="primary" icon={<Search size={16} />} onClick={handleSearch}>查询</Button>
@@ -1706,9 +1746,7 @@ export function Orders() {
             {currentRecord.status === 'shipped' && <DetailRow label="邮寄结算方式" value={getDictLabel(SHIPPING_FEE_MAP, currentRecord.shippingFee)} />}
             {currentRecord.status === 'shipped' && <DetailRow label="物流单号" value={currentRecord.trackingNumber} />}
             <DetailRow label="订单状态" value={
-              <Tag theme={STATUS_TAG_THEME[currentRecord.status] || 'default'} variant="light">
-                {getDictLabel(ORDER_STATUS_MAP, currentRecord.status) || '--'}
-              </Tag>
+              <StatusPill theme={STATUS_TAG_THEME[currentRecord.status] || 'default'} label={getDictLabel(ORDER_STATUS_MAP, currentRecord.status) || '--'} />
             } />
             <DetailRow label="客服备注" value={currentRecord.customerRemark} />
             {/* 归还状态（租后发货/租后退货） */}
@@ -1770,8 +1808,8 @@ export function Orders() {
             <DetailRow label="出库状态" value={(() => {
               const status = OUTBOUND_STATUS_LABELS[outboundDetail.outboundStatus || ''];
               return status
-                ? <Tag theme={status.theme} variant="light">{status.label}</Tag>
-                : <Tag theme="success" variant="light">已出库</Tag>;
+                ? <StatusPill theme={status.theme} label={status.label} />
+                : <StatusPill theme="success" label="已出库" />;
             })()} />
             <DetailRow label="出库时间" value={formatDate(outboundDetail.outboundDate, false)} />
             <DetailRow label="客户名称" value={outboundDetail.customerName} />

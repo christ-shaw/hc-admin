@@ -10,6 +10,7 @@ import {
   type AIModelConfig,
 } from '../lib/cloudbase';
 import { usePermission } from '../hooks/usePermission';
+import { SF_EXPRESS_UI_ENABLED } from '../utils/constants';
 import { RoleManageTab } from '../components/RoleManageTab';
 import { UserRoleTab } from '../components/UserRoleTab';
 import { LoginLogTab } from '../components/LoginLogTab';
@@ -127,7 +128,7 @@ export function SettingsPage() {
 
   useEffect(() => {
     fetchCounter();
-    fetchSfConfig();
+    if (SF_EXPRESS_UI_ENABLED) fetchSfConfig();
   }, []);
 
   /** 保存计数器值 */
@@ -296,7 +297,8 @@ export function SettingsPage() {
                 </div>
               </div>
 
-              {/* 顺丰下单环境 */}
+              {/* 顺丰下单环境（功能暂未开放，SF_EXPRESS_UI_ENABLED 控制显隐） */}
+              {SF_EXPRESS_UI_ENABLED && (
               <div className="rounded-lg border border-gray-100 p-5">
                 <div className="flex items-center gap-3 mb-4">
                   <div className="w-10 h-10 bg-emerald-100 rounded-lg flex items-center justify-center">
@@ -360,6 +362,7 @@ export function SettingsPage() {
                   </div>
                 </div>
               </div>
+              )}
 
               {/* 订单序号计数器 */}
               <div className="rounded-lg border border-gray-100 p-5">
