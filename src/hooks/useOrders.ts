@@ -23,6 +23,7 @@ interface ApplyExpressResult {
   orderId?: string;
   sfOrderId?: string;
   waybillNo?: string;
+  waybillNoInfoList?: OrderRecord['sfWaybillNoInfoList'];
   errMsg?: string;
   errorCode?: string;
 }
@@ -201,6 +202,7 @@ export function useOrders() {
             expressErrorMsg: '',
             sfOrderId: result.sfOrderId || r.sfOrderId,
             sfWaybillNo: result.waybillNo || r.sfWaybillNo,
+            sfWaybillNoInfoList: result.waybillNoInfoList || r.sfWaybillNoInfoList,
           } : r),
         }));
       } else {
@@ -223,7 +225,7 @@ export function useOrders() {
     }
   }, []);
 
-  /** 查询顺丰下单结果 */
+  /** 查询顺丰订单 */
   const querySfOrderResult = useCallback(async (_id: string): Promise<QuerySfOrderResult> => {
     try {
       const result = await callFunction<QuerySfOrderResult>('querySfOrderResult', {
@@ -245,25 +247,30 @@ export function useOrders() {
             expressErrorMsg: '',
             sfOrderId: result.sfOrderId || r.sfOrderId,
             sfWaybillNo: result.waybillNo || r.sfWaybillNo,
+            sfWaybillNoInfoList: result.waybillNoInfoList || r.sfWaybillNoInfoList,
           } : r),
         }));
       } else {
         setState(prev => ({
           ...prev,
-          records: prev.records.map(r => r._id === _id ? {
-            ...r,
-            expressProvider: 'sf',
-            sfEnv: result.env || r.sfEnv,
-            expressApplyStatus: 'failed',
-            expressErrorMsg: result.errMsg || '查询顺丰下单结果失败',
-            sfOrderId: result.sfOrderId || r.sfOrderId,
-          } : r),
+          records: prev.records.map(r => {
+            if (r._id !== _id) return r;
+            const shouldMarkFailed = !(r.expressApplyStatus === 'applied' || r.sfWaybillNo || r.trackingNumber);
+            return {
+              ...r,
+              expressProvider: 'sf',
+              sfEnv: result.env || r.sfEnv,
+              ...(shouldMarkFailed ? { expressApplyStatus: 'failed' } : {}),
+              expressErrorMsg: result.errMsg || '查询顺丰订单失败',
+              sfOrderId: result.sfOrderId || r.sfOrderId,
+            };
+          }),
         }));
       }
 
       return result;
     } catch (err) {
-      console.error('查询顺丰下单结果失败:', err);
+      console.error('查询顺丰订单失败:', err);
       return { success: false, errMsg: String(err) };
     }
   }, []);
@@ -290,6 +297,7 @@ export function useOrders() {
             expressErrorMsg: '',
             sfOrderId: result.sfOrderId || r.sfOrderId,
             sfWaybillNo: '',
+            sfWaybillNoInfoList: [],
           } : r),
         }));
       } else {

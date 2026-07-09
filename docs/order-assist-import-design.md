@@ -26,7 +26,7 @@ hc-admin 是 CloudBase 应用：React 前端 + 云函数（`wx-server-sdk`）+ N
 
 ## 4. 新增云函数 `importOrderFromAssist`
 
-位置：`cloud_functions/sendWechatNotification/functions/importOrderFromAssist/index.js`
+位置：`cloud_functions/importOrderFromAssist/index.js`
 
 职责（对应插件 DESIGN §5.4）：
 
@@ -203,7 +203,7 @@ CloudBase NoSQL 没有原生复合唯一约束，`unique(source, source_order_no
 
 已完成（本仓库）：
 
-- 云函数 `cloud_functions/sendWechatNotification/functions/importOrderFromAssist/`（`index.js` + `package.json`）。
+- 云函数 `cloud_functions/importOrderFromAssist/`（`index.js` + `package.json`）。
   - 鉴权：校验 `Authorization: Bearer <token>`，期望值取自环境变量 `HC_ORDER_ASSIST_TOKEN`。
   - 状态校验：`sourceStatusCode === 'PENDING_SHIPMENT'`，兜底 `sourceStatus.includes('待发货')`。
   - 字段校验：`sourceOrderNo / sourceOrderItemNo / recipient / recipientPhone / recipientAddress / salesChannel / brand / productName / specification`；`salesChannel` 校验枚举合法性。

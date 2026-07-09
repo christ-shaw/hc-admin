@@ -165,6 +165,11 @@ export interface PaymentSplit {
   amount: number;
 }
 
+export interface SfWaybillNoInfo {
+  waybillType?: string | number;     // 1 母单，2 子单，3 签回单
+  waybillNo: string;                 // 顺丰运单号
+}
+
 /** 订单记录 —— 对齐 Excel「订单明细」工作表 25 列 */
 export interface OrderRecord {
   _id: string;
@@ -202,6 +207,7 @@ export interface OrderRecord {
   sfRequestId?: string;             // 顺丰请求ID
   sfOrderId?: string;               // 顺丰客户订单号
   sfWaybillNo?: string;             // 顺丰运单号
+  sfWaybillNoInfoList?: SfWaybillNoInfo[]; // 顺丰子母件运单号列表
   sfSenderContact?: string;         // 顺丰寄件人
   sfSenderTel?: string;             // 顺丰寄件电话（脱敏）
   sfSearchRequestId?: string;       // 顺丰查询请求ID

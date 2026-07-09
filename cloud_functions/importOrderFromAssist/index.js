@@ -519,7 +519,7 @@ exports.main = async (event) => {
         found: true,
         trackingNumber: String(doc.trackingNumber || '').trim(),
         sfWaybillNo: String(doc.sfWaybillNo || '').trim(),
-        expressProvider: doc.expressProvider || '',
+        expressProvider: doc.expressProvider || (outbound && (outbound.expressProvider || outbound.expressCompany)) || '',
         customerName: (outbound && outbound.customerName) || doc.customerName || doc.consignee || '',
         status: doc.status || '',
         serialNumber: doc.serialNumber,
