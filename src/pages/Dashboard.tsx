@@ -336,14 +336,24 @@ export function Dashboard() {
         </div>
 
         <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
-          <div className="rounded-lg bg-orange-50 px-3 py-2 text-orange-700">
+          <button
+            type="button"
+            onClick={() => navigate('/orders', { state: { filter: { abnormalStatus: 'unreturned' } } })}
+            className="rounded-lg bg-orange-50 px-3 py-2 text-left text-orange-700 transition hover:bg-orange-100"
+            title="查看未退回入库的订单"
+          >
             <div className="text-xl font-semibold">{returnMessageCount}</div>
             <div className="text-xs">未退回入库</div>
-          </div>
-          <div className="rounded-lg bg-red-50 px-3 py-2 text-red-700">
+          </button>
+          <button
+            type="button"
+            onClick={() => navigate('/orders', { state: { filter: { abnormalStatus: 'unreceived' } } })}
+            className="rounded-lg bg-red-50 px-3 py-2 text-left text-red-700 transition hover:bg-red-100"
+            title="查看未收款的订单"
+          >
             <div className="text-xl font-semibold">{paymentMessageCount}</div>
             <div className="text-xs">未收款</div>
-          </div>
+          </button>
         </div>
       </div>
 

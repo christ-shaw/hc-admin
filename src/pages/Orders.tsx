@@ -606,6 +606,10 @@ export function Orders() {
     } else if (stateFilter.customerName) {
       initialFilters.customerName = stateFilter.customerName.trim();
     }
+    if (stateFilter.abnormalStatus) {
+      initialFilters.abnormalStatus = stateFilter.abnormalStatus;
+      setShowMoreFilters(true); // 让来自首页卡片的异常筛选可见
+    }
 
     setFilters(initialFilters);
     orders.fetchRecords(null, initialFilters);
@@ -628,7 +632,7 @@ export function Orders() {
   };
 
   // 折叠区内生效的筛选数，收起时在「更多筛选」按钮上提示，避免隐藏筛选无感知
-  const moreFilterCount = [filters.salesperson, filters.orderType, filters.status].filter(Boolean).length;
+  const moreFilterCount = [filters.salesperson, filters.orderType, filters.status, filters.abnormalStatus].filter(Boolean).length;
 
   const handleDetail = useCallback((record: OrderRecord) => {
     setCurrentRecord(record);
@@ -1664,6 +1668,16 @@ export function Orders() {
               <Select placeholder="请选择订单状态" value={filters.status || ''}
                 onChange={(val) => setFilters(prev => ({ ...prev, status: val as string }))}
                 options={FILTER_ORDER_STATUS_OPTIONS} />
+            </div>
+            <div className="w-40">
+              <label className="block text-xs text-gray-500 mb-1">异常状态</label>
+              <Select placeholder="请选择异常状态" value={filters.abnormalStatus || ''}
+                onChange={(val) => setFilters(prev => ({ ...prev, abnormalStatus: val as string }))}
+                options={[
+                  { label: '全部', value: '' },
+                  { label: '未收款', value: 'unreceived' },
+                  { label: '未退回入库', value: 'unreturned' },
+                ]} />
             </div>
           </div>
         )}

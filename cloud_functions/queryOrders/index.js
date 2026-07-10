@@ -29,6 +29,7 @@ exports.main = async (event, context) => {
     onlineOrderNumber,
     startDate,
     endDate,
+    abnormalStatus,
   } = data;
 
   const maxLimit = Math.min(limit, 100);
@@ -86,8 +87,25 @@ exports.main = async (event, context) => {
       );
     }
 
+    // 异常状态筛选：未退回入库 / 未收款
+    let finalCondition = conditions;
+    if (abnormalStatus === 'unreturned') {
+      conditions.returnStatus = _.in(['notReturned', 'inTransit']);
+    } else if (abnormalStatus === 'unreceived') {
+      // 收款为订单级字段，旧数据可能在货品级；paymentSplits 为 JSON 字符串的极旧数据无法在库端匹配（前端红行仍会标出）
+      finalCondition = _.and([
+        conditions,
+        _.or([
+          { paymentAccount: '未收款' },
+          { 'paymentSplits.account': '未收款' },
+          { 'products.paymentAccount': '未收款' },
+          { 'products.paymentSplits.account': '未收款' },
+        ]),
+      ]);
+    }
+
     // 构建查询
-    let query = db.collection('orders').where(conditions);
+    let query = db.collection('orders').where(finalCondition);
 
     // 游标分页：使用 skip 实现
     let skipCount = 0;
@@ -100,7 +118,7 @@ exports.main = async (event, context) => {
     }
 
     // 先获取总数
-    const countResult = await db.collection('orders').where(conditions).count();
+    const countResult = await db.collection('orders').where(finalCondition).count();
     const total = countResult.total;
 
     // 查询数据

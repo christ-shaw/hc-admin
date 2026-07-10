@@ -272,6 +272,8 @@ export interface OrderFilters {
   onlineOrderNumber?: string;
   startDate?: string;
   endDate?: string;
+  /** 异常状态筛选：unreceived=未收款，unreturned=未退回入库 */
+  abnormalStatus?: string;
 }
 
 /** 统计数据 */
