@@ -25,7 +25,7 @@ const SOURCE = 'zanchenzu';
 const PENDING_SHIPMENT_TEXT = '待发货';
 // 货品三级（brand/productName/specification）、销售渠道、人员（responsiblePerson）由插件选择后传入
 // 订单级必填（公共字段）与货品级必填（items[] 每项）分开校验
-const REQUIRED_ORDER_FIELDS = ['sourceOrderNo', 'recipient', 'recipientPhone', 'recipientAddress', 'salesChannel', 'responsiblePerson'];
+const REQUIRED_ORDER_FIELDS = ['sourceOrderNo', 'orderPerson', 'recipient', 'recipientPhone', 'recipientAddress', 'salesChannel', 'responsiblePerson'];
 const REQUIRED_ITEM_FIELDS = ['sourceOrderItemNo', 'brand', 'productName', 'specification'];
 
 const SALESPERSON_DICT_GROUP = 'salesperson';
@@ -48,6 +48,15 @@ const SALES_CHANNEL_MAP = {
 };
 const SALES_CHANNEL_OPTIONS = Object.keys(SALES_CHANNEL_MAP).map((k) => ({ value: k, label: SALES_CHANNEL_MAP[k] }));
 const SALES_CHANNEL_KEYS = new Set(Object.keys(SALES_CHANNEL_MAP));
+const ORDER_SOURCE_MAP = { new: '新增', service: '服务' };
+const ORDER_ATTRIBUTE_MAP = { rental1: '租赁1', rental2: '租赁2' };
+const ORDER_TYPE_MAP = {
+  newBusiness: '新增业务',
+  postRentalShip: '租后发货',
+  postRentalReturn: '租后退货',
+  postRentalPayment: '租后款项',
+  deposit: '押金',
+};
 
 // ============ 工具 ============
 
@@ -188,6 +197,70 @@ async function findOutboundForOrder(orderDoc) {
   return null;
 }
 
+function getOrderProducts(order) {
+  if (Array.isArray(order.products) && order.products.length > 0) return order.products;
+  if (order.brand || order.productName || order.quantity || order.amount || order.paymentAccount) {
+    return [{
+      brand: order.brand || '',
+      productName: order.productName || '',
+      specification: order.specification || '',
+      quantity: Number(order.quantity) || 0,
+    }];
+  }
+  return [];
+}
+
+function getProductLabel(productName) {
+  return String(productName || '')
+    .replace(/红米/g, '红粮')
+    .replace(/华为/g, '菊花')
+    .replace(/小米/g, '粗粮')
+    .replace(/OPPO/gi, '绿厂')
+    .replace(/vivo/gi, '蓝厂');
+}
+
+function getBrandLabel(brand) {
+  const labels = { 华为: '菊花', vivo: '蓝厂', OPPO: '绿厂', 小米: '粗粮', 红米: '红粮' };
+  const text = String(brand || '').trim();
+  return labels[text] || text;
+}
+
+function buildOrderIntroduction(order) {
+  const consigneeLine = [order.consignee, order.consigneePhone, order.consigneeAddress]
+    .map((value) => String(value || '').trim() || '-')
+    .join('，');
+  const phoneSummary = getOrderProducts(order)
+    .map((product) => {
+      const productName = getProductLabel(product.productName) || getBrandLabel(product.brand) || '-';
+      const specification = product.specification && product.specification !== '默认'
+        ? ` ${product.specification}`
+        : '';
+      return `${productName}${specification}*${Number(product.quantity) || 0}台`;
+    })
+    .join('，') || '-';
+  const remark = String(order.customerRemark || '').trim() || '-';
+  const customerName = String(order.customerName || '').trim() || '-';
+  const orderNumber = String(order.onlineOrderNumber || order.serialNumber || '').trim() || '-';
+
+  return `${consigneeLine}\n\n${phoneSummary}，${remark}\n\n订单下单人:  ${customerName},  订单编号: ${orderNumber}`;
+}
+
+function getDictLabel(map, value) {
+  const text = String(value || '').trim();
+  return map[text] || text || '-';
+}
+
+function mapIntroductionOrder(order) {
+  return {
+    orderId: order._id || '',
+    orderDate: String(order.date || '').trim() || '-',
+    orderSource: getDictLabel(ORDER_SOURCE_MAP, order.orderSource),
+    orderAttribute: getDictLabel(ORDER_ATTRIBUTE_MAP, order.orderAttribute),
+    orderType: getDictLabel(ORDER_TYPE_MAP, order.orderType),
+    introduction: buildOrderIntroduction(order),
+  };
+}
+
 function isPendingShipment(order) {
   const code = String((order && order.sourceStatusCode) || '').trim();
   if (code) return code === 'PENDING_SHIPMENT';
@@ -279,6 +352,7 @@ function normalizeItems(order) {
     productName: String((item && item.productName) || '').trim(),
     specification: String((item && item.specification) || '').trim(),
     goodsQuantity: Number(item && item.goodsQuantity) || 1,
+    quantity: Number(item && item.quantity) || Number(item && item.goodsQuantity) || 1,
     goodsTitle: String((item && item.goodsTitle) || '').trim(),
     raw: (item && item.raw) || null,
   }));
@@ -290,7 +364,7 @@ function mapToProductItem(item) {
     brand: item.brand,
     productName: item.productName,
     specification: item.specification,
-    quantity: item.goodsQuantity,
+    quantity: item.quantity,
     unitPrice: 0,
     amount: 0,
     paymentAccount: '',
@@ -339,7 +413,7 @@ function mapToOrder(order, items, serialNumber, now) {
     salesperson: order.responsiblePerson || '',
     channelCategory: 'platform',           // 固定：平台
     onlineOrderNumber: order.sourceOrderNo || '',
-    customerName: order.recipient || '',
+    customerName: order.orderPerson || '',
     products: items.map(mapToProductItem),
     trackingNumber: '',
     sourceOrderItemNo: (items[0] && items[0].sourceOrderItemNo) || '',
@@ -365,6 +439,100 @@ function mapToOrder(order, items, serialNumber, now) {
   };
 }
 
+// 赞晨“申请售后” -> hc-admin 售后服务订单。
+// 订单属性按产品约定固定为：服务 / 租赁1 / 租后发货 / 平台。
+function mapToAfterSaleOrder(order, items, serialNumber, now) {
+  const remark = String(order.remark || '').trim();
+  return {
+    serialNumber,
+    date: todayInBeijing(),
+    orderSource: 'service',
+    orderAttribute: 'rental1',
+    orderType: 'postRentalShip',
+    salesChannel: order.salesChannel || '',
+    salesperson: order.responsiblePerson || '',
+    channelCategory: 'platform',
+    onlineOrderNumber: order.sourceOrderNo || '',
+    customerName: order.orderPerson || order.recipient || '',
+    products: items.map(mapToProductItem),
+    trackingNumber: '',
+    sourceOrderItemNo: (items[0] && items[0].sourceOrderItemNo) || '',
+    consignee: order.recipient || '',
+    consigneePhone: order.recipientPhone || '',
+    consigneeAddress: order.recipientAddress || '',
+    shippingFee: '',
+    status: 'unshipped',
+    customerRemark: remark,
+    transferBrand: '',
+    transferProductName: '',
+    transferSpecification: '',
+    paidPeriod: 0,
+    paidRent: 0,
+    transferItems: '',
+    attachments: [],
+    returnStatus: 'notReturned',
+    returnTrackingNumbers: '',
+    needsOutbound: true,
+    outboundRecordId: '',
+    importSource: 'hc-order-assist-after-sale',
+    afterSaleRequestId: order.afterSaleRequestId || '',
+    createTime: now,
+  };
+}
+
+async function createAfterSaleOrder(payload) {
+  const order = (payload && payload.order) || {};
+  const autoOutbound = (payload && payload.autoOutbound) || null;
+  const requestId = String(order.afterSaleRequestId || '').trim();
+  const required = REQUIRED_ORDER_FIELDS.concat(['afterSaleRequestId', 'remark']);
+  const missing = required.filter((field) => !String(order[field] || '').trim());
+  if (missing.length > 0) {
+    return fail(422, 'MISSING_FIELDS', '缺少必填字段: ' + missing.join(', '));
+  }
+  if (!SALES_CHANNEL_KEYS.has(String(order.salesChannel))) {
+    return fail(422, 'INVALID_FIELD', `salesChannel 非法: ${order.salesChannel}`);
+  }
+
+  const items = normalizeItems(order);
+  for (let i = 0; i < items.length; i++) {
+    const missingItem = REQUIRED_ITEM_FIELDS.filter((field) => !items[i][field]);
+    if (missingItem.length > 0) {
+      return fail(422, 'MISSING_FIELDS', `货品[${i + 1}] 缺少必填字段: ` + missingItem.join(', '));
+    }
+  }
+  const itemNos = items.map((item) => item.sourceOrderItemNo);
+  if (new Set(itemNos).size !== itemNos.length) {
+    return fail(422, 'INVALID_FIELD', '货品明细存在重复的 sourceOrderItemNo');
+  }
+
+  try {
+    const existingRes = await db.collection(ORDERS_COLLECTION)
+      .where({ importSource: 'hc-order-assist-after-sale', afterSaleRequestId: requestId })
+      .limit(1)
+      .get();
+    const existing = (existingRes.data || [])[0];
+    if (existing) {
+      return ok('DUPLICATED', '售后服务订单已存在', { orderId: existing._id, duplicated: true });
+    }
+
+    const now = db.serverDate();
+    const serialNumber = await getNextSerialNumber();
+    const orderDoc = mapToAfterSaleOrder(order, items, serialNumber, now);
+    const addRes = await db.collection(ORDERS_COLLECTION).add({ data: orderDoc });
+    const outboundSync = await syncOutboundAfterImport({
+      orderId: addRes._id,
+      orderDoc,
+      appendedProducts: [],
+      autoOutbound,
+      now,
+    });
+    return ok('CREATED', '售后服务订单创建成功', { orderId: addRes._id, ...outboundSync });
+  } catch (err) {
+    console.error('[importOrderFromAssist] 创建售后服务订单失败:', err);
+    return fail(500, 'INTERNAL_ERROR', err.message || '创建售后服务订单失败');
+  }
+}
+
 // ============ 出库单联动 ============
 
 // 货品条目 → model 字符串（与 generateOutboundFromOrders / 小程序拼法一致：规格非"默认"时带规格）
@@ -388,7 +556,7 @@ function productsToPhoneModels(products, base) {
   for (const item of products || []) {
     const model = buildModel(item);
     if (!model) continue;
-    const qty = Number(item.quantity) || Number(item.goodsQuantity) || 0;
+    const qty = Number(item.quantity) || 0;
     if (map.has(model)) {
       map.set(model, map.get(model) + qty);
     } else {
@@ -535,6 +703,29 @@ exports.main = async (event) => {
     }
   }
 
+  // 按赞晨租编号返回全部 hc-admin 订单简介，供插件选择并复制。
+  if (payload && payload.action === 'getOrderIntroductions') {
+    const sn = String(payload.sourceOrderNo || '').trim();
+    if (!sn) return fail(422, 'MISSING_FIELDS', '缺少 sourceOrderNo');
+    try {
+      const res = await db.collection(ORDERS_COLLECTION)
+        .where({ onlineOrderNumber: sn })
+        .limit(100)
+        .get();
+      const orders = (res.data || [])
+        .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) || Number(b.serialNumber || 0) - Number(a.serialNumber || 0))
+        .map(mapIntroductionOrder);
+      return ok(orders.length ? 'OK' : 'NOT_FOUND', orders.length ? '查询成功' : '未找到订单', {
+        found: orders.length > 0,
+        sourceOrderNo: sn,
+        orders,
+      });
+    } catch (err) {
+      console.error('[importOrderFromAssist] 获取订单简介失败:', err);
+      return fail(500, 'INTERNAL_ERROR', err.message || '获取订单简介失败');
+    }
+  }
+
   // 取货品三级结构（供插件下拉选择）；与销售渠道枚举一并返回
   if (payload && payload.action === 'getProductModels') {
     try {
@@ -547,6 +738,11 @@ exports.main = async (event) => {
       console.error('[importOrderFromAssist] 获取货品失败:', err);
       return fail(500, 'INTERNAL_ERROR', err.message || '获取货品失败');
     }
+  }
+
+  // 由插件“申请售后”发起，创建独立的售后服务订单；不要求赞晨订单处于待发货状态。
+  if (payload && payload.action === 'createAfterSaleOrder') {
+    return createAfterSaleOrder(payload);
   }
 
   const order = (payload && payload.order) || {};

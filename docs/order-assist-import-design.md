@@ -49,15 +49,16 @@ hc-admin 是 CloudBase 应用：React 前端 + 云函数（`wx-server-sdk`）+ N
 | --- | --- | --- |
 | `sourceOrderNo` | `onlineOrderNumber` | 原始赞晨租订单号；同一订单拆多个货品时该字段保持相同 |
 | `sourceOrderItemNo` | `sourceOrderItemNo` | 货品项唯一编号（形如 `<sourceOrderNo>#<n>`），幂等键来源（见 §7） |
-| `recipient` | `consignee` + `customerName` | 收货人=客户名，发货流程靠 `consignee` 匹配出库 |
+| `orderPerson` | `customerName` | 订单下单人/客户名称 |
+| `recipient` | `consignee` | 收货人名称，发货流程靠 `consignee` 匹配出库 |
 | `recipientPhone` | `consigneePhone` | 完整手机号 |
 | `recipientAddress` | `consigneeAddress` | |
 | `brand` | `brand` | 插件从 `manageProductModels` 三级选择（见 §5.1） |
 | `productName` | `productName` | 选中的货品名（**不再用** `goodsTitle`） |
 | `specification` | `specification` | 选中的规格 |
 | `salesChannel` | `salesChannel` | 插件按**商户名称**自动判定（见 §5.1），传 `SALES_CHANNEL_MAP` 的 key（校验合法性） |
-| `goodsTitle` | → `customerRemark` | 页面原始商品名仅作参考写入备注 |
-| `goodsQuantity` | `quantity` | 默认 1 |
+| `goodsTitle` | — | 页面原始商品名仅写入导入日志，不拼接客服备注 |
+| `quantity` / `goodsQuantity` | `quantity` | 优先使用用户确认的 `quantity`，缺省回退 `goodsQuantity`，默认 1 |
 | `paidRent` | —（暂忽略） | 暂不映射，`paidRent` 写默认 0 |
 | `responsiblePerson` | `salesperson` | |
 | （计数器生成） | `serialNumber` | 由 `system_counters` 的 `orderSerialNumber` 事务自增，与前端建单一致 |
@@ -66,12 +67,13 @@ hc-admin 是 CloudBase 应用：React 前端 + 云函数（`wx-server-sdk`）+ N
 | （固定值）| `orderAttribute = 'rental1'`（租赁1） | |
 | （固定值）| `orderType = 'newBusiness'`（新增业务） | |
 | （固定值）| `channelCategory = 'platform'`（平台） | |
-| （固定值）| `status = 'unknown'` | 见下方说明 |
-| （固定值）| `customerRemark = '【赞晨租导入】原商品：<goodsTitle>'` + `importSource = 'hc-order-assist'` | 来源标记 |
+| （固定值）| `status = 'unshipped'` | 待发货 |
+| `remark` | `customerRemark` | 用户在插件导入弹窗填写的客服备注 |
+| （固定值）| `importSource = 'hc-order-assist'` | 来源标记 |
 | 其余字段 | `channelCategory/unitPrice/amount/shippingFee/transferItems/returnStatus/attachments ...` | 按 `EMPTY_ORDER` 默认值补空，保证列表显示与编辑向导可用 |
 | `raw` | 仅写入导入日志，不污染订单 | |
 
-> 状态映射说明：hc-admin 的 `status` 枚举（`shipped/noShip/returnReceived/returnShipped/unknown`）没有「待发货」。`unknown` 显示为 `--`，且 `isPendingShipmentStatus` 只认 `unknown`/`--`，是唯一会显示「发货」「申请快递」按钮的状态。因此导入订单一律置 `status = 'unknown'`，才能进入正常发货流程。
+> 状态映射说明：导入订单写入 `status = 'unshipped'`，与手工新建的待发货订单保持一致，可进入生成出库单和发货流程。
 
 > 来源字段说明：`orderSource` 现固定写 `new`（新增）。来源信息另由 `onlineOrderNumber`（来源单号）、`customerRemark` 标注与 `importSource` 字段保留，并由 §8 导入日志完整记录。
 
@@ -206,11 +208,11 @@ CloudBase NoSQL 没有原生复合唯一约束，`unique(source, source_order_no
 - 云函数 `cloud_functions/importOrderFromAssist/`（`index.js` + `package.json`）。
   - 鉴权：校验 `Authorization: Bearer <token>`，期望值取自环境变量 `HC_ORDER_ASSIST_TOKEN`。
   - 状态校验：`sourceStatusCode === 'PENDING_SHIPMENT'`，兜底 `sourceStatus.includes('待发货')`。
-  - 字段校验：`sourceOrderNo / sourceOrderItemNo / recipient / recipientPhone / recipientAddress / salesChannel / brand / productName / specification`；`salesChannel` 校验枚举合法性。
+  - 字段校验：订单级校验 `sourceOrderNo / orderPerson / recipient / recipientPhone / recipientAddress / salesChannel / responsiblePerson`，货品级校验 `sourceOrderItemNo / brand / productName / specification`；`salesChannel` 校验枚举合法性。
   - `getProductModels` 动作：token 鉴权返回货品三级树 + 销售渠道选项（见 §5.1）。
   - 幂等：`order_import_logs` 以 `_id = zanchenzu_<sourceOrderItemNo>` 抢占锁；`sourceOrderItemNo` 全局唯一，逐货品项加锁，整单全部重复返回 `DUPLICATED`（同源订单合并规则见 §14）。
   - 序号经 `system_counters`/`orderSerialNumber` 事务自增生成 `serialNumber`。
-  - 按扁平结构映射写入 `orders`：固定 `date=当天 / orderSource='new' / orderAttribute='rental1' / orderType='newBusiness' / status='unknown'`，`salesChannel`、`brand/productName/specification` 取自插件选择，原 `goodsTitle` 入 `customerRemark`，`paidRent` 暂忽略；并回写导入日志。
+  - 按 `products[]` 结构映射写入 `orders`：固定 `date=当天 / orderSource='new' / orderAttribute='rental1' / orderType='newBusiness' / status='unshipped'`，下单人写入 `customerName`，收件人单独写入 `consignee`，用户备注写入 `customerRemark`；并回写导入日志。
   - 返回 CloudBase「HTTP 访问服务」集成响应（带真实状态码 + `{success,code,message,data}`）。
 - 已在 `cloudbaserc.json` 注册该函数。
 - 插件侧（hc-order-assist）已配套：`background.js` 透传新字段 + `getHcAdminProductModels` 消息处理（带 15s 超时）；`content-script.js` 导入弹窗支持销售渠道下拉 + 品牌→货品→规格级联选择。
@@ -251,6 +253,7 @@ CloudBase NoSQL 没有原生复合唯一约束，`unique(source, source_order_no
   "order": {
     "sourceOrderNo": "ME2026...",
     "sourceStatusCode": "PENDING_SHIPMENT",
+    "orderPerson": "李四",
     "recipient": "张三", "recipientPhone": "138...", "recipientAddress": "...",
     "salesChannel": "yuntu", "responsiblePerson": "李四",
     "items": [
@@ -262,7 +265,7 @@ CloudBase NoSQL 没有原生复合唯一约束，`unique(source, source_order_no
 }
 ```
 
-- 订单级必填：`sourceOrderNo / recipient / recipientPhone / recipientAddress / salesChannel / responsiblePerson`；货品级必填：`sourceOrderItemNo / brand / productName / specification`（`goodsQuantity` 默认 1）。
+- 订单级必填：`sourceOrderNo / orderPerson / recipient / recipientPhone / recipientAddress / salesChannel / responsiblePerson`；货品级必填：`sourceOrderItemNo / brand / productName / specification`（`quantity` 缺省时回退 `goodsQuantity`，默认 1）。
 - `items` 内 `sourceOrderItemNo` 不得重复，否则 422 `INVALID_FIELD`。
 - **兼容旧形态**：不带 `items` 时，顶层货品字段（`sourceOrderItemNo/brand/productName/specification/goodsQuantity/goodsTitle`）视为唯一条目，行为与升级前一致。
 
@@ -271,7 +274,7 @@ CloudBase NoSQL 没有原生复合唯一约束，`unique(source, source_order_no
 - 同一 `sourceOrderNo`（且 `importSource = 'hc-order-assist'`）在 `orders` 中只存在一条文档：首次导入建单（`serialNumber` 只自增一次，全部货品写入 `products[]`）；再次导入（无论新旧形态、单条多条）把未导入过的货品**追加**进该文档的 `products[]`。
 - 旧扁平结构的存量导入单在追加时先把原扁平货品折算为 `products[]` 条目并清空扁平字段。
 - 幂等粒度仍是**货品项**：`order_import_logs` 逐项以 `_id = zanchenzu_<sourceOrderItemNo>` 抢锁；products 内亦按 `sourceOrderItemNo` 去重兜底。
-- 多货品订单的 `customerRemark` 为各货品 `goodsTitle` 去重后以「；」拼接。
+- 多货品订单的 `customerRemark` 使用用户填写的 `order.remark`；追加导入时仅追加尚未包含的备注，不拼接 `goodsTitle`。
 
 ### 14.3 响应
 
@@ -306,3 +309,37 @@ CloudBase NoSQL 没有原生复合唯一约束，`unique(source, source_order_no
 | 联动出错 | 不影响订单导入结果，响应带 `outboundError` | `failed` |
 
 响应的 `data` 里同时带 `outboundId`（如有）。手工建单入口的对应能力由前端在保存成功后调用 `generateOutboundFromOrders` 实现（`saveOrders` 返回 `savedIds`），与本函数无关。
+
+## 16. 插件申请售后（2026-07 更新）
+
+同一 HTTP 路径支持 `action: "createAfterSaleOrder"`。该动作创建独立的售后服务订单，不走普通待发货导入的状态校验，也不会与 `importSource = 'hc-order-assist'` 的普通订单合并。
+
+固定映射：
+
+- `orderSource = service`（服务）
+- `orderAttribute = rental1`（租赁1）
+- `orderType = postRentalShip`（租后发货）
+- `channelCategory = platform`（平台）
+- `onlineOrderNumber = sourceOrderNo`（赞晨订单编号）
+- `customerName = orderPerson`（订单下单人）
+- `status = unshipped`、`needsOutbound = true`
+- `returnStatus = notReturned`
+- `importSource = hc-order-assist-after-sale`
+
+插件复用普通导入的货品选择器，用户手工选择品牌、货品、规格和数量；赞晨下单人、收件人、手机号、地址作为默认值展示，提交前允许修改并要求完整确认。`afterSaleRequestId` 和 `remark` 必填；`afterSaleRequestId` 标识单次申请，用于重试幂等，再次主动申请会生成新的请求 ID 和新的售后服务订单。若传入 `autoOutbound.enabled = true`，建单后同步生成待出库单。
+
+## 17. 查询订单简介（2026-07 更新）
+
+同一 HTTP 路径支持 `action: "getOrderIntroductions"`，请求传入 `sourceOrderNo`，按 `orders.onlineOrderNumber` 返回最多 100 条关联订单，按日期、系统序号倒序排列。每条结果包含订单 ID、日期、来源、属性、类型和可直接复制的 `introduction` 文本。
+
+简介格式：
+
+```text
+收件人，收件电话，收件地址
+
+货品名称 规格*数量台，客服备注
+
+订单下单人:  客户名称,  订单编号: 网店订单号
+```
+
+订单无网店订单号时，订单编号回退为系统序号；多货品之间使用中文逗号连接。
