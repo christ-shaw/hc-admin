@@ -25,7 +25,7 @@ const SOURCE = 'zanchenzu';
 const PENDING_SHIPMENT_TEXT = '待发货';
 // 货品三级（brand/productName/specification）、销售渠道、人员（responsiblePerson）由插件选择后传入
 // 订单级必填（公共字段）与货品级必填（items[] 每项）分开校验
-const REQUIRED_ORDER_FIELDS = ['sourceOrderNo', 'orderPerson', 'recipient', 'recipientPhone', 'recipientAddress', 'salesChannel', 'responsiblePerson'];
+const REQUIRED_ORDER_FIELDS = ['sourceOrderNo', 'recipient', 'recipientPhone', 'recipientAddress', 'salesChannel', 'responsiblePerson'];
 const REQUIRED_ITEM_FIELDS = ['sourceOrderItemNo', 'brand', 'productName', 'specification'];
 
 const SALESPERSON_DICT_GROUP = 'salesperson';
@@ -413,7 +413,7 @@ function mapToOrder(order, items, serialNumber, now) {
     salesperson: order.responsiblePerson || '',
     channelCategory: 'platform',           // 固定：平台
     onlineOrderNumber: order.sourceOrderNo || '',
-    customerName: order.orderPerson || '',
+    customerName: order.orderPerson || order.recipient || '',
     products: items.map(mapToProductItem),
     trackingNumber: '',
     sourceOrderItemNo: (items[0] && items[0].sourceOrderItemNo) || '',
@@ -484,7 +484,7 @@ async function createAfterSaleOrder(payload) {
   const order = (payload && payload.order) || {};
   const autoOutbound = (payload && payload.autoOutbound) || null;
   const requestId = String(order.afterSaleRequestId || '').trim();
-  const required = REQUIRED_ORDER_FIELDS.concat(['afterSaleRequestId', 'remark']);
+  const required = REQUIRED_ORDER_FIELDS.concat(['orderPerson', 'afterSaleRequestId', 'remark']);
   const missing = required.filter((field) => !String(order[field] || '').trim());
   if (missing.length > 0) {
     return fail(422, 'MISSING_FIELDS', '缺少必填字段: ' + missing.join(', '));

@@ -49,7 +49,7 @@ hc-admin 是 CloudBase 应用：React 前端 + 云函数（`wx-server-sdk`）+ N
 | --- | --- | --- |
 | `sourceOrderNo` | `onlineOrderNumber` | 原始赞晨租订单号；同一订单拆多个货品时该字段保持相同 |
 | `sourceOrderItemNo` | `sourceOrderItemNo` | 货品项唯一编号（形如 `<sourceOrderNo>#<n>`），幂等键来源（见 §7） |
-| `orderPerson` | `customerName` | 订单下单人/客户名称 |
+| `orderPerson` | `customerName` | 订单下单人/客户名称；普通导入缺省时兼容旧版插件，回退使用 `recipient` |
 | `recipient` | `consignee` | 收货人名称，发货流程靠 `consignee` 匹配出库 |
 | `recipientPhone` | `consigneePhone` | 完整手机号 |
 | `recipientAddress` | `consigneeAddress` | |
@@ -208,7 +208,7 @@ CloudBase NoSQL 没有原生复合唯一约束，`unique(source, source_order_no
 - 云函数 `cloud_functions/importOrderFromAssist/`（`index.js` + `package.json`）。
   - 鉴权：校验 `Authorization: Bearer <token>`，期望值取自环境变量 `HC_ORDER_ASSIST_TOKEN`。
   - 状态校验：`sourceStatusCode === 'PENDING_SHIPMENT'`，兜底 `sourceStatus.includes('待发货')`。
-  - 字段校验：订单级校验 `sourceOrderNo / orderPerson / recipient / recipientPhone / recipientAddress / salesChannel / responsiblePerson`，货品级校验 `sourceOrderItemNo / brand / productName / specification`；`salesChannel` 校验枚举合法性。
+  - 字段校验：订单级校验 `sourceOrderNo / recipient / recipientPhone / recipientAddress / salesChannel / responsiblePerson`，货品级校验 `sourceOrderItemNo / brand / productName / specification`；`salesChannel` 校验枚举合法性。`orderPerson` 为新版插件字段，普通导入缺省时回退使用 `recipient`。
   - `getProductModels` 动作：token 鉴权返回货品三级树 + 销售渠道选项（见 §5.1）。
   - 幂等：`order_import_logs` 以 `_id = zanchenzu_<sourceOrderItemNo>` 抢占锁；`sourceOrderItemNo` 全局唯一，逐货品项加锁，整单全部重复返回 `DUPLICATED`（同源订单合并规则见 §14）。
   - 序号经 `system_counters`/`orderSerialNumber` 事务自增生成 `serialNumber`。
@@ -265,7 +265,7 @@ CloudBase NoSQL 没有原生复合唯一约束，`unique(source, source_order_no
 }
 ```
 
-- 订单级必填：`sourceOrderNo / orderPerson / recipient / recipientPhone / recipientAddress / salesChannel / responsiblePerson`；货品级必填：`sourceOrderItemNo / brand / productName / specification`（`quantity` 缺省时回退 `goodsQuantity`，默认 1）。
+- 订单级必填：`sourceOrderNo / recipient / recipientPhone / recipientAddress / salesChannel / responsiblePerson`；`orderPerson` 可选，缺省时客户名称回退为 `recipient`。货品级必填：`sourceOrderItemNo / brand / productName / specification`（`quantity` 缺省时回退 `goodsQuantity`，默认 1）。
 - `items` 内 `sourceOrderItemNo` 不得重复，否则 422 `INVALID_FIELD`。
 - **兼容旧形态**：不带 `items` 时，顶层货品字段（`sourceOrderItemNo/brand/productName/specification/goodsQuantity/goodsTitle`）视为唯一条目，行为与升级前一致。
 
