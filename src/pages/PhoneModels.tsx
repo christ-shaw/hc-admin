@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Button, Dialog, Input, MessagePlugin, Tag, Textarea } from 'tdesign-react';
-import { CheckCircle2, Edit2, Plus, RefreshCw, Trash2, UploadCloud } from 'lucide-react';
+import { Button, Dialog, Input, MessagePlugin, Switch, Textarea } from 'tdesign-react';
+import { Plus, RefreshCw, UploadCloud } from 'lucide-react';
 import { usePhoneModels } from '../hooks/usePhoneModels';
 import { PhoneBrand, PhoneModelSpec, PhoneProduct } from '../types';
 import { buildProductModelSeed } from '../data/productDict';
@@ -54,8 +54,45 @@ function getSpecCount(brands: PhoneBrand[]) {
   ), 0);
 }
 
+// 状态胶囊配色（取自设计稿 Records Redesign）
+const MODEL_STATUS_COLORS = {
+  enabled: { fg: '#00854A', bg: '#E3F6EA' },
+  disabled: { fg: '#B96A00', bg: '#FFF4E5' },
+};
+
 function StatusTag({ enabled }: { enabled?: boolean }) {
-  return enabled === false ? <Tag theme="warning" variant="light">停用</Tag> : <Tag theme="success" variant="light">启用</Tag>;
+  const isEnabled = enabled !== false;
+  const colors = isEnabled ? MODEL_STATUS_COLORS.enabled : MODEL_STATUS_COLORS.disabled;
+  return (
+    <span
+      className="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium"
+      style={{ backgroundColor: colors.bg, color: colors.fg }}
+    >
+      {isEnabled ? '启用' : '停用'}
+    </span>
+  );
+}
+
+/** 行内文字操作按钮（编辑=灰底深字，删除=红字红底） */
+function RowActionButton({ variant, onClick, disabled, children }: {
+  variant: 'edit' | 'delete';
+  onClick: () => void;
+  disabled?: boolean;
+  children: React.ReactNode;
+}) {
+  const isDelete = variant === 'delete';
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      className={`rounded-md px-1.5 py-1 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${
+        isDelete ? 'text-[#E34D59] hover:bg-[#FDECEE]' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700'
+      }`}
+    >
+      {children}
+    </button>
+  );
 }
 
 export function PhoneModels() {
@@ -305,95 +342,105 @@ export function PhoneModels() {
       )}
 
       {orderedBrands.length > 0 && (
-        <div className="grid gap-4 xl:grid-cols-[280px_minmax(0,1fr)_minmax(260px,360px)]">
-          <section className="rounded border border-gray-200 bg-white">
-            <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3">
-              <h2 className="text-base font-semibold text-gray-700">品牌</h2>
+        <div className="grid gap-3.5 xl:grid-cols-[250px_minmax(0,1fr)_minmax(240px,320px)]">
+          <section className="rounded-2xl border border-[#EEF0F2] bg-white shadow-[0_1px_2px_rgba(16,24,40,0.03)]">
+            <div className="flex items-center justify-between border-b border-[#EEF0F2] px-4 py-3">
+              <h2 className="text-sm font-semibold text-[#1F2733]">品牌</h2>
               <Button size="small" variant="text" icon={<Plus size={15} />} disabled={!canManage} onClick={openAddBrand} />
             </div>
             <div className="max-h-[calc(100vh-250px)] overflow-auto p-2">
-              {orderedBrands.map(brand => (
-                <button
-                  key={brand.brand}
-                  onClick={() => {
-                    setSelectedBrand(brand.brand);
-                    setSelectedProduct('');
-                  }}
-                  className={`mb-1 w-full rounded px-3 py-2 text-left transition ${currentBrand?.brand === brand.brand ? 'bg-primary/10 text-primary' : 'hover:bg-gray-50 text-gray-700'}`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="truncate font-medium">{brand.brand}</span>
-                    <span className="text-xs text-gray-400">{brand.products?.length || 0}</span>
-                  </div>
-                  <div className="mt-1 flex items-center justify-between">
-                    <StatusTag enabled={brand.enabled} />
-                    {brand.systemBrand && <CheckCircle2 size={14} className="text-gray-300" />}
-                  </div>
-                </button>
-              ))}
+              {orderedBrands.map(brand => {
+                const selected = currentBrand?.brand === brand.brand;
+                return (
+                  <button
+                    key={brand.brand}
+                    onClick={() => {
+                      setSelectedBrand(brand.brand);
+                      setSelectedProduct('');
+                    }}
+                    className={`mb-0.5 flex w-full flex-col gap-1 rounded-[10px] px-3 py-2.5 text-left transition ${
+                      selected ? 'text-[#0052D9]' : 'text-gray-700 hover:bg-[#F0F4FE]'
+                    }`}
+                    style={selected ? { backgroundColor: '#EAF1FE' } : undefined}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="truncate text-sm font-medium">{brand.brand}</span>
+                      <span className="text-xs text-[#9AA3B2]">{brand.products?.length || 0}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <StatusTag enabled={brand.enabled} />
+                      {brand.systemBrand && <span className="text-[11px] text-[#C4CAD3]">内置</span>}
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           </section>
 
-          <section className="rounded border border-gray-200 bg-white">
-            <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3">
+          <section className="rounded-2xl border border-[#EEF0F2] bg-white shadow-[0_1px_2px_rgba(16,24,40,0.03)]">
+            <div className="flex items-center justify-between border-b border-[#EEF0F2] px-4 py-3">
               <div>
-                <h2 className="text-base font-semibold text-gray-700">货品名称</h2>
-                <p className="text-xs text-gray-400">{currentBrand?.brand || '-'}</p>
+                <h2 className="text-sm font-semibold text-[#1F2733]">货品名称</h2>
+                <p className="mt-px text-[11.5px] text-[#B5BBC5]">{currentBrand?.brand || '-'}</p>
               </div>
-              <div className="flex gap-1">
+              <div className="flex items-center gap-1">
                 {currentBrand && (
                   <>
-                    <Button size="small" variant="text" icon={<Edit2 size={15} />} disabled={!canManage} onClick={() => openEditBrand(currentBrand)} />
-                    <Button size="small" variant="text" icon={<Trash2 size={15} />} disabled={!canManage} onClick={() => handleDeleteBrand(currentBrand)} />
+                    <RowActionButton variant="edit" disabled={!canManage} onClick={() => openEditBrand(currentBrand)}>编辑</RowActionButton>
+                    <RowActionButton variant="delete" disabled={!canManage} onClick={() => handleDeleteBrand(currentBrand)}>删除</RowActionButton>
                   </>
                 )}
                 <Button size="small" theme="primary" icon={<Plus size={15} />} disabled={!canManage || !currentBrand} onClick={openAddProduct}>货品</Button>
               </div>
             </div>
-            <div className="max-h-[calc(100vh-250px)] overflow-auto divide-y divide-gray-100">
+            <div className="max-h-[calc(100vh-250px)] overflow-auto">
               {products.length === 0 ? (
-                <p className="p-6 text-center text-sm text-gray-400">暂无货品</p>
-              ) : products.map(product => (
-                <div
-                  key={product.name}
-                  className={`flex items-center justify-between gap-3 px-4 py-3 ${currentProduct?.name === product.name ? 'bg-primary/5' : 'hover:bg-gray-50'}`}
-                >
-                  <button className="min-w-0 flex-1 text-left" onClick={() => setSelectedProduct(product.name)}>
-                    <div className="truncate text-sm font-medium text-gray-700">{product.name}</div>
-                    <div className="mt-1 flex items-center gap-2 text-xs text-gray-400">
-                      <StatusTag enabled={product.enabled} />
-                      <span>{product.specs?.length || 0} 个规格</span>
+                <p className="p-8 text-center text-sm text-[#B5BBC5]">暂无货品</p>
+              ) : products.map(product => {
+                const selected = currentProduct?.name === product.name;
+                return (
+                  <div
+                    key={product.name}
+                    className="flex items-center justify-between gap-3 border-b border-[#F5F6F8] px-4 py-2.5 hover:bg-[#F8FAFF]"
+                    style={{ backgroundColor: selected ? '#F5F9FF' : undefined }}
+                  >
+                    <button className="min-w-0 flex-1 text-left" onClick={() => setSelectedProduct(product.name)}>
+                      <div className="truncate text-sm font-medium text-gray-700">{product.name}</div>
+                      <div className="mt-1 flex items-center gap-2 text-[11.5px] text-[#9AA3B2]">
+                        <StatusTag enabled={product.enabled} />
+                        <span>{product.specs?.length || 0} 个规格</span>
+                      </div>
+                    </button>
+                    <div className="flex flex-shrink-0 gap-0.5">
+                      <RowActionButton variant="edit" disabled={!canManage} onClick={() => openEditProduct(product)}>编辑</RowActionButton>
+                      <RowActionButton variant="delete" disabled={!canManage} onClick={() => handleDeleteProduct(product)}>删除</RowActionButton>
                     </div>
-                  </button>
-                  <div className="flex flex-shrink-0 gap-1">
-                    <Button size="small" variant="text" icon={<Edit2 size={15} />} disabled={!canManage} onClick={() => openEditProduct(product)} />
-                    <Button size="small" variant="text" icon={<Trash2 size={15} />} disabled={!canManage} onClick={() => handleDeleteProduct(product)} />
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </section>
 
-          <section className="rounded border border-gray-200 bg-white">
-            <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3">
+          <section className="rounded-2xl border border-[#EEF0F2] bg-white shadow-[0_1px_2px_rgba(16,24,40,0.03)]">
+            <div className="flex items-center justify-between border-b border-[#EEF0F2] px-4 py-3">
               <div>
-                <h2 className="text-base font-semibold text-gray-700">规格</h2>
-                <p className="text-xs text-gray-400">{currentProduct?.name || '-'}</p>
+                <h2 className="text-sm font-semibold text-[#1F2733]">规格</h2>
+                <p className="mt-px text-[11.5px] text-[#B5BBC5]">{currentProduct?.name || '-'}</p>
               </div>
               <Button size="small" theme="primary" icon={<Plus size={15} />} disabled={!canManage || !currentProduct} onClick={openAddSpec}>规格</Button>
             </div>
-            <div className="max-h-[calc(100vh-250px)] overflow-auto divide-y divide-gray-100">
+            <div className="max-h-[calc(100vh-250px)] overflow-auto">
               {specs.length === 0 ? (
-                <p className="p-6 text-center text-sm text-gray-400">暂无规格</p>
+                <p className="p-8 text-center text-sm text-[#B5BBC5]">暂无规格</p>
               ) : specs.map(spec => (
-                <div key={spec.name} className="flex items-center justify-between gap-3 px-4 py-3 hover:bg-gray-50">
+                <div key={spec.name} className="flex items-center justify-between gap-3 border-b border-[#F5F6F8] px-4 py-2.5 hover:bg-[#F8FAFF]">
                   <div className="min-w-0">
                     <div className="truncate text-sm font-medium text-gray-700">{spec.name}</div>
                     <div className="mt-1"><StatusTag enabled={spec.enabled} /></div>
                   </div>
-                  <div className="flex flex-shrink-0 gap-1">
-                    <Button size="small" variant="text" icon={<Edit2 size={15} />} disabled={!canManage} onClick={() => openEditSpec(spec)} />
-                    <Button size="small" variant="text" icon={<Trash2 size={15} />} disabled={!canManage} onClick={() => handleDeleteSpec(spec)} />
+                  <div className="flex flex-shrink-0 gap-0.5">
+                    <RowActionButton variant="edit" disabled={!canManage} onClick={() => openEditSpec(spec)}>编辑</RowActionButton>
+                    <RowActionButton variant="delete" disabled={!canManage} onClick={() => handleDeleteSpec(spec)}>删除</RowActionButton>
                   </div>
                 </div>
               ))}
@@ -430,14 +477,13 @@ export function PhoneModels() {
             </div>
           )}
           {dialog.editing && (
-            <label className="flex items-center gap-2 text-sm text-gray-600">
-              <input
-                type="checkbox"
-                checked={dialog.enabled}
-                onChange={(event) => setDialog(prev => ({ ...prev, enabled: event.target.checked }))}
+            <div className="flex items-center gap-2 text-sm text-gray-600">
+              <Switch
+                value={dialog.enabled}
+                onChange={(val) => setDialog(prev => ({ ...prev, enabled: !!val }))}
               />
               启用
-            </label>
+            </div>
           )}
         </div>
       </Dialog>
