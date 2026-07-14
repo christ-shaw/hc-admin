@@ -75,6 +75,21 @@
     animation-play-state: paused;
   }
 
+  .order-filter-panel .t-input,
+  .order-filter-date-input {
+    height: 40px;
+    border-radius: 8px !important;
+  }
+
+  .order-filter-panel .t-input__inner {
+    height: 38px;
+  }
+
+  .order-filter-panel .t-select,
+  .order-filter-panel .t-select__wrap {
+    width: 100%;
+  }
+
   .order-basic-form-grid {
     align-items: start;
   }

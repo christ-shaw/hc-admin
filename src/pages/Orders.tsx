@@ -275,6 +275,50 @@ function mergeCustomerRemarks(records: Array<Pick<OrderRecord, 'customerRemark'>
   )).join('；');
 }
 
+/** 生成订单简介：收件信息、租赁手机与备注、下单人与订单编号 */
+function buildOrderIntroduction(record: OrderRecord): string {
+  const consigneeLine = [record.consignee, record.consigneePhone, record.consigneeAddress]
+    .map(value => String(value || '').trim() || '-')
+    .join('，');
+  const phoneSummary = getOrderProducts(record)
+    .map(product => {
+      const productName = getProductLabel(product.productName) || getBrandLabel(product.brand) || '-';
+      const specification = product.specification && product.specification !== '默认'
+        ? ` ${product.specification}`
+        : '';
+      return `${productName}${specification}*${Number(product.quantity) || 0}台`;
+    })
+    .join('，') || '-';
+  const remark = String(record.customerRemark || '').trim() || '-';
+  const customerName = String(record.customerName || '').trim() || '-';
+  const orderNumber = String(record.onlineOrderNumber || record.serialNumber || '').trim() || '-';
+
+  return `${consigneeLine}\n\n${phoneSummary}，${remark}\n\n订单下单人:  ${customerName},  订单编号: ${orderNumber}`;
+}
+
+async function copyText(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // 权限策略可能禁用 Clipboard API，继续尝试兼容旧浏览器的复制方式。
+    }
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  try {
+    textarea.select();
+    if (!document.execCommand('copy')) throw new Error('copy failed');
+  } finally {
+    document.body.removeChild(textarea);
+  }
+}
+
 function formatPhoneModels(phoneModels?: PhoneModelItem[]): string {
   if (!phoneModels || phoneModels.length === 0) return '-';
   return phoneModels.map(item => `${item.model || '-'} x${item.quantity || 0}`).join('，');
@@ -529,6 +573,8 @@ export function Orders() {
   const [filters, setFilters] = useState<OrderFilters>({});
   const [detailVisible, setDetailVisible] = useState(false);
   const [currentRecord, setCurrentRecord] = useState<OrderRecord | null>(null);
+  const [introductionVisible, setIntroductionVisible] = useState(false);
+  const [introductionText, setIntroductionText] = useState('');
   const [importing, setImporting] = useState(false);
   const [importPreviewVisible, setImportPreviewVisible] = useState(false);
   const [importPreviewData, setImportPreviewData] = useState<OrderRecord[]>([]);
@@ -740,6 +786,27 @@ export function Orders() {
       setImporting(false);
     }
   };
+
+  const handleIntroduction = useCallback(async (record: OrderRecord) => {
+    const text = buildOrderIntroduction(record);
+    setIntroductionText(text);
+    setIntroductionVisible(true);
+    try {
+      await copyText(text);
+      MessagePlugin.success('简介已生成并复制到剪贴板');
+    } catch {
+      MessagePlugin.warning('简介已生成，但自动复制失败，可在预览窗口中重新复制');
+    }
+  }, []);
+
+  const handleCopyIntroduction = useCallback(async () => {
+    try {
+      await copyText(introductionText);
+      MessagePlugin.success('简介已复制到剪贴板');
+    } catch {
+      MessagePlugin.error('复制失败，请检查浏览器剪贴板权限');
+    }
+  }, [introductionText]);
 
   /** 导出 Excel — 打开引导弹窗 */
   const handleExport = () => {
@@ -1537,12 +1604,14 @@ export function Orders() {
           <Dropdown
             trigger="hover"
             options={[
+              { content: '简介', value: 'introduction' },
               { content: '编辑', value: 'edit' },
               ...(row.outboundRecordId ? [{ content: '出库单', value: 'viewOutbound' }] : []),
               ...(shouldShowAfterSaleInboundConfirm(row) ? [{ content: '售后回库确认', value: 'afterSaleInbound' }] : []),
               { content: '删除', value: 'delete', theme: 'error' as const },
             ]}
             onClick={(item: DropdownOption) => {
+              if (item.value === 'introduction') handleIntroduction(row);
               if (item.value === 'edit') handleEditOpen(row);
               if (item.value === 'viewOutbound') handleViewOutbound(row);
               if (item.value === 'afterSaleInbound') handleAfterSaleInboundOpen(row);
@@ -1557,7 +1626,7 @@ export function Orders() {
         </div>
       ),
     },
-  ], [handleDetail, handleViewOutbound, handleApplyExpress, handleQuerySfOrderResult, handleCancelSfExpress, handleEditOpen, handleShipOpen, handleGenerateOutboundOpen, handleAfterSaleInboundOpen, handleDeleteConfirm, applyingExpressId, queryingSfResultId, cancelingSfId, ORDER_TYPE_MAP, SALES_CHANNEL_MAP, ORDER_ATTRIBUTE_MAP, ORDER_STATUS_MAP]);
+  ], [handleDetail, handleViewOutbound, handleApplyExpress, handleQuerySfOrderResult, handleCancelSfExpress, handleIntroduction, handleEditOpen, handleShipOpen, handleGenerateOutboundOpen, handleAfterSaleInboundOpen, handleDeleteConfirm, applyingExpressId, queryingSfResultId, cancelingSfId, ORDER_TYPE_MAP, SALES_CHANNEL_MAP, ORDER_ATTRIBUTE_MAP, ORDER_STATUS_MAP]);
 
   const displayRecords = orders.getPageRecords(orders.currentPage);
   const hasLoadedNextPage = orders.currentPage * PAGE_SIZE < orders.records.length;
@@ -1614,7 +1683,7 @@ export function Orders() {
       </div>
 
       {/* 筛选栏 */}
-      <div className="glass-card p-4">
+      <div className="glass-card p-4 order-filter-panel">
         <div className="flex flex-wrap gap-3 items-end">
           <div className="w-48">
             <label className="block text-xs text-gray-500 mb-1">网店订单号</label>
@@ -1629,12 +1698,12 @@ export function Orders() {
           <div>
             <label className="block text-xs text-gray-500 mb-1">日期</label>
             <div className="flex items-center gap-1">
-              <input type="date" className="w-36 px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500"
+              <input type="date" className="order-filter-date-input w-36 px-3 border border-gray-300 text-sm focus:outline-none focus:border-blue-500"
                 aria-label="开始日期" title="开始日期"
                 value={filters.startDate || ''}
                 onChange={(e) => setFilters(prev => ({ ...prev, startDate: e.target.value }))} />
               <span className="text-gray-400 text-xs">至</span>
-              <input type="date" className="w-36 px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500"
+              <input type="date" className="order-filter-date-input w-36 px-3 border border-gray-300 text-sm focus:outline-none focus:border-blue-500"
                 aria-label="结束日期" title="结束日期"
                 value={filters.endDate || ''}
                 onChange={(e) => setFilters(prev => ({ ...prev, endDate: e.target.value }))} />
@@ -1715,6 +1784,24 @@ export function Orders() {
           <span className="text-sm text-gray-400">共 {orders.totalRecords} 条</span>
         </div>
       </div>
+
+      {/* 简介预览弹窗 */}
+      <Dialog
+        header="简介预览"
+        visible={introductionVisible}
+        onClose={() => setIntroductionVisible(false)}
+        width="620px"
+        footer={(
+          <div className="flex justify-end gap-2">
+            <Button onClick={() => setIntroductionVisible(false)}>关闭</Button>
+            <Button theme="primary" onClick={handleCopyIntroduction}>复制简介</Button>
+          </div>
+        )}
+      >
+        <pre className="min-h-40 whitespace-pre-wrap break-words rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm leading-7 text-gray-800 select-text">
+          {introductionText}
+        </pre>
+      </Dialog>
 
       {/* 详情弹窗 */}
       <Dialog header="订单详情" visible={detailVisible} onClose={() => setDetailVisible(false)} width="700px"
