@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Button, Dialog, Input, MessagePlugin, Switch, Textarea } from 'tdesign-react';
-import { Plus, RefreshCw, UploadCloud } from 'lucide-react';
+import { Plus, UploadCloud } from 'lucide-react';
 import { usePhoneModels } from '../hooks/usePhoneModels';
 import { PhoneBrand, PhoneModelSpec, PhoneProduct } from '../types';
 import { buildProductModelSeed } from '../data/productDict';
@@ -65,7 +65,7 @@ function StatusTag({ enabled }: { enabled?: boolean }) {
   const colors = isEnabled ? MODEL_STATUS_COLORS.enabled : MODEL_STATUS_COLORS.disabled;
   return (
     <span
-      className="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium"
+      className="inline-flex items-center rounded-full px-2 py-px text-[11px] font-medium"
       style={{ backgroundColor: colors.bg, color: colors.fg }}
     >
       {isEnabled ? '启用' : '停用'}
@@ -86,8 +86,8 @@ function RowActionButton({ variant, onClick, disabled, children }: {
       type="button"
       disabled={disabled}
       onClick={onClick}
-      className={`rounded-md px-1.5 py-1 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${
-        isDelete ? 'text-[#E34D59] hover:bg-[#FDECEE]' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700'
+      className={`rounded-md px-1.5 py-1 text-[12.5px] font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${
+        isDelete ? 'text-[#E34D59] hover:bg-[#FDECEE]' : 'text-[#8A94A6] hover:bg-[#F0F1F3] hover:text-[#374151]'
       }`}
     >
       {children}
@@ -310,15 +310,15 @@ export function PhoneModels() {
     <div className="space-y-4">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div>
-          <h1 className="text-2xl font-semibold text-gray-800">型号管理</h1>
-          <div className="mt-2 flex flex-wrap gap-2 text-sm text-gray-500">
+          <h1 className="text-xl font-semibold text-[#1F2733]">型号管理</h1>
+          <div className="mt-1 flex flex-wrap gap-3 text-[13px] text-[#8A94A6]">
             <span>{orderedBrands.length} 个品牌</span>
             <span>{getProductCount(orderedBrands)} 个货品</span>
             <span>{getSpecCount(orderedBrands)} 个规格</span>
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button variant="outline" icon={<RefreshCw size={16} />} loading={loading} onClick={refresh}>刷新</Button>
+          <Button variant="outline" loading={loading} onClick={refresh}>刷新</Button>
           <Button
             variant="outline"
             icon={<UploadCloud size={16} />}
@@ -332,9 +332,9 @@ export function PhoneModels() {
       </div>
 
       {orderedBrands.length === 0 && (
-        <div className="rounded border border-dashed border-gray-300 bg-white p-8 text-center">
-          <div className="text-base font-medium text-gray-700">暂无型号数据</div>
-          <div className="mt-2 text-sm text-gray-500">种子包含 {seedBrands.length} 个品牌、{seedProductCount} 个货品、{seedSpecCount} 个规格</div>
+        <div className="rounded-2xl border border-dashed border-[#DDE1E7] bg-white p-8 text-center shadow-[0_1px_2px_rgba(16,24,40,0.03)]">
+          <div className="text-sm font-medium text-[#374151]">暂无型号数据</div>
+          <div className="mt-2 text-[13px] text-[#8A94A6]">种子包含 {seedBrands.length} 个品牌、{seedProductCount} 个货品、{seedSpecCount} 个规格</div>
           <Button className="mt-4" theme="primary" icon={<UploadCloud size={16} />} disabled={!canManage} onClick={handleInitialize}>
             初始化种子
           </Button>
@@ -342,13 +342,21 @@ export function PhoneModels() {
       )}
 
       {orderedBrands.length > 0 && (
-        <div className="grid gap-3.5 xl:grid-cols-[250px_minmax(0,1fr)_minmax(240px,320px)]">
-          <section className="rounded-2xl border border-[#EEF0F2] bg-white shadow-[0_1px_2px_rgba(16,24,40,0.03)]">
+        <div className="grid items-start gap-3.5 lg:grid-cols-[250px_minmax(0,1fr)_minmax(240px,320px)]">
+          <section className="overflow-hidden rounded-2xl border border-[#EEF0F2] bg-white shadow-[0_1px_2px_rgba(16,24,40,0.03)]">
             <div className="flex items-center justify-between border-b border-[#EEF0F2] px-4 py-3">
               <h2 className="text-sm font-semibold text-[#1F2733]">品牌</h2>
-              <Button size="small" variant="text" icon={<Plus size={15} />} disabled={!canManage} onClick={openAddBrand} />
+              <button
+                type="button"
+                aria-label="新增品牌"
+                disabled={!canManage}
+                onClick={openAddBrand}
+                className="rounded px-1 text-base text-[#0052D9] transition hover:bg-[#F0F4FE] disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                +
+              </button>
             </div>
-            <div className="max-h-[calc(100vh-250px)] overflow-auto p-2">
+            <div className="flex max-h-[calc(100vh-250px)] flex-col gap-0.5 overflow-auto p-2">
               {orderedBrands.map(brand => {
                 const selected = currentBrand?.brand === brand.brand;
                 return (
@@ -358,14 +366,14 @@ export function PhoneModels() {
                       setSelectedBrand(brand.brand);
                       setSelectedProduct('');
                     }}
-                    className={`mb-0.5 flex w-full flex-col gap-1 rounded-[10px] px-3 py-2.5 text-left transition ${
+                    className={`flex w-full flex-col gap-[5px] rounded-[10px] px-3 py-[9px] text-left transition ${
                       selected ? 'text-[#0052D9]' : 'text-gray-700 hover:bg-[#F0F4FE]'
                     }`}
                     style={selected ? { backgroundColor: '#EAF1FE' } : undefined}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <span className="truncate text-sm font-medium">{brand.brand}</span>
-                      <span className="text-xs text-[#9AA3B2]">{brand.products?.length || 0}</span>
+                      <span className="truncate text-[13px] font-medium">{brand.brand}</span>
+                      <span className="text-[11px] text-[#9AA3B2]">{brand.products?.length || 0}</span>
                     </div>
                     <div className="flex items-center justify-between">
                       <StatusTag enabled={brand.enabled} />
@@ -377,7 +385,7 @@ export function PhoneModels() {
             </div>
           </section>
 
-          <section className="rounded-2xl border border-[#EEF0F2] bg-white shadow-[0_1px_2px_rgba(16,24,40,0.03)]">
+          <section className="overflow-hidden rounded-2xl border border-[#EEF0F2] bg-white shadow-[0_1px_2px_rgba(16,24,40,0.03)]">
             <div className="flex items-center justify-between border-b border-[#EEF0F2] px-4 py-3">
               <div>
                 <h2 className="text-sm font-semibold text-[#1F2733]">货品名称</h2>
@@ -395,17 +403,17 @@ export function PhoneModels() {
             </div>
             <div className="max-h-[calc(100vh-250px)] overflow-auto">
               {products.length === 0 ? (
-                <p className="p-8 text-center text-sm text-[#B5BBC5]">暂无货品</p>
+                <p className="p-8 text-center text-[13px] text-[#B5BBC5]">暂无货品</p>
               ) : products.map(product => {
                 const selected = currentProduct?.name === product.name;
                 return (
                   <div
                     key={product.name}
-                    className="flex items-center justify-between gap-3 border-b border-[#F5F6F8] px-4 py-2.5 hover:bg-[#F8FAFF]"
+                    className="flex items-center justify-between gap-3 border-b border-[#F5F6F8] px-4 py-[11px] hover:bg-[#F8FAFF]"
                     style={{ backgroundColor: selected ? '#F5F9FF' : undefined }}
                   >
                     <button className="min-w-0 flex-1 text-left" onClick={() => setSelectedProduct(product.name)}>
-                      <div className="truncate text-sm font-medium text-gray-700">{product.name}</div>
+                      <div className="truncate text-[13px] font-medium text-[#374151]">{product.name}</div>
                       <div className="mt-1 flex items-center gap-2 text-[11.5px] text-[#9AA3B2]">
                         <StatusTag enabled={product.enabled} />
                         <span>{product.specs?.length || 0} 个规格</span>
@@ -421,7 +429,7 @@ export function PhoneModels() {
             </div>
           </section>
 
-          <section className="rounded-2xl border border-[#EEF0F2] bg-white shadow-[0_1px_2px_rgba(16,24,40,0.03)]">
+          <section className="overflow-hidden rounded-2xl border border-[#EEF0F2] bg-white shadow-[0_1px_2px_rgba(16,24,40,0.03)]">
             <div className="flex items-center justify-between border-b border-[#EEF0F2] px-4 py-3">
               <div>
                 <h2 className="text-sm font-semibold text-[#1F2733]">规格</h2>
@@ -431,11 +439,11 @@ export function PhoneModels() {
             </div>
             <div className="max-h-[calc(100vh-250px)] overflow-auto">
               {specs.length === 0 ? (
-                <p className="p-8 text-center text-sm text-[#B5BBC5]">暂无规格</p>
+                <p className="p-8 text-center text-[13px] text-[#B5BBC5]">暂无规格</p>
               ) : specs.map(spec => (
-                <div key={spec.name} className="flex items-center justify-between gap-3 border-b border-[#F5F6F8] px-4 py-2.5 hover:bg-[#F8FAFF]">
+                <div key={spec.name} className="flex items-center justify-between gap-3 border-b border-[#F5F6F8] px-4 py-[11px] hover:bg-[#F8FAFF]">
                   <div className="min-w-0">
-                    <div className="truncate text-sm font-medium text-gray-700">{spec.name}</div>
+                    <div className="truncate text-[13px] font-medium text-[#374151]">{spec.name}</div>
                     <div className="mt-1"><StatusTag enabled={spec.enabled} /></div>
                   </div>
                   <div className="flex flex-shrink-0 gap-0.5">
@@ -463,12 +471,14 @@ export function PhoneModels() {
       >
         <div className="space-y-4">
           <div>
-            <label className="mb-1 block text-sm font-medium text-gray-600">名称</label>
+            <label className="mb-[5px] block text-xs text-[#8A94A6]">名称</label>
             <Input value={dialog.name} onChange={(value) => setDialog(prev => ({ ...prev, name: value as string }))} />
           </div>
           {dialog.mode === 'product' && !dialog.editing && (
             <div>
-              <label className="mb-1 block text-sm font-medium text-gray-600">规格</label>
+              <label className="mb-[5px] block text-xs text-[#8A94A6]">
+                规格 <span className="font-normal text-[#B5BBC5]">（逗号或换行分隔，可批量）</span>
+              </label>
               <Textarea
                 value={dialog.specsInput}
                 autosize={{ minRows: 3, maxRows: 5 }}
@@ -477,12 +487,12 @@ export function PhoneModels() {
             </div>
           )}
           {dialog.editing && (
-            <div className="flex items-center gap-2 text-sm text-gray-600">
+            <div className="flex items-center justify-between rounded-[10px] border border-[#EEF0F2] bg-[#FAFBFC] px-3 py-2.5 text-[13px] text-[#374151]">
+              <span>启用</span>
               <Switch
                 value={dialog.enabled}
                 onChange={(val) => setDialog(prev => ({ ...prev, enabled: !!val }))}
               />
-              启用
             </div>
           )}
         </div>
