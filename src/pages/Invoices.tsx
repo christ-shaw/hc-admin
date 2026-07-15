@@ -566,7 +566,7 @@ export function Invoices() {
   const canGoNextInvoicePage = invoices.currentPage < loadedInvoicePages || invoices.hasMore;
 
   return (
-    <div className="space-y-4">
+    <div className="min-w-0 space-y-4">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-gray-800">发票管理</h1>
@@ -605,16 +605,18 @@ export function Invoices() {
       </div>
 
       {/* 表格 */}
-      <div className="glass-card">
-        <Table
-          data={displayRecords}
-          columns={columns}
-          loading={invoices.loading}
-          rowKey="_id"
-          tableLayout="fixed"
-          hover
-          stripe
-        />
+      <div className="glass-card min-w-0 overflow-hidden">
+        <div className="max-w-full overflow-x-auto">
+          <Table
+            data={displayRecords}
+            columns={columns}
+            loading={invoices.loading}
+            rowKey="_id"
+            tableLayout="fixed"
+            hover
+            stripe
+          />
+        </div>
         {/* 分页 */}
         <div className="flex justify-center items-center gap-2 py-4 border-t border-gray-100">
           <Button size="small" variant="outline" disabled={invoices.currentPage <= 1}

@@ -116,7 +116,7 @@ export function InboundList() {
   const displayRecords = inbound.getPageRecords(inbound.currentPage);
 
   return (
-    <div className="space-y-4">
+    <div className="min-w-0 space-y-4">
       <div>
         <h1 className="text-2xl font-semibold text-gray-800">入库记录</h1>
         <p className="text-gray-500 mt-1">管理所有入库记录</p>
@@ -124,7 +124,7 @@ export function InboundList() {
 
       {/* 筛选栏 */}
       <div className="glass-card p-4">
-        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3 items-end">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4 items-end [&>*]:min-w-0">
           <Input placeholder="客户名称" value={filters.customerName || ''} onChange={(val) => setFilters(prev => ({ ...prev, customerName: val as string }))} />
           <Select
             placeholder="渠道类型"
@@ -141,8 +141,8 @@ export function InboundList() {
             onChange={(val) => setFilters(prev => ({ ...prev, hasIssue: val === '' ? undefined : val === 'true' }))}
             options={[{ label: '全部', value: '' }, { label: '有异常', value: 'true' }, { label: '正常', value: 'false' }]}
           />
-          <input type="date" className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-primary" placeholder="开始日期" value={filters.startDate || ''} onChange={(e) => setFilters(prev => ({ ...prev, startDate: e.target.value }))} />
-          <input type="date" className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-primary" placeholder="结束日期" value={filters.endDate || ''} onChange={(e) => setFilters(prev => ({ ...prev, endDate: e.target.value }))} />
+          <input type="date" className="w-full min-w-0 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-primary" placeholder="开始日期" value={filters.startDate || ''} onChange={(e) => setFilters(prev => ({ ...prev, startDate: e.target.value }))} />
+          <input type="date" className="w-full min-w-0 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-primary" placeholder="结束日期" value={filters.endDate || ''} onChange={(e) => setFilters(prev => ({ ...prev, endDate: e.target.value }))} />
         </div>
         <div className="flex gap-2 mt-3">
           <Button theme="primary" icon={<Search size={16} />} onClick={handleSearch}>查询</Button>
@@ -151,17 +151,18 @@ export function InboundList() {
       </div>
 
       {/* 表格 */}
-      <div className="glass-card">
-        <Table
-          data={displayRecords}
-          columns={columns}
-          loading={inbound.loading}
-          rowKey="_id"
-          tableLayout="fixed"
-          hover
-          stripe
-
-        />
+      <div className="glass-card min-w-0 overflow-hidden">
+        <div className="max-w-full overflow-x-auto">
+          <Table
+            data={displayRecords}
+            columns={columns}
+            loading={inbound.loading}
+            rowKey="_id"
+            tableLayout="fixed"
+            hover
+            stripe
+          />
+        </div>
         {/* 分页 */}
         <div className="flex justify-center items-center gap-2 py-4 border-t border-gray-100">
           <Button size="small" variant="outline" disabled={inbound.currentPage <= 1}

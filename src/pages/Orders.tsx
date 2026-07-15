@@ -1684,32 +1684,32 @@ export function Orders() {
 
       {/* 筛选栏 */}
       <div className="glass-card p-4 order-filter-panel">
-        <div className="flex flex-wrap gap-3 items-end">
-          <div className="w-48">
+        <div className="grid grid-cols-1 items-end gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(19rem,1.5fr)_auto]">
+          <div className="min-w-0">
             <label className="block text-xs text-gray-500 mb-1">网店订单号</label>
             <Input placeholder="请输入网店订单号" value={filters.onlineOrderNumber || ''}
               onChange={(val) => setFilters(prev => ({ ...prev, onlineOrderNumber: val as string }))} />
           </div>
-          <div className="w-48">
+          <div className="min-w-0">
             <label className="block text-xs text-gray-500 mb-1">客户名称</label>
             <Input placeholder="请输入客户名称" value={filters.customerName || ''}
               onChange={(val) => setFilters(prev => ({ ...prev, customerName: val as string }))} />
           </div>
-          <div>
+          <div className="min-w-0 sm:col-span-2 xl:col-span-1">
             <label className="block text-xs text-gray-500 mb-1">日期</label>
-            <div className="flex items-center gap-1">
-              <input type="date" className="order-filter-date-input w-36 px-3 border border-gray-300 text-sm focus:outline-none focus:border-blue-500"
+            <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-1">
+              <input type="date" className="order-filter-date-input w-full min-w-0 px-3 border border-gray-300 text-sm focus:outline-none focus:border-blue-500"
                 aria-label="开始日期" title="开始日期"
                 value={filters.startDate || ''}
                 onChange={(e) => setFilters(prev => ({ ...prev, startDate: e.target.value }))} />
               <span className="text-gray-400 text-xs">至</span>
-              <input type="date" className="order-filter-date-input w-36 px-3 border border-gray-300 text-sm focus:outline-none focus:border-blue-500"
+              <input type="date" className="order-filter-date-input w-full min-w-0 px-3 border border-gray-300 text-sm focus:outline-none focus:border-blue-500"
                 aria-label="结束日期" title="结束日期"
                 value={filters.endDate || ''}
                 onChange={(e) => setFilters(prev => ({ ...prev, endDate: e.target.value }))} />
             </div>
           </div>
-          <div className="flex items-end gap-2">
+          <div className="flex flex-wrap items-end gap-2 sm:col-span-2 xl:col-span-1 xl:justify-end xl:flex-nowrap">
             <Button theme="primary" icon={<Search size={16} />} onClick={handleSearch}>查询</Button>
             <Button variant="outline" icon={<RotateCcw size={16} />} onClick={handleReset}>重置</Button>
             <Button variant="text" theme="primary" onClick={() => setShowMoreFilters(v => !v)}>
@@ -1753,23 +1753,25 @@ export function Orders() {
       </div>
 
       {/* 表格 */}
-      <div className="glass-card">
-        <Table
-          data={displayRecords}
-          columns={columns}
-          loading={orders.loading}
-          rowKey="_id"
-          tableLayout="fixed"
-          selectedRowKeys={selectedRowKeys}
-          onSelectChange={(keys: Array<string | number>) => setSelectedRowKeys(keys)}
-          hover
-          stripe
-          rowClassName={({ row }: { row: OrderRecord }) => {
-            const isUnreceived = hasUnreceivedPayment(row);
-            const isUnreturned = row.returnStatus === 'notReturned' || row.returnStatus === 'inTransit';
-            return (isUnreceived || isUnreturned) ? 'order-row-unreceived' : '';
-          }}
-        />
+      <div className="glass-card min-w-0 overflow-hidden">
+        <div className="max-w-full overflow-x-auto">
+          <Table
+            data={displayRecords}
+            columns={columns}
+            loading={orders.loading}
+            rowKey="_id"
+            tableLayout="fixed"
+            selectedRowKeys={selectedRowKeys}
+            onSelectChange={(keys: Array<string | number>) => setSelectedRowKeys(keys)}
+            hover
+            stripe
+            rowClassName={({ row }: { row: OrderRecord }) => {
+              const isUnreceived = hasUnreceivedPayment(row);
+              const isUnreturned = row.returnStatus === 'notReturned' || row.returnStatus === 'inTransit';
+              return (isUnreceived || isUnreturned) ? 'order-row-unreceived' : '';
+            }}
+          />
+        </div>
         {/* 分页 */}
         <div className="flex justify-center items-center gap-2 py-4 border-t border-gray-100">
           <Button size="small" variant="outline" disabled={orders.currentPage <= 1}

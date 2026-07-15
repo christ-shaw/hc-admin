@@ -213,6 +213,8 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
                   <div key={item.label}>
                     <button
                       onClick={() => toggleMenu(item.label)}
+                      aria-label={item.label}
+                      title={collapsed ? item.label : undefined}
                       className={`w-full relative flex items-center gap-3 px-4 py-3 rounded-xl cursor-pointer ${
                         groupActive
                           ? 'text-white bg-white/15'
@@ -238,6 +240,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
                             <button
                               key={child.path}
                               onClick={() => navigate(child.path)}
+                              aria-label={child.label}
                               className={`w-full relative flex items-center gap-3 px-4 py-2.5 rounded-lg cursor-pointer ${
                                 isActive
                                   ? 'text-white bg-white/15'
@@ -267,6 +270,8 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
                 <button
                   key={path}
                   onClick={() => navigate(path)}
+                  aria-label={label}
+                  title={collapsed ? label : undefined}
                   className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl cursor-pointer ${
                     isActive
                       ? 'text-white bg-white/15'
@@ -282,7 +287,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
         </div>
       </Aside>
 
-      <TLayout>
+      <TLayout className="min-w-0">
         {/* 顶栏 */}
         <Header className="!bg-white/95 border-b border-gray-100 !h-14 flex items-center justify-between px-6">
           <button
@@ -325,9 +330,9 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
         </Header>
 
         {/* 内容区 */}
-        <Content className="!bg-gray-50 overflow-auto">
-          <div className="flex min-h-full flex-col p-6">
-            <div className="flex-1">
+        <Content className="!bg-gray-50 min-w-0 overflow-y-auto overflow-x-hidden">
+          <div className="flex min-h-full min-w-0 flex-col p-6">
+            <div className="flex-1 min-w-0">
               {children}
             </div>
             <footer className="mt-8 py-4 text-center text-sm text-gray-400">
