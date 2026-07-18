@@ -169,7 +169,7 @@ export function useOrders() {
         setState(prev => ({
           ...prev,
           records: prev.records.map(r => orderIds.includes(r._id)
-            ? { ...r, outboundRecordId: result.outboundId || r._id }
+            ? { ...r, outboundRecordId: result.outboundId || r._id, shippingFee: shippingMethod }
             : r),
         }));
       }

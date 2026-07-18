@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Table, Button, Input, Select, MessagePlugin, Dialog } from 'tdesign-react';
-import { Search, RotateCcw } from 'lucide-react';
+import { Search, RotateCcw, FileDown } from 'lucide-react';
 import { InboundRecord, InboundFilters } from '../types';
 import { useInbound } from '../hooks/useInbound';
 import { useLogs } from '../hooks/useLogs';
@@ -10,6 +10,8 @@ import { getCurrentOperatorName } from '../lib/cloudbase';
 import { RecordDetail } from '../components/RecordDetail';
 import { RecordEdit } from '../components/RecordEdit';
 import { DICT_CODES, useDictionaries } from '../contexts/DictionaryContext';
+import { exportInboundRecordsExcel } from '../utils/recordExcel';
+import { RecordExportDialog } from '../components/RecordExportDialog';
 
 export function InboundList() {
   const inbound = useInbound();
@@ -25,6 +27,8 @@ export function InboundList() {
 
   const [filters, setFilters] = useState<InboundFilters>({});
   const [channelTypeFilter, setChannelTypeFilter] = useState('');
+  const [exportVisible, setExportVisible] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   useEffect(() => {
     inbound.fetchRecords();
@@ -47,6 +51,33 @@ export function InboundList() {
     setChannelTypeFilter('');
     inbound.resetFilters();
     inbound.fetchRecords(null, {});
+  };
+
+  const handleExport = async (startDate: string, endDate: string) => {
+    setExporting(true);
+    try {
+      const exportFilters: InboundFilters = {
+        startDate,
+        endDate,
+      };
+      const records = await inbound.fetchAllRecords(exportFilters);
+      if (records.length === 0) {
+        MessagePlugin.warning('所选日期范围内没有入库记录');
+        return;
+      }
+      exportInboundRecordsExcel(
+        records,
+        startDate,
+        endDate,
+        value => dictionaries.getLabel(DICT_CODES.channelType, value),
+      );
+      MessagePlugin.success(`已导出 ${records.length} 条入库记录`);
+      setExportVisible(false);
+    } catch (err) {
+      MessagePlugin.error('导出失败: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setExporting(false);
+    }
   };
 
   const handleDetail = (record: InboundRecord) => {
@@ -117,9 +148,12 @@ export function InboundList() {
 
   return (
     <div className="min-w-0 space-y-4">
-      <div>
-        <h1 className="text-2xl font-semibold text-gray-800">入库记录</h1>
-        <p className="text-gray-500 mt-1">管理所有入库记录</p>
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold text-gray-800">入库记录</h1>
+          <p className="text-gray-500 mt-1">管理所有入库记录</p>
+        </div>
+        <Button variant="outline" icon={<FileDown size={16} />} onClick={() => setExportVisible(true)}>导出 Excel</Button>
       </div>
 
       {/* 筛选栏 */}
@@ -206,6 +240,14 @@ export function InboundList() {
       >
         <p>确定要删除这条入库记录吗？此操作不可撤销。</p>
       </Dialog>
+
+      <RecordExportDialog
+        visible={exportVisible}
+        recordLabel="入库记录"
+        exporting={exporting}
+        onClose={() => setExportVisible(false)}
+        onExport={handleExport}
+      />
     </div>
   );
 }

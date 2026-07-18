@@ -18,6 +18,7 @@ const STATUS_COMPAT_MAP = {
 exports.main = async (event, context) => {
   const payload = event.data || event;
   const { limit = 10, cursor, companyName, applicant, status, startDate, endDate } = payload;
+  const pageSize = Math.max(1, Number(limit) || 10);
 
   try {
     let query = db.collection('invoices');
@@ -40,21 +41,25 @@ exports.main = async (event, context) => {
       query = query.where(conditions);
     }
 
-    let result;
-    if (cursor) {
-      result = await query.skip(cursor).limit(limit).orderBy('applyDate', 'desc').orderBy('createTime', 'desc').get();
-    } else {
-      result = await query.limit(limit).orderBy('applyDate', 'desc').orderBy('createTime', 'desc').get();
-    }
+    // 多取一条，准确判断是否还有下一页，避免记录数刚好等于整页时出现“空白末页”。
+    const offset = cursor ? Number(cursor) : 0;
+    const result = await query
+      .skip(offset)
+      .limit(pageSize + 1)
+      .orderBy('applyDate', 'desc')
+      .orderBy('createTime', 'desc')
+      .get();
 
-    const data = result.data || [];
-    const nextCursor = data.length === limit ? (cursor ? Number(cursor) + limit : limit) : null;
+    const fetchedData = result.data || [];
+    const hasMore = fetchedData.length > pageSize;
+    const data = fetchedData.slice(0, pageSize);
+    const nextCursor = hasMore ? offset + pageSize : null;
 
     return {
       success: true,
       data,
       cursor: nextCursor ? String(nextCursor) : null,
-      hasMore: data.length === limit,
+      hasMore,
     };
   } catch (error) {
     console.error('查询发票失败:', error);

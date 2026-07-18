@@ -219,7 +219,9 @@ exports.main = async (event) => {
 
     // 4. 回写订单 outboundRecordId
     for (const id of orderIds) {
-      await transaction.collection(ORDERS).doc(id).update({ data: { outboundRecordId: outboundId } });
+      await transaction.collection(ORDERS).doc(id).update({
+        data: { outboundRecordId: outboundId, shippingFee: shippingMethod },
+      });
     }
 
     await transaction.commit();

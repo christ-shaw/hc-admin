@@ -28,6 +28,7 @@ const ALL_PAGE_PERMISSIONS = [
   '/logs',
   '/models',
   '/orders',
+  '/purchases',
   '/invoices',
   '/companies',
   '/settings',

@@ -8,6 +8,12 @@ import { useOrders } from '../hooks/useOrders';
 import { usePhoneModels } from '../hooks/usePhoneModels';
 import { formatDate, getTotalQuantity } from '../utils/format';
 import { parseOrderExcel, exportOrderExcel } from '../utils/orderExcel';
+import {
+  exportSfOfflineOrders,
+  loadSfExportConfig,
+  saveSfExportConfig,
+  type SfExportConfig,
+} from '../utils/sfOrderExcel';
 import { getOrderProducts, getOrderTotalAmount, getOrderTotalQuantity, getOrderPaymentSplits, hasUnreceivedPayment } from '../utils/orderProducts';
 import { getBrandLabel, getProductLabel } from '../data/dict';
 import {
@@ -182,6 +188,16 @@ function isPendingShipmentStatus(status: string | undefined): boolean {
   return status === 'unknown' || status === '--' || status === 'unshipped';
 }
 
+function isSfTemplateExportEligible(record: OrderRecord): boolean {
+  const shippingFee = String(record.shippingFee || '').trim();
+  return isPendingShipmentStatus(record.status)
+    && record.needsOutbound !== false
+    && !record.trackingNumber
+    && !record.sfWaybillNo
+    && !['pickup', '自提'].includes(shippingFee)
+    && (!!shippingFee || !!record.outboundRecordId);
+}
+
 // 终态：不随「需要出库」开关改写的订单状态
 const TERMINAL_ORDER_STATUSES = new Set(['shipped', 'returnReceived', 'returnShipped']);
 
@@ -257,7 +273,7 @@ function getEffectiveShipmentFields(form: OrderFormData) {
   const status = isVirtualProductOrder(form.products) ? 'noShip' : form.status;
   return {
     status,
-    shippingFee: status === 'shipped' ? form.shippingFee : '',
+    shippingFee: status === 'noShip' ? '' : form.shippingFee,
     trackingNumber: status === 'shipped' ? form.trackingNumber : '',
   };
 }
@@ -641,6 +657,11 @@ export function Orders() {
   const [exportChannels, setExportChannels] = useState<string[]>([]); // 空=全部
   const [exportSalespersons, setExportSalespersons] = useState<string[]>([]); // 空=全部
   const [exporting, setExporting] = useState(false);
+  const [sfExportVisible, setSfExportVisible] = useState(false);
+  const [sfExportPreparing, setSfExportPreparing] = useState(false);
+  const [sfExporting, setSfExporting] = useState(false);
+  const [sfExportRecords, setSfExportRecords] = useState<OrderRecord[]>([]);
+  const [sfExportConfig, setSfExportConfig] = useState<SfExportConfig>(loadSfExportConfig);
 
   useEffect(() => {
     const state = location.state as { filter?: OrderFilters } | null;
@@ -890,6 +911,116 @@ export function Orders() {
     }
   };
 
+  const getSelectedSfRecords = (): OrderRecord[] => {
+    const selectedKeys = new Set(selectedRowKeys.map(String));
+    return orders.getAllRecords().filter(record => selectedKeys.has(String(record._id)));
+  };
+
+  const resolveSfShippingFees = async (records: OrderRecord[]): Promise<OrderRecord[]> => {
+    const outboundIds = Array.from(new Set(
+      records.filter(record => !record.shippingFee && record.outboundRecordId)
+        .map(record => record.outboundRecordId as string)
+    ));
+    if (outboundIds.length === 0) return records;
+
+    const currentUser = await getCurrentPermissionUserPayload().catch(() => null);
+    const outboundShippingFees = new Map<string, string>();
+    await Promise.all(outboundIds.map(async outboundId => {
+      const result = await callFunction<{ success?: boolean; data?: OutboundRecord[]; errMsg?: string }>('queryRecords', {
+        data: { type: 'outbound', _id: outboundId, limit: 1, cursor: null, currentUser },
+      });
+      if (result.success === false) throw new Error(result.errMsg || '读取出库单快递方式失败');
+      const shippingMethod = String(result.data?.[0]?.shippingMethod || '').trim();
+      if (shippingMethod) outboundShippingFees.set(outboundId, shippingMethod);
+    }));
+
+    return records.map(record => ({
+      ...record,
+      shippingFee: record.shippingFee || outboundShippingFees.get(record.outboundRecordId || '') || '',
+    }));
+  };
+
+  /** 打开顺丰模板导出确认。 */
+  const handleOpenSfExport = async () => {
+    const selectedRecords = getSelectedSfRecords();
+    if (selectedRecords.length === 0) {
+      MessagePlugin.warning('请先勾选需要发货的订单');
+      return;
+    }
+
+    const ineligible = selectedRecords.filter(record => !isSfTemplateExportEligible(record));
+    if (ineligible.length > 0) {
+      MessagePlugin.warning(`所选订单中有 ${ineligible.length} 条不是可快递发货订单，可能为自提、已发货或缺少出库信息`);
+      return;
+    }
+
+    const invalidReceiver = selectedRecords.find(record =>
+      !record.consignee?.trim()
+      || !record.consigneePhone?.trim()
+      || !/^\d{6,20}$/.test(record.consigneePhone.trim())
+      || !record.consigneeAddress?.trim()
+    );
+    if (invalidReceiver) {
+      const label = invalidReceiver.onlineOrderNumber || invalidReceiver.customerName || `序号 ${invalidReceiver.serialNumber}`;
+      MessagePlugin.warning(`订单「${label}」的收件人、手机或详细地址不完整，请先编辑订单`);
+      return;
+    }
+
+    setSfExportPreparing(true);
+    try {
+      const resolvedRecords = await resolveSfShippingFees(selectedRecords);
+      const invalidShipping = resolvedRecords.find(record => !['prepaid', 'cod', '包邮', '到付', '寄付月结', '收方付'].includes(record.shippingFee));
+      if (invalidShipping) {
+        const label = invalidShipping.onlineOrderNumber || invalidShipping.customerName || `序号 ${invalidShipping.serialNumber}`;
+        MessagePlugin.warning(`订单「${label}」缺少包邮/到付信息，无法生成顺丰模板`);
+        return;
+      }
+      setSfExportRecords(resolvedRecords);
+      setSfExportConfig(loadSfExportConfig());
+      setSfExportVisible(true);
+    } catch (err) {
+      MessagePlugin.error('读取订单快递方式失败: ' + String(err));
+    } finally {
+      setSfExportPreparing(false);
+    }
+  };
+
+  const handleSfExportExec = async () => {
+    const selectedRecords = sfExportRecords;
+    if (selectedRecords.length === 0) {
+      MessagePlugin.warning('当前没有已勾选的订单');
+      return;
+    }
+    if (!sfExportConfig.senderName.trim()) {
+      MessagePlugin.warning('请填写寄件人');
+      return;
+    }
+    if (!sfExportConfig.senderMobile.trim() && !sfExportConfig.senderPhone.trim()) {
+      MessagePlugin.warning('寄件人手机和电话至少填写一个');
+      return;
+    }
+    if (sfExportConfig.senderMobile.trim() && !/^\d{6,20}$/.test(sfExportConfig.senderMobile.trim())) {
+      MessagePlugin.warning('寄件人手机只能填写 6–20 位数字');
+      return;
+    }
+    if (!sfExportConfig.senderAddress.trim()) {
+      MessagePlugin.warning('请填写寄件人详细地址');
+      return;
+    }
+
+    setSfExporting(true);
+    try {
+      saveSfExportConfig(sfExportConfig);
+      await exportSfOfflineOrders(selectedRecords, sfExportConfig);
+      MessagePlugin.success(`已生成 ${selectedRecords.length} 条顺丰待发货数据`);
+      setSfExportVisible(false);
+    } catch (err) {
+      MessagePlugin.error('顺丰模板导出失败: ' + String(err));
+    } finally {
+      setSfExporting(false);
+    }
+  };
+
   /** 新增订单 — 打开向导 Step 1 */
   const handleAddOpen = async () => {
     const today = new Date();
@@ -1020,7 +1151,9 @@ export function Orders() {
         consignee: addForm.consignee,
         consigneePhone: addForm.consigneePhone,
         consigneeAddress: addForm.consigneeAddress,
-        shippingFee: shipmentFields.shippingFee,
+        shippingFee: isPendingShipmentStatus(shipmentFields.status) && addForm.needsOutbound
+          ? addAutoOutbound.shippingMethod
+          : shipmentFields.shippingFee,
         status: shipmentFields.status,
         customerRemark: addForm.customerRemark,
         transferBrand: firstTransfer?.brand || '',
@@ -1649,7 +1782,12 @@ export function Orders() {
           <h1 className="text-2xl font-semibold text-gray-800">订单管理</h1>
           <p className="text-gray-500 mt-1">管理所有订单</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap justify-end gap-2">
+          {selectedRowKeys.length > 0 && (
+            <Button theme="primary" icon={<FileDown size={16} />} loading={sfExportPreparing} onClick={handleOpenSfExport}>
+              导出顺丰模板（{selectedRowKeys.length}）
+            </Button>
+          )}
           {selectedRowKeys.length >= 2 && (
             <Button theme="primary" variant="outline" onClick={handleMergeGenerateOpen}>
               合并生成出库单（{selectedRowKeys.length}）
@@ -2207,6 +2345,82 @@ export function Orders() {
           <div className="rounded-lg border border-blue-100 bg-blue-50/60 p-3 text-sm text-blue-700">
             确认后将订单归还状态改为“产品已退回入库”，并把客服备注改为所选入库记录的快递单号。
           </div>
+        </div>
+      </Dialog>
+
+      {/* 顺丰线下模板导出 */}
+      <Dialog
+        header="导出顺丰待发货模板"
+        visible={sfExportVisible}
+        onClose={() => setSfExportVisible(false)}
+        width="780px"
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button onClick={() => setSfExportVisible(false)}>取消</Button>
+            <Button theme="primary" icon={<FileDown size={16} />} loading={sfExporting} onClick={handleSfExportExec}>
+              生成顺丰 Excel
+            </Button>
+          </div>
+        }
+      >
+        <div className="max-h-[68vh] space-y-5 overflow-auto pr-1">
+          <div className="rounded-lg border border-blue-100 bg-blue-50/60 px-4 py-3 text-sm text-blue-700">
+            已选择 <strong>{sfExportRecords.length}</strong> 条待发货订单。收件信息、包邮/到付、订单备注和发货型号会自动读取订单数据。
+          </div>
+
+          <section>
+            <h3 className="mb-2 text-sm font-medium text-gray-800">待发货收件清单</h3>
+            <div className="max-h-40 overflow-auto rounded-lg border border-gray-200">
+              <table className="w-full table-fixed text-left text-xs">
+                <thead className="sticky top-0 bg-gray-50 text-gray-500">
+                  <tr>
+                    <th className="w-28 px-3 py-2 font-medium">收件人</th>
+                    <th className="w-32 px-3 py-2 font-medium">手机</th>
+                    <th className="px-3 py-2 font-medium">详细地址</th>
+                    <th className="w-28 px-3 py-2 font-medium">顺丰付款</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {sfExportRecords.map(record => (
+                    <tr key={record._id}>
+                      <td className="px-3 py-2 text-gray-800">{record.consignee}</td>
+                      <td className="px-3 py-2 text-gray-700">{record.consigneePhone}</td>
+                      <td className="px-3 py-2 text-gray-700">{record.consigneeAddress}</td>
+                      <td className="px-3 py-2 text-gray-700">{['prepaid', '包邮', '寄付月结'].includes(record.shippingFee) ? '寄付月结' : '收方付'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section>
+            <h3 className="mb-3 text-sm font-medium text-gray-800">寄件信息</h3>
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              <div>
+                <label className="mb-1 block text-xs text-gray-500">寄件人 <span className="text-red-500">*</span></label>
+                <Input value={sfExportConfig.senderName} maxlength={100} onChange={value => setSfExportConfig(prev => ({ ...prev, senderName: value as string }))} />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs text-gray-500">寄件人手机 <span className="text-red-500">*</span></label>
+                <Input value={sfExportConfig.senderMobile} maxlength={20} onChange={value => setSfExportConfig(prev => ({ ...prev, senderMobile: value as string }))} />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs text-gray-500">寄件人电话</label>
+                <Input value={sfExportConfig.senderPhone} maxlength={20} onChange={value => setSfExportConfig(prev => ({ ...prev, senderPhone: value as string }))} />
+              </div>
+              <div className="md:col-span-2">
+                <label className="mb-1 block text-xs text-gray-500">寄件人详细地址 <span className="text-red-500">*</span></label>
+                <Input value={sfExportConfig.senderAddress} maxlength={200} onChange={value => setSfExportConfig(prev => ({ ...prev, senderAddress: value as string }))} />
+              </div>
+            </div>
+          </section>
+
+          <div className="rounded-lg border border-gray-100 bg-gray-50 px-4 py-3 text-xs leading-5 text-gray-500">
+            托寄物固定为“电子产品”，物流产品固定为“顺丰标快”。包邮订单导出为“寄付月结”并自动填写月结卡号 7555396782；到付订单导出为“收方付”且月结卡号留空。通知揽件与预约时间不填写。
+          </div>
+
+          <p className="text-xs text-gray-400">寄件人配置会保存在当前浏览器；收件信息、订单备注和发货型号始终读取最新订单数据。</p>
         </div>
       </Dialog>
 

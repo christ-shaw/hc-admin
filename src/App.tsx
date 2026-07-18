@@ -23,6 +23,7 @@ const Logs = lazyNamed(() => import('./pages/Logs'), 'Logs');
 const PhoneModels = lazyNamed(() => import('./pages/PhoneModels'), 'PhoneModels');
 const Inventory = lazyNamed(() => import('./pages/Inventory'), 'Inventory');
 const Orders = lazyNamed(() => import('./pages/Orders'), 'Orders');
+const Purchases = lazyNamed(() => import('./pages/Purchases'), 'Purchases');
 const Invoices = lazyNamed(() => import('./pages/Invoices'), 'Invoices');
 const Companies = lazyNamed(() => import('./pages/Companies'), 'Companies');
 const SettingsPage = lazyNamed(() => import('./pages/Settings'), 'SettingsPage');
@@ -53,6 +54,7 @@ export default function App() {
                 <Route path="/logs" element={<AppLayout><Suspense fallback={<PageLoader />}><Logs /></Suspense></AppLayout>} />
                 <Route path="/models" element={<AppLayout><Suspense fallback={<PageLoader />}><PhoneModels /></Suspense></AppLayout>} />
                 <Route path="/orders" element={<AppLayout><Suspense fallback={<PageLoader />}><Orders /></Suspense></AppLayout>} />
+                <Route path="/purchases" element={<AppLayout><Suspense fallback={<PageLoader />}><Purchases /></Suspense></AppLayout>} />
                 <Route path="/invoices" element={<AppLayout><Suspense fallback={<PageLoader />}><Invoices /></Suspense></AppLayout>} />
                 <Route path="/companies" element={<AppLayout><Suspense fallback={<PageLoader />}><Companies /></Suspense></AppLayout>} />
                 <Route path="/settings" element={<AppLayout><Suspense fallback={<PageLoader />}><SettingsPage /></Suspense></AppLayout>} />

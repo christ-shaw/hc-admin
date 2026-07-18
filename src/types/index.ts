@@ -326,6 +326,14 @@ export interface InvoiceFile {
   fileName: string;               // 原始文件名
 }
 
+/** 二手手机开票货品 */
+export interface InvoicePhoneProduct {
+  model: string;                  // 手机型号
+  quantity: number;               // 数量
+  unitPrice: number;              // 单价
+  amount: number;                 // 小计（数量 × 单价）
+}
+
 /** 发票记录 */
 export interface InvoiceRecord {
   _id: string;
@@ -342,6 +350,7 @@ export interface InvoiceRecord {
   bankCode: string;               // 开户行行号
   invoiceCategory: string;        // 开票类目
   invoiceAmount: number;          // 开票金额
+  phoneProducts?: InvoicePhoneProduct[]; // 手机货品明细（二手手机类目，支持多条）
   phoneModel?: string;            // 手机型号（二手手机类目）
   phoneQuantity?: number;         // 手机数量（二手手机类目）
   unitPrice?: number;             // 单价（二手手机类目）

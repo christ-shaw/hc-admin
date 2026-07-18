@@ -133,6 +133,10 @@ export function PermissionProvider({ children }: { children: React.ReactNode }) 
 
   const canAccessPage = useCallback((path: string) => {
     const normalizedPath = normalizePath(path);
+    // 采购页沿用订单域权限作为存量角色的兼容回退；新角色可单独配置 /purchases。
+    if (normalizedPath === '/purchases') {
+      return pagePermissions.includes('/purchases') || pagePermissions.includes('/orders');
+    }
     return pagePermissions.includes(normalizedPath);
   }, [pagePermissions]);
 

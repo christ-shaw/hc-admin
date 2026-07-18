@@ -14,6 +14,7 @@ import {
   LogOut,
   User,
   ShoppingCart,
+  ClipboardList,
   Receipt,
   Building2,
   Bell,
@@ -37,6 +38,7 @@ const navItems = [
   { path: '/logs', label: '操作日志', Icon: FileText },
   { path: '/models', label: '型号管理', Icon: Smartphone },
   { path: '/orders', label: '订单管理', Icon: ShoppingCart },
+  { path: '/purchases', label: '采购管理', Icon: ClipboardList },
   {
     label: '发票', Icon: Receipt,
     children: [

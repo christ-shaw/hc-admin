@@ -15,6 +15,7 @@ import { RoleManageTab } from '../components/RoleManageTab';
 import { UserRoleTab } from '../components/UserRoleTab';
 import { LoginLogTab } from '../components/LoginLogTab';
 import { DictionaryManageTab } from '../components/DictionaryManageTab';
+import { SupplierManageTab } from '../components/SupplierManageTab';
 
 interface InitializePermissionResult {
   success: boolean;
@@ -190,8 +191,11 @@ export function SettingsPage() {
   const canManageUserRoles = can('settings:user_role_manage');
   const canViewLoginLogs = can('settings:read');
   const canManageDictionaries = can('settings:dict_manage') || can('settings:update');
+  const canManageSuppliers = can('settings:supplier_manage') || can('settings:update');
+  const canViewSuppliers = can('settings:read') || canManageSuppliers;
   const tabList = [
     { value: 'general', label: '全部设置' },
+    ...(canViewSuppliers ? [{ value: 'suppliers', label: '供应商配置' }] : []),
     ...(canViewLoginLogs ? [{ value: 'dictionaries', label: '数据字典' }] : []),
     ...(canManageRoles ? [{ value: 'roles', label: '角色管理' }] : []),
     ...(canManageUserRoles ? [{ value: 'users', label: '用户角色' }] : []),
@@ -435,6 +439,10 @@ export function SettingsPage() {
 
           {activeTab === 'dictionaries' && canViewLoginLogs && (
             <DictionaryManageTab canManage={canManageDictionaries} />
+          )}
+
+          {activeTab === 'suppliers' && canViewSuppliers && (
+            <SupplierManageTab canManage={canManageSuppliers} />
           )}
 
           {activeTab === 'users' && canManageUserRoles && (
