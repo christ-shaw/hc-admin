@@ -605,6 +605,11 @@ export function Orders() {
   const [editVisible, setEditVisible] = useState(false);
   const [editForm, setEditForm] = useState<OrderFormData>(EMPTY_ORDER);
   const [editId, setEditId] = useState('');
+  const [manualTrackingVisible, setManualTrackingVisible] = useState(false);
+  const [manualTrackingTarget, setManualTrackingTarget] = useState<OrderRecord | null>(null);
+  const [manualTrackingNumber, setManualTrackingNumber] = useState('');
+  const [manualTrackingShippingFee, setManualTrackingShippingFee] = useState('prepaid');
+  const [manualTrackingSaving, setManualTrackingSaving] = useState(false);
   const [shipDialogVisible, setShipDialogVisible] = useState(false);
   // 关联出库单详情弹窗
   const [outboundDetailVisible, setOutboundDetailVisible] = useState(false);
@@ -1204,6 +1209,57 @@ export function Orders() {
     setEditVisible(true);
   }, []);
 
+  /** 手工修改订单快递单号（有订单页面访问权限的用户均可操作）。 */
+  const handleManualTrackingOpen = useCallback((record: OrderRecord) => {
+    setManualTrackingTarget(record);
+    setManualTrackingNumber(record.trackingNumber || '');
+    setManualTrackingShippingFee(record.shippingFee || 'prepaid');
+    setManualTrackingVisible(true);
+  }, []);
+
+  const closeManualTrackingDialog = useCallback(() => {
+    if (manualTrackingSaving) return;
+    setManualTrackingVisible(false);
+    setManualTrackingTarget(null);
+    setManualTrackingNumber('');
+    setManualTrackingShippingFee('prepaid');
+  }, [manualTrackingSaving]);
+
+  const handleManualTrackingSave = useCallback(async () => {
+    if (!manualTrackingTarget || manualTrackingSaving) return;
+    const trackingNumber = manualTrackingNumber.trim();
+    if (trackingNumber && !manualTrackingShippingFee) {
+      MessagePlugin.warning('请先选择邮寄结算方式');
+      return;
+    }
+
+    const status = trackingNumber
+      ? 'shipped'
+      : (manualTrackingTarget.needsOutbound === false || manualTrackingTarget.status === 'noShip' ? 'noShip' : 'unshipped');
+
+    setManualTrackingSaving(true);
+    try {
+      const success = await orders.updateOrder(manualTrackingTarget._id, {
+        trackingNumber,
+        shippingFee: status === 'noShip' ? '' : manualTrackingShippingFee,
+        status,
+      });
+      if (!success) {
+        MessagePlugin.error('快递单号修改失败');
+        return;
+      }
+      MessagePlugin.success(trackingNumber ? '快递单号已更新，订单已标记为已发货' : '快递单号已清空');
+      setManualTrackingVisible(false);
+      setManualTrackingTarget(null);
+      setManualTrackingNumber('');
+      setManualTrackingShippingFee('prepaid');
+    } catch (err) {
+      MessagePlugin.error('快递单号修改异常: ' + String(err));
+    } finally {
+      setManualTrackingSaving(false);
+    }
+  }, [manualTrackingNumber, manualTrackingSaving, manualTrackingShippingFee, manualTrackingTarget, orders]);
+
   const findOutboundRecords = useCallback(async (consignee: string) => {
     const keyword = consignee.trim();
     if (!keyword) return [];
@@ -1739,6 +1795,7 @@ export function Orders() {
             options={[
               { content: '简介', value: 'introduction' },
               { content: '编辑', value: 'edit' },
+              { content: '修改快递单号', value: 'manualTracking' },
               ...(row.outboundRecordId ? [{ content: '出库单', value: 'viewOutbound' }] : []),
               ...(shouldShowAfterSaleInboundConfirm(row) ? [{ content: '售后回库确认', value: 'afterSaleInbound' }] : []),
               { content: '删除', value: 'delete', theme: 'error' as const },
@@ -1746,6 +1803,7 @@ export function Orders() {
             onClick={(item: DropdownOption) => {
               if (item.value === 'introduction') handleIntroduction(row);
               if (item.value === 'edit') handleEditOpen(row);
+              if (item.value === 'manualTracking') handleManualTrackingOpen(row);
               if (item.value === 'viewOutbound') handleViewOutbound(row);
               if (item.value === 'afterSaleInbound') handleAfterSaleInboundOpen(row);
               if (item.value === 'delete') handleDeleteConfirm(row);
@@ -1759,7 +1817,7 @@ export function Orders() {
         </div>
       ),
     },
-  ], [handleDetail, handleViewOutbound, handleApplyExpress, handleQuerySfOrderResult, handleCancelSfExpress, handleIntroduction, handleEditOpen, handleShipOpen, handleGenerateOutboundOpen, handleAfterSaleInboundOpen, handleDeleteConfirm, applyingExpressId, queryingSfResultId, cancelingSfId, ORDER_TYPE_MAP, SALES_CHANNEL_MAP, ORDER_ATTRIBUTE_MAP, ORDER_STATUS_MAP]);
+  ], [handleDetail, handleViewOutbound, handleApplyExpress, handleQuerySfOrderResult, handleCancelSfExpress, handleIntroduction, handleEditOpen, handleManualTrackingOpen, handleShipOpen, handleGenerateOutboundOpen, handleAfterSaleInboundOpen, handleDeleteConfirm, applyingExpressId, queryingSfResultId, cancelingSfId, ORDER_TYPE_MAP, SALES_CHANNEL_MAP, ORDER_ATTRIBUTE_MAP, ORDER_STATUS_MAP]);
 
   const displayRecords = orders.getPageRecords(orders.currentPage);
   const hasLoadedNextPage = orders.currentPage * PAGE_SIZE < orders.records.length;
@@ -2542,6 +2600,54 @@ export function Orders() {
           productModelLoading={productModels.loading}
           productModelLoadError={productModels.loadError}
         />
+      </Dialog>
+
+      {/* 手工修改快递单号 */}
+      <Dialog
+        header="修改快递单号"
+        visible={manualTrackingVisible}
+        onClose={closeManualTrackingDialog}
+        width="480px"
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button disabled={manualTrackingSaving} onClick={closeManualTrackingDialog}>取消</Button>
+            <Button theme="primary" loading={manualTrackingSaving} onClick={handleManualTrackingSave}>保存</Button>
+          </div>
+        }
+      >
+        <div className="space-y-4">
+          <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+            <div><span className="text-gray-400">客户名称：</span>{manualTrackingTarget?.customerName || '-'}</div>
+            <div className="mt-1"><span className="text-gray-400">当前单号：</span>{manualTrackingTarget?.trackingNumber || '-'}</div>
+          </div>
+          {manualTrackingTarget?.outboundRecordId && (
+            <div className="rounded-lg border border-amber-100 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-700">
+              该订单已关联出库单。本次仅修改订单上的快递单号，不会改写出库单记录。
+            </div>
+          )}
+          <div>
+            <label className="mb-1 block text-xs text-gray-500">邮寄结算方式</label>
+            <Select
+              placeholder="请选择邮寄结算方式"
+              value={manualTrackingShippingFee}
+              onChange={val => setManualTrackingShippingFee(val as string)}
+              options={SHIP_CONFIRM_SHIPPING_FEE_OPTIONS}
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs text-gray-500">快递单号</label>
+            <Input
+              placeholder="输入新单号；留空保存可清除现有单号"
+              value={manualTrackingNumber}
+              maxlength={100}
+              onChange={val => setManualTrackingNumber(val as string)}
+              onEnter={handleManualTrackingSave}
+            />
+          </div>
+          <div className="rounded-lg border border-blue-100 bg-blue-50/60 px-3 py-2 text-xs leading-5 text-blue-700">
+            填写单号后订单自动标记为“已发货”；清空单号后，需出库订单恢复为“未发货”。
+          </div>
+        </div>
       </Dialog>
 
       {/* 删除确认弹窗 */}
