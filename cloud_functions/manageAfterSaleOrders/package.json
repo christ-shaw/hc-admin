@@ -1,0 +1,10 @@
+{
+  "name": "manageAfterSaleOrders",
+  "version": "1.0.0",
+  "description": "创建和查询租赁2售后订单",
+  "main": "index.js",
+  "dependencies": {
+    "@cloudbase/node-sdk": "^3.16.0",
+    "wx-server-sdk": "~2.6.3"
+  }
+}

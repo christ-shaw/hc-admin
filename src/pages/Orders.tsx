@@ -21,6 +21,7 @@ import {
 import { PAGE_SIZE } from '../utils/constants';
 import { DICT_CODES, useDictionaries } from '../contexts/DictionaryContext';
 import { useTabDirty } from '../contexts/TabWorkspaceContext';
+import { usePermission } from '../contexts/PermissionContext';
 
 /** ========== 预计算静态 options（模块级常量，避免每次渲染重建） ========== */
 const PLACEHOLDER_OPTION = { label: '请选择', value: '' };
@@ -100,9 +101,77 @@ interface AutoOutboundOption {
   enabled: boolean | null;
 }
 
+interface AfterSaleFormData {
+  products: ProductItem[];
+  consignee: string;
+  consigneePhone: string;
+  consigneeAddress: string;
+  shippingFee: string;
+  customerRemark: string;
+  needsOutbound: boolean;
+}
+
+const EMPTY_AFTER_SALE_FORM: AfterSaleFormData = {
+  products: [{ ...EMPTY_PRODUCT }],
+  consignee: '',
+  consigneePhone: '',
+  consigneeAddress: '',
+  shippingFee: '',
+  customerRemark: '',
+  needsOutbound: false,
+};
+
 const DEFAULT_AUTO_OUTBOUND: AutoOutboundOption = { enabled: null };
 
 const CONSIGNEE_PHONE_PATTERN = /^\d{6,20}$/;
+
+function createAfterSaleRequestId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  return `after-sale-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function isAfterSaleEligible(record: OrderRecord): boolean {
+  const rental2 = record.orderAttribute === 'rental2' || record.orderAttribute === '租赁2';
+  const shipped = record.status === 'shipped' || record.status === '已发货';
+  return rental2 && shipped && !record.afterSaleSourceOrderId && record.importSource !== 'manual-after-sale';
+}
+
+function normalizeShippingFeeValue(value: string | undefined): string {
+  const normalized = String(value || '').trim();
+  if (normalized === 'prepaid' || normalized === '包邮' || normalized === '寄付月结') return 'prepaid';
+  if (normalized === 'cod' || normalized === '到付' || normalized === '收方付') return 'cod';
+  if (normalized === 'pickup' || normalized === '自提') return 'pickup';
+  return '';
+}
+
+function buildAfterSaleForm(record: OrderRecord): AfterSaleFormData {
+  const sourceProducts = getOrderProducts(record);
+  const products = (sourceProducts.length > 0 ? sourceProducts : [EMPTY_PRODUCT]).map(product => ({
+    brand: product.brand || '',
+    productName: product.productName || '',
+    specification: product.specification || '',
+    quantity: Number(product.quantity) || 0,
+    unitPrice: 0,
+    amount: 0,
+  }));
+  return {
+    products,
+    consignee: record.consignee || '',
+    consigneePhone: record.consigneePhone || '',
+    consigneeAddress: record.consigneeAddress || '',
+    shippingFee: normalizeShippingFeeValue(record.shippingFee),
+    customerRemark: '',
+    needsOutbound: false,
+  };
+}
+
+function serializeAfterSaleDraft(
+  form: AfterSaleFormData,
+  outboundDecision: boolean | null,
+  autoOutbound: AutoOutboundOption,
+): string {
+  return JSON.stringify({ form, outboundDecision, autoOutbound });
+}
 
 function hasCompleteOutboundDetails(form: OrderFormData): boolean {
   return !!(
@@ -489,6 +558,7 @@ export function Orders() {
   const orders = useOrders();
   const location = useLocation();
   const dictionaries = useDictionaries();
+  const { can } = usePermission();
   const productModels = usePhoneModels();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -614,6 +684,18 @@ export function Orders() {
   const [deleteConfirmVisible, setDeleteConfirmVisible] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<OrderRecord | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [afterSaleVisible, setAfterSaleVisible] = useState(false);
+  const [afterSaleTarget, setAfterSaleTarget] = useState<OrderRecord | null>(null);
+  const [afterSaleForm, setAfterSaleForm] = useState<AfterSaleFormData>(EMPTY_AFTER_SALE_FORM);
+  const [afterSaleOutboundDecision, setAfterSaleOutboundDecision] = useState<boolean | null>(null);
+  const [afterSaleAutoOutbound, setAfterSaleAutoOutbound] = useState<AutoOutboundOption>(DEFAULT_AUTO_OUTBOUND);
+  const [afterSaleRequestId, setAfterSaleRequestId] = useState('');
+  const [afterSaleSaving, setAfterSaleSaving] = useState(false);
+  const [afterSaleCloseConfirmVisible, setAfterSaleCloseConfirmVisible] = useState(false);
+  const [afterSaleHistoryVisible, setAfterSaleHistoryVisible] = useState(false);
+  const [afterSaleHistorySource, setAfterSaleHistorySource] = useState<OrderRecord | null>(null);
+  const [afterSaleHistoryRecords, setAfterSaleHistoryRecords] = useState<OrderRecord[]>([]);
+  const [afterSaleHistoryLoading, setAfterSaleHistoryLoading] = useState(false);
 
   // 编辑订单向导状态
   const [editStep, setEditStep] = useState(1);
@@ -636,6 +718,7 @@ export function Orders() {
   const [exporting, setExporting] = useState(false);
   const editInitialRef = useRef('');
   const exportInitialRef = useRef('');
+  const afterSaleInitialRef = useRef('');
   const ordersInitialLoadedRef = useRef(false);
   const handledLocationKeysRef = useRef(new Set<string>());
 
@@ -691,6 +774,189 @@ export function Orders() {
     setCurrentRecord(record);
     setDetailVisible(true);
   }, []);
+
+  const resetAfterSaleDialog = useCallback(() => {
+    setAfterSaleVisible(false);
+    setAfterSaleTarget(null);
+    setAfterSaleForm(EMPTY_AFTER_SALE_FORM);
+    setAfterSaleOutboundDecision(null);
+    setAfterSaleAutoOutbound(DEFAULT_AUTO_OUTBOUND);
+    setAfterSaleRequestId('');
+    setAfterSaleCloseConfirmVisible(false);
+    afterSaleInitialRef.current = '';
+  }, []);
+
+  const handleAfterSaleOpen = useCallback((record: OrderRecord) => {
+    if (!can('orders:create')) {
+      MessagePlugin.warning('当前用户没有新增订单权限');
+      return;
+    }
+    if (!isAfterSaleEligible(record)) {
+      MessagePlugin.warning('仅已发货的原始租赁2订单可以生成售后订单');
+      return;
+    }
+    const form = buildAfterSaleForm(record);
+    const virtualOnly = isVirtualProductOrder(form.products);
+    const decision = virtualOnly ? false : null;
+    const normalizedForm = { ...form, needsOutbound: false };
+    const autoOutbound = { ...DEFAULT_AUTO_OUTBOUND };
+    setAfterSaleTarget(record);
+    setAfterSaleForm(normalizedForm);
+    setAfterSaleOutboundDecision(decision);
+    setAfterSaleAutoOutbound(autoOutbound);
+    setAfterSaleRequestId(createAfterSaleRequestId());
+    afterSaleInitialRef.current = serializeAfterSaleDraft(normalizedForm, decision, autoOutbound);
+    setAfterSaleVisible(true);
+  }, [can]);
+
+  const isAfterSaleDraftDirty = useCallback(() => {
+    return !!afterSaleInitialRef.current
+      && serializeAfterSaleDraft(afterSaleForm, afterSaleOutboundDecision, afterSaleAutoOutbound) !== afterSaleInitialRef.current;
+  }, [afterSaleForm, afterSaleOutboundDecision, afterSaleAutoOutbound]);
+
+  const handleAfterSaleRequestClose = useCallback(() => {
+    if (afterSaleSaving) return;
+    if (isAfterSaleDraftDirty()) {
+      setAfterSaleCloseConfirmVisible(true);
+      return;
+    }
+    resetAfterSaleDialog();
+  }, [afterSaleSaving, isAfterSaleDraftDirty, resetAfterSaleDialog]);
+
+  const handleAfterSaleProductsChange = useCallback((products: ProductItem[]) => {
+    const wasVirtual = isVirtualProductOrder(afterSaleForm.products);
+    const virtualOnly = isVirtualProductOrder(products);
+    if (wasVirtual !== virtualOnly) {
+      setAfterSaleOutboundDecision(virtualOnly ? false : null);
+      setAfterSaleAutoOutbound(DEFAULT_AUTO_OUTBOUND);
+    }
+    setAfterSaleForm(prev => ({ ...prev, products, needsOutbound: virtualOnly ? false : prev.needsOutbound }));
+  }, [afterSaleForm.products]);
+
+  const handleAfterSaleOutboundDecisionChange = useCallback((value: boolean) => {
+    setAfterSaleOutboundDecision(value);
+    setAfterSaleAutoOutbound(DEFAULT_AUTO_OUTBOUND);
+    setAfterSaleForm(prev => ({ ...prev, needsOutbound: value }));
+  }, []);
+
+  const handleAfterSaleSave = useCallback(async () => {
+    if (!afterSaleTarget || !afterSaleRequestId) return;
+    if (afterSaleForm.products.length === 0) {
+      MessagePlugin.warning('请至少添加一条售后货品');
+      return;
+    }
+    for (let index = 0; index < afterSaleForm.products.length; index += 1) {
+      const product = afterSaleForm.products[index];
+      if (!product.brand || !product.productName || !product.specification) {
+        MessagePlugin.warning(`请补全货品 ${index + 1} 的品牌、名称和规格`);
+        return;
+      }
+      if (!Number.isSafeInteger(Number(product.quantity)) || Number(product.quantity) <= 0) {
+        MessagePlugin.warning(`货品 ${index + 1} 数量必须为正整数`);
+        return;
+      }
+    }
+
+    const virtualOnly = isVirtualProductOrder(afterSaleForm.products);
+    if (!virtualOnly && afterSaleOutboundDecision === null) {
+      MessagePlugin.warning('请选择是否需要出库');
+      return;
+    }
+    const needsOutbound = virtualOnly ? false : afterSaleOutboundDecision === true;
+    if (needsOutbound) {
+      if (!afterSaleForm.consignee.trim()) { MessagePlugin.warning('请填写收货人名称'); return; }
+      if (!CONSIGNEE_PHONE_PATTERN.test(afterSaleForm.consigneePhone.trim())) {
+        MessagePlugin.warning('收货人电话只能填写 6–20 位数字'); return;
+      }
+      if (!afterSaleForm.consigneeAddress.trim()) { MessagePlugin.warning('请填写收货人地址'); return; }
+      if (!afterSaleForm.shippingFee) { MessagePlugin.warning('请选择快递方式'); return; }
+      if (afterSaleAutoOutbound.enabled === null) { MessagePlugin.warning('请选择是否自动生成出库单'); return; }
+    }
+
+    setAfterSaleSaving(true);
+    try {
+      const result = await orders.createAfterSale({
+        sourceOrderId: afterSaleTarget._id,
+        requestId: afterSaleRequestId,
+        products: afterSaleForm.products.map(product => ({
+          brand: product.brand,
+          productName: product.productName,
+          specification: product.specification,
+          quantity: Number(product.quantity),
+          unitPrice: 0,
+          amount: 0,
+        })),
+        needsOutbound,
+        consignee: needsOutbound ? afterSaleForm.consignee.trim() : '',
+        consigneePhone: needsOutbound ? afterSaleForm.consigneePhone.trim() : '',
+        consigneeAddress: needsOutbound ? afterSaleForm.consigneeAddress.trim() : '',
+        shippingFee: needsOutbound ? afterSaleForm.shippingFee : '',
+        customerRemark: afterSaleForm.customerRemark.trim(),
+      });
+      if (!result.success || !result.orderId) {
+        MessagePlugin.error(result.errMsg || '售后订单创建失败');
+        return;
+      }
+
+      MessagePlugin.success(result.duplicated ? '售后订单已创建，本次未重复生成' : '售后订单创建成功');
+      if (needsOutbound && afterSaleAutoOutbound.enabled === true) {
+        const outbound = await orders.generateOutbound(
+          [result.orderId],
+          afterSaleForm.shippingFee,
+          afterSaleForm.customerRemark.trim(),
+        );
+        if (outbound.success) {
+          MessagePlugin.success('已自动生成待出库单');
+        } else {
+          MessagePlugin.warning(`售后订单已创建，但自动生成出库单失败：${outbound.errMsg || '未知错误'}，可稍后手动生成`);
+        }
+      }
+      resetAfterSaleDialog();
+      await orders.fetchRecords(null, orders.filters);
+    } finally {
+      setAfterSaleSaving(false);
+    }
+  }, [
+    afterSaleTarget,
+    afterSaleRequestId,
+    afterSaleForm,
+    afterSaleOutboundDecision,
+    afterSaleAutoOutbound.enabled,
+    orders,
+    resetAfterSaleDialog,
+  ]);
+
+  const handleAfterSaleHistoryOpen = useCallback(async (record: OrderRecord) => {
+    setAfterSaleHistorySource(record);
+    setAfterSaleHistoryRecords([]);
+    setAfterSaleHistoryVisible(true);
+    setAfterSaleHistoryLoading(true);
+    try {
+      const result = await orders.listAfterSales(record._id);
+      if (!result.success) {
+        MessagePlugin.error(result.errMsg || '查询售后记录失败');
+        return;
+      }
+      setAfterSaleHistorySource(result.source || record);
+      setAfterSaleHistoryRecords(result.orders || []);
+    } finally {
+      setAfterSaleHistoryLoading(false);
+    }
+  }, [orders]);
+
+  const handleAfterSaleSourceOpen = useCallback(async (record: OrderRecord) => {
+    const result = await orders.getAfterSaleRelation(record._id);
+    if (!result.success) {
+      MessagePlugin.error(result.errMsg || '查询来源订单失败');
+      return;
+    }
+    if (!result.source) {
+      MessagePlugin.warning(`来源订单已删除，原订单序号为 ${result.sourceSnapshot?.serialNumber || record.afterSaleSourceSerialNumber || '-'}`);
+      return;
+    }
+    setCurrentRecord(result.source);
+    setDetailVisible(true);
+  }, [orders]);
 
   /** 导入 Excel */
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -930,6 +1196,7 @@ export function Orders() {
   });
   const orderPageDirty = (addVisible && isAddFormDirty())
     || (editVisible && (JSON.stringify(editForm) !== editInitialRef.current || editAttachFiles.length > 0))
+    || (afterSaleVisible && isAfterSaleDraftDirty())
     || importPreviewVisible
     || (exportVisible && !!exportInitialRef.current && exportState !== exportInitialRef.current)
     || (!!manualTrackingTarget && manualTrackingVisible && (
@@ -1545,11 +1812,13 @@ export function Orders() {
     { colKey: 'orderType', title: '订单类型', width: 90, cell: ({ row }: { row: OrderRecord }) => getDictLabel(ORDER_TYPE_MAP, row.orderType) || '-' },
     {
       colKey: 'importSource', title: '订单来源', width: 90,
-      cell: ({ row }: { row: OrderRecord }) => (
-        row.importSource === 'hc-order-assist'
-          ? <Tag theme="primary" variant="light">赞晨租</Tag>
-          : <span>手工</span>
-      ),
+      cell: ({ row }: { row: OrderRecord }) => {
+        if (row.importSource === 'manual-after-sale' || row.importSource === 'hc-order-assist-after-sale') {
+          return <Tag theme="warning" variant="light">售后</Tag>;
+        }
+        if (row.importSource === 'hc-order-assist') return <Tag theme="primary" variant="light">赞晨租</Tag>;
+        return <span>手工</span>;
+      },
     },
     { colKey: 'salesChannel', title: '销售渠道', width: 90, cell: ({ row }: { row: OrderRecord }) => getDictLabel(SALES_CHANNEL_MAP, row.salesChannel) || '-' },
     { colKey: 'salesperson', title: '人员', width: 60, cell: ({ row }: { row: OrderRecord }) => row.salesperson || '-' },
@@ -1622,6 +1891,8 @@ export function Orders() {
             options={[
               { content: '简介', value: 'introduction' },
               { content: '编辑', value: 'edit' },
+              ...(isAfterSaleEligible(row) && can('orders:create') ? [{ content: '生成售后订单', value: 'createAfterSale' }] : []),
+              ...(isAfterSaleEligible(row) ? [{ content: '售后记录', value: 'afterSaleHistory' }] : []),
               { content: '修改快递单号', value: 'manualTracking' },
               ...(row.outboundRecordId ? [{ content: '出库单', value: 'viewOutbound' }] : []),
               ...(shouldShowAfterSaleInboundConfirm(row) ? [{ content: '售后回库确认', value: 'afterSaleInbound' }] : []),
@@ -1630,6 +1901,8 @@ export function Orders() {
             onClick={(item: DropdownOption) => {
               if (item.value === 'introduction') handleIntroduction(row);
               if (item.value === 'edit') handleEditOpen(row);
+              if (item.value === 'createAfterSale') handleAfterSaleOpen(row);
+              if (item.value === 'afterSaleHistory') handleAfterSaleHistoryOpen(row);
               if (item.value === 'manualTracking') handleManualTrackingOpen(row);
               if (item.value === 'viewOutbound') handleViewOutbound(row);
               if (item.value === 'afterSaleInbound') handleAfterSaleInboundOpen(row);
@@ -1644,7 +1917,7 @@ export function Orders() {
         </div>
       ),
     },
-  ], [handleDetail, handleViewOutbound, handleIntroduction, handleEditOpen, handleManualTrackingOpen, handleShipOpen, handleGenerateOutboundOpen, handleAfterSaleInboundOpen, handleDeleteConfirm, ORDER_TYPE_MAP, SALES_CHANNEL_MAP, ORDER_ATTRIBUTE_MAP, ORDER_STATUS_MAP]);
+  ], [handleDetail, handleViewOutbound, handleIntroduction, handleEditOpen, handleAfterSaleOpen, handleAfterSaleHistoryOpen, handleManualTrackingOpen, handleShipOpen, handleGenerateOutboundOpen, handleAfterSaleInboundOpen, handleDeleteConfirm, can, ORDER_TYPE_MAP, SALES_CHANNEL_MAP, ORDER_ATTRIBUTE_MAP, ORDER_STATUS_MAP]);
 
   const displayRecords = orders.getPageRecords(orders.currentPage);
   const hasLoadedNextPage = orders.currentPage * PAGE_SIZE < orders.records.length;
@@ -1838,6 +2111,21 @@ export function Orders() {
             <DetailRow label="订单来源" value={getDictLabel(ORDER_SOURCE_MAP, currentRecord.orderSource)} />
             <DetailRow label="订单属性" value={getDictLabel(ORDER_ATTRIBUTE_MAP, currentRecord.orderAttribute)} />
             <DetailRow label="订单类型" value={getDictLabel(ORDER_TYPE_MAP, currentRecord.orderType)} />
+            {currentRecord.afterSaleSourceOrderId && (
+              <DetailRow
+                label="来源订单"
+                value={(
+                  <Button
+                    variant="text"
+                    theme="primary"
+                    size="small"
+                    onClick={() => handleAfterSaleSourceOpen(currentRecord)}
+                  >
+                    序号 {currentRecord.afterSaleSourceSerialNumber || '-'}
+                  </Button>
+                )}
+              />
+            )}
             <DetailRow label="销售渠道" value={getDictLabel(SALES_CHANNEL_MAP, currentRecord.salesChannel)} />
             <DetailRow label="人员" value={dictionaries.getLabel(DICT_CODES.salesperson, currentRecord.salesperson)} />
             <DetailRow label="渠道类别" value={getDictLabel(CHANNEL_CATEGORY_MAP, currentRecord.channelCategory)} />
@@ -2232,6 +2520,106 @@ export function Orders() {
         </div>
       </Dialog>
 
+      {/* 从租赁2原订单生成售后订单 */}
+      <Dialog
+        header="生成售后订单"
+        visible={afterSaleVisible}
+        onClose={handleAfterSaleRequestClose}
+        width="820px"
+        footer={(
+          <div className="flex justify-end gap-2">
+            <Button disabled={afterSaleSaving} onClick={handleAfterSaleRequestClose}>取消</Button>
+            <Button theme="primary" loading={afterSaleSaving} onClick={handleAfterSaleSave}>生成售后订单</Button>
+          </div>
+        )}
+      >
+        {afterSaleTarget && (
+          <AfterSaleOrderForm
+            source={afterSaleTarget}
+            form={afterSaleForm}
+            onChange={setAfterSaleForm}
+            onProductsChange={handleAfterSaleProductsChange}
+            outboundDecision={afterSaleOutboundDecision}
+            onOutboundDecisionChange={handleAfterSaleOutboundDecisionChange}
+            autoOutbound={afterSaleAutoOutbound}
+            onAutoOutboundChange={setAfterSaleAutoOutbound}
+            productModelBrands={productModels.brands}
+            productModelLoading={productModels.loading}
+            productModelLoadError={productModels.loadError}
+            shippingFeeOptions={SHIPPING_FEE_OPTIONS}
+          />
+        )}
+      </Dialog>
+
+      {/* 原订单关联的售后记录 */}
+      <Dialog
+        header="售后记录"
+        visible={afterSaleHistoryVisible}
+        onClose={() => { setAfterSaleHistoryVisible(false); setAfterSaleHistoryRecords([]); }}
+        width="720px"
+        footer={<Button onClick={() => { setAfterSaleHistoryVisible(false); setAfterSaleHistoryRecords([]); }}>关闭</Button>}
+      >
+        <div className="space-y-4">
+          <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+            <div><span className="text-gray-400">原订单序号：</span>{afterSaleHistorySource?.serialNumber || '-'}</div>
+            <div className="mt-1"><span className="text-gray-400">网店订单号：</span>{afterSaleHistorySource?.onlineOrderNumber || '-'}</div>
+            <div className="mt-1"><span className="text-gray-400">客户名称：</span>{afterSaleHistorySource?.customerName || '-'}</div>
+          </div>
+          {afterSaleHistoryLoading ? (
+            <div className="py-10 text-center text-gray-400">正在查询售后记录...</div>
+          ) : afterSaleHistoryRecords.length === 0 ? (
+            <div className="py-10 text-center text-gray-400">该订单暂未生成售后订单</div>
+          ) : (
+            <div className="max-h-[460px] space-y-2 overflow-auto">
+              {afterSaleHistoryRecords.map(record => (
+                <div key={record._id} className="rounded-lg border border-gray-200 p-3">
+                  <div className="grid grid-cols-1 gap-x-4 gap-y-1 text-sm md:grid-cols-2">
+                    <div><span className="text-gray-400">售后序号：</span>{record.serialNumber || '-'}</div>
+                    <div><span className="text-gray-400">创建日期：</span>{formatDate(record.date, false) || '-'}</div>
+                    <div><span className="text-gray-400">订单状态：</span>{getDictLabel(ORDER_STATUS_MAP, record.status) || '-'}</div>
+                    <div><span className="text-gray-400">收货人：</span>{record.consignee || '-'}</div>
+                    <div className="md:col-span-2">
+                      <span className="text-gray-400">售后货品：</span>
+                      {getOrderProducts(record).map(item => `${getProductLabel(item.productName)} ${item.specification || ''} × ${item.quantity}`).join('；') || '-'}
+                    </div>
+                    {record.customerRemark && <div className="md:col-span-2"><span className="text-gray-400">备注：</span>{record.customerRemark}</div>}
+                  </div>
+                  <div className="mt-2 flex justify-end">
+                    <Button
+                      size="small"
+                      variant="text"
+                      theme="primary"
+                      onClick={() => {
+                        setAfterSaleHistoryVisible(false);
+                        handleDetail(record);
+                      }}
+                    >
+                      查看详情
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </Dialog>
+
+      {/* 关闭售后确认表单 */}
+      <Dialog
+        header="提示"
+        visible={afterSaleCloseConfirmVisible}
+        onClose={() => setAfterSaleCloseConfirmVisible(false)}
+        width="420px"
+        footer={(
+          <div className="flex justify-end gap-2">
+            <Button onClick={() => setAfterSaleCloseConfirmVisible(false)}>继续填写</Button>
+            <Button theme="danger" onClick={resetAfterSaleDialog}>确认关闭</Button>
+          </div>
+        )}
+      >
+        <p className="text-gray-600">确定要关闭吗？已调整的售后信息将不会保存。</p>
+      </Dialog>
+
       {/* 导入预览弹窗 */}
       <Dialog
         header={`确认导入 (${importPreviewData.length} 条订单)`}
@@ -2588,6 +2976,254 @@ export function Orders() {
           </div>
         </div>
       </Dialog>
+    </div>
+  );
+}
+
+function AfterSaleOrderForm({
+  source,
+  form,
+  onChange,
+  onProductsChange,
+  outboundDecision,
+  onOutboundDecisionChange,
+  autoOutbound,
+  onAutoOutboundChange,
+  productModelBrands,
+  productModelLoading,
+  productModelLoadError,
+  shippingFeeOptions,
+}: {
+  source: OrderRecord;
+  form: AfterSaleFormData;
+  onChange: React.Dispatch<React.SetStateAction<AfterSaleFormData>>;
+  onProductsChange: (products: ProductItem[]) => void;
+  outboundDecision: boolean | null;
+  onOutboundDecisionChange: (value: boolean) => void;
+  autoOutbound: AutoOutboundOption;
+  onAutoOutboundChange: (value: AutoOutboundOption) => void;
+  productModelBrands: PhoneBrand[];
+  productModelLoading: boolean;
+  productModelLoadError: string;
+  shippingFeeOptions: Array<{ label: string; value: string }>;
+}) {
+  const runtimeBrandMap = useMemo(() => Object.fromEntries(
+    productModelBrands
+      .filter(brand => brand.enabled !== false)
+      .map(brand => [brand.brand, brand])
+  ) as Record<string, PhoneBrand>, [productModelBrands]);
+
+  const brandOptions = useMemo(() => [
+    PLACEHOLDER_OPTION,
+    ...productModelBrands
+      .filter(brand => brand.enabled !== false)
+      .sort((a, b) => (a.sort || 0) - (b.sort || 0) || a.brand.localeCompare(b.brand, 'zh-CN'))
+      .map(brand => ({ label: getBrandLabel(brand.brand), value: brand.brand })),
+  ], [productModelBrands]);
+
+  const getProductOptions = useCallback((brand: string) => [
+    PLACEHOLDER_OPTION,
+    ...(runtimeBrandMap[brand]?.products || [])
+      .filter(product => product.enabled !== false)
+      .sort((a, b) => (a.sort || 0) - (b.sort || 0) || a.name.localeCompare(b.name, 'zh-CN'))
+      .map(product => ({ label: getProductLabel(product.name), value: product.name })),
+  ], [runtimeBrandMap]);
+
+  const getSpecOptions = useCallback((brand: string, productName: string) => [
+    PLACEHOLDER_OPTION,
+    ...(runtimeBrandMap[brand]?.products || [])
+      .find(product => product.name === productName)?.specs
+      ?.filter(spec => spec.enabled !== false)
+      .sort((a, b) => (a.sort || 0) - (b.sort || 0) || a.name.localeCompare(b.name, 'zh-CN'))
+      .map(spec => ({ label: spec.name, value: spec.name })) || [],
+  ], [runtimeBrandMap]);
+
+  const updateProduct = useCallback((index: number, patch: Partial<ProductItem>) => {
+    onProductsChange(form.products.map((product, itemIndex) => itemIndex === index
+      ? { ...product, ...patch, unitPrice: 0, amount: 0 }
+      : product));
+  }, [form.products, onProductsChange]);
+
+  const virtualOnly = isVirtualProductOrder(form.products);
+  const outboundComplete = !!(
+    form.consignee.trim()
+    && CONSIGNEE_PHONE_PATTERN.test(form.consigneePhone.trim())
+    && form.consigneeAddress.trim()
+    && form.shippingFee
+  );
+
+  return (
+    <div className="max-h-[68vh] space-y-5 overflow-y-auto pr-1">
+      <div className="rounded-lg border border-blue-100 bg-blue-50/60 p-3 text-sm text-gray-700">
+        <div className="grid grid-cols-1 gap-x-4 gap-y-1 md:grid-cols-2">
+          <div><span className="text-gray-400">原订单序号：</span>{source.serialNumber || '-'}</div>
+          <div><span className="text-gray-400">网店订单号：</span>{source.onlineOrderNumber || '-'}</div>
+          <div><span className="text-gray-400">客户名称：</span>{source.customerName || '-'}</div>
+          <div><span className="text-gray-400">销售人员：</span>{source.salesperson || '-'}</div>
+          <div className="md:col-span-2">
+            <span className="text-gray-400">原订单货品：</span>
+            {getOrderProducts(source).map(item => `${getProductLabel(item.productName)} ${item.specification || ''} × ${item.quantity}`).join('；') || '-'}
+          </div>
+        </div>
+      </div>
+
+      <section>
+        <div className="mb-2 flex items-center justify-between">
+          <div>
+            <h4 className="text-sm font-medium text-gray-800">售后货品</h4>
+            <p className="mt-0.5 text-xs text-gray-400">可以从完整货品目录更换或新增型号；售后订单金额固定为 0。</p>
+          </div>
+          <Button
+            size="small"
+            variant="outline"
+            icon={<Plus size={14} />}
+            onClick={() => onProductsChange([...form.products, { ...EMPTY_PRODUCT }])}
+          >
+            添加货品
+          </Button>
+        </div>
+        {productModelLoading && <div className="mb-2 text-xs text-gray-400">正在加载货品目录...</div>}
+        {productModelLoadError && <div className="mb-2 text-xs text-red-500">{productModelLoadError}</div>}
+        <div className="space-y-3">
+          {form.products.map((product, index) => (
+            <div key={index} className="rounded-lg border border-gray-200 p-3">
+              <div className="mb-2 flex items-center justify-between">
+                <span className="text-xs font-medium text-gray-500">货品 {index + 1}</span>
+                <Button
+                  size="small"
+                  variant="text"
+                  theme="danger"
+                  icon={<Trash2 size={14} />}
+                  onClick={() => onProductsChange(form.products.filter((_, itemIndex) => itemIndex !== index))}
+                >
+                  删除
+                </Button>
+              </div>
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+                <div>
+                  <label className="mb-1 block text-xs text-gray-500">品牌 <span className="text-red-500">*</span></label>
+                  <Select
+                    value={product.brand || ''}
+                    options={brandOptions}
+                    onChange={value => updateProduct(index, { brand: value as string, productName: '', specification: '' })}
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-gray-500">货品名称 <span className="text-red-500">*</span></label>
+                  <Select
+                    value={product.productName || ''}
+                    options={getProductOptions(product.brand)}
+                    disabled={!product.brand}
+                    onChange={value => updateProduct(index, { productName: value as string, specification: '' })}
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-gray-500">规格 <span className="text-red-500">*</span></label>
+                  <Select
+                    value={product.specification || ''}
+                    options={getSpecOptions(product.brand, product.productName)}
+                    disabled={!product.productName}
+                    onChange={value => updateProduct(index, { specification: value as string })}
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-gray-500">数量 <span className="text-red-500">*</span></label>
+                  <Input
+                    type="number"
+                    value={product.quantity ? String(product.quantity) : ''}
+                    onChange={value => updateProduct(index, { quantity: Number(value) || 0 })}
+                  />
+                </div>
+              </div>
+            </div>
+          ))}
+          {form.products.length === 0 && (
+            <div className="rounded-lg border border-dashed border-gray-300 py-8 text-center text-sm text-gray-400">请添加至少一条售后货品</div>
+          )}
+        </div>
+      </section>
+
+      <section className="border-t border-gray-100 pt-4">
+        <h4 className="text-sm font-medium text-gray-800">是否需要出库 <span className="text-red-500">*</span></h4>
+        {virtualOnly ? (
+          <div className="mt-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-500">虚拟货品订单固定为无需出库</div>
+        ) : (
+          <div className="mt-2 flex gap-2">
+            <Button
+              theme={outboundDecision === true ? 'primary' : 'default'}
+              variant={outboundDecision === true ? 'base' : 'outline'}
+              onClick={() => onOutboundDecisionChange(true)}
+            >
+              需要出库
+            </Button>
+            <Button
+              theme={outboundDecision === false ? 'primary' : 'default'}
+              variant={outboundDecision === false ? 'base' : 'outline'}
+              onClick={() => onOutboundDecisionChange(false)}
+            >
+              无需出库
+            </Button>
+          </div>
+        )}
+
+        {!virtualOnly && outboundDecision === true && (
+          <div className="mt-4 space-y-3 rounded-lg border border-gray-200 p-3">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              <div>
+                <label className="mb-1 block text-xs text-gray-500">收货人 <span className="text-red-500">*</span></label>
+                <Input value={form.consignee} onChange={value => onChange(prev => ({ ...prev, consignee: value as string }))} />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs text-gray-500">收货人电话 <span className="text-red-500">*</span></label>
+                <Input value={form.consigneePhone} onChange={value => onChange(prev => ({ ...prev, consigneePhone: value as string }))} />
+              </div>
+              <div className="md:col-span-2">
+                <label className="mb-1 block text-xs text-gray-500">收货人地址 <span className="text-red-500">*</span></label>
+                <Input value={form.consigneeAddress} onChange={value => onChange(prev => ({ ...prev, consigneeAddress: value as string }))} />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs text-gray-500">快递方式 <span className="text-red-500">*</span></label>
+                <Select
+                  value={form.shippingFee || ''}
+                  options={shippingFeeOptions}
+                  onChange={value => onChange(prev => ({ ...prev, shippingFee: value as string }))}
+                />
+              </div>
+            </div>
+
+            {outboundComplete && (
+              <div className="border-t border-gray-100 pt-3">
+                <div className="text-sm font-medium text-gray-700">是否自动生成出库单 <span className="text-red-500">*</span></div>
+                <div className="mt-2 flex gap-2">
+                  <Button
+                    theme={autoOutbound.enabled === true ? 'primary' : 'default'}
+                    variant={autoOutbound.enabled === true ? 'base' : 'outline'}
+                    onClick={() => onAutoOutboundChange({ enabled: true })}
+                  >
+                    自动生成
+                  </Button>
+                  <Button
+                    theme={autoOutbound.enabled === false ? 'primary' : 'default'}
+                    variant={autoOutbound.enabled === false ? 'base' : 'outline'}
+                    onClick={() => onAutoOutboundChange({ enabled: false })}
+                  >
+                    暂不生成
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+
+      <section className="border-t border-gray-100 pt-4">
+        <label className="mb-1 block text-xs text-gray-500">客服备注</label>
+        <Textarea
+          placeholder="填写本次售后说明（选填）"
+          value={form.customerRemark}
+          onChange={value => onChange(prev => ({ ...prev, customerRemark: value as string }))}
+        />
+      </section>
     </div>
   );
 }

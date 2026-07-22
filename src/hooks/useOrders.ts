@@ -17,6 +17,41 @@ interface SaveResult {
   errMsg?: string;
 }
 
+export interface CreateAfterSaleInput {
+  sourceOrderId: string;
+  requestId: string;
+  products: OrderRecord['products'];
+  needsOutbound: boolean;
+  consignee: string;
+  consigneePhone: string;
+  consigneeAddress: string;
+  shippingFee: string;
+  customerRemark: string;
+}
+
+export interface CreateAfterSaleResult {
+  success: boolean;
+  duplicated?: boolean;
+  orderId?: string;
+  order?: OrderRecord;
+  errMsg?: string;
+}
+
+export interface AfterSaleListResult {
+  success: boolean;
+  source?: OrderRecord | null;
+  orders?: OrderRecord[];
+  errMsg?: string;
+}
+
+export interface AfterSaleRelationResult {
+  success: boolean;
+  order?: OrderRecord;
+  source?: OrderRecord | null;
+  sourceSnapshot?: { _id: string; serialNumber: number };
+  errMsg?: string;
+}
+
 interface ApplyExpressResult {
   success: boolean;
   env?: string;
@@ -152,6 +187,42 @@ export function useOrders() {
     } catch (err) {
       console.error('更新订单失败:', err);
       return false;
+    }
+  }, []);
+
+  /** 从已发货租赁2订单创建售后订单。 */
+  const createAfterSale = useCallback(async (input: CreateAfterSaleInput): Promise<CreateAfterSaleResult> => {
+    try {
+      return await callFunction<CreateAfterSaleResult>('manageAfterSaleOrders', {
+        data: { action: 'create', ...input },
+      });
+    } catch (err) {
+      console.error('创建售后订单失败:', err);
+      return { success: false, errMsg: String(err) };
+    }
+  }, []);
+
+  /** 查询原订单关联的全部售后订单。 */
+  const listAfterSales = useCallback(async (sourceOrderId: string): Promise<AfterSaleListResult> => {
+    try {
+      return await callFunction<AfterSaleListResult>('manageAfterSaleOrders', {
+        data: { action: 'listBySource', sourceOrderId },
+      });
+    } catch (err) {
+      console.error('查询售后记录失败:', err);
+      return { success: false, orders: [], errMsg: String(err) };
+    }
+  }, []);
+
+  /** 查询售后订单对应的原订单。 */
+  const getAfterSaleRelation = useCallback(async (orderId: string): Promise<AfterSaleRelationResult> => {
+    try {
+      return await callFunction<AfterSaleRelationResult>('manageAfterSaleOrders', {
+        data: { action: 'getRelation', orderId },
+      });
+    } catch (err) {
+      console.error('查询售后来源订单失败:', err);
+      return { success: false, errMsg: String(err) };
     }
   }, []);
 
@@ -376,6 +447,9 @@ export function useOrders() {
     importOrders,
     deleteOrder,
     updateOrder,
+    createAfterSale,
+    listAfterSales,
+    getAfterSaleRelation,
     generateOutbound,
     applySfExpress,
     querySfOrderResult,

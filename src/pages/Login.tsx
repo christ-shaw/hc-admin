@@ -3,6 +3,7 @@ import { Input, Button, MessagePlugin } from 'tdesign-react';
 import { Package } from 'lucide-react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { signIn, callFunction, getCurrentPermissionUserPayload } from '../lib/cloudbase';
+import { usePermission } from '../contexts/PermissionContext';
 
 /** 记录登录日志（成功/失败都记录） */
 async function recordLogin(username: string, success: boolean, failReason?: string) {
@@ -26,6 +27,7 @@ async function recordLogin(username: string, success: boolean, failReason?: stri
 export function Login() {
   const navigate = useNavigate();
   const location = useLocation();
+  const { refreshPermissions } = usePermission();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -37,13 +39,14 @@ export function Login() {
 
     setLoading(true);
     const { error } = await signIn(username, password);
-    setLoading(false);
-
     if (error) {
+      setLoading(false);
       void recordLogin(username, false, '用户名或密码错误');
       MessagePlugin.error('登录失败：用户名或密码错误');
       return;
     }
+    await refreshPermissions();
+    setLoading(false);
     void recordLogin(username, true);
     MessagePlugin.success('登录成功');
     const rawFrom = (location.state as any)?.from?.pathname || '/';

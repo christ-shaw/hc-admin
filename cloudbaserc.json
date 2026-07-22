@@ -146,6 +146,16 @@
       "runtime": "Nodejs18.15"
     },
     {
+      "name": "recordSfExport",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
+      "name": "manageAfterSaleOrders",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
       "name": "saveOrders",
       "handler": "index.main",
       "runtime": "Nodejs18.15"

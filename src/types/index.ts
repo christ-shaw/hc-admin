@@ -216,6 +216,9 @@ export interface OrderRecord {
   sfCancelRequestId?: string;       // 顺丰取消请求ID
   sfCancelRawResponse?: unknown;    // 顺丰取消原始响应
   sfRawResponse?: unknown;          // 顺丰原始响应
+  sfExportCount?: number;           // 导出顺丰模板的累计次数
+  sfLastExportTime?: string | { $date: string }; // 最近一次顺丰模板导出时间
+  sfExportLastBatchId?: string;     // 最近一次导出批次 ID（防止同批次重复计数）
   consignee: string;                // 收货人名称
   consigneePhone: string;           // 收货人电话
   consigneeAddress: string;         // 收货人地址
@@ -229,6 +232,10 @@ export interface OrderRecord {
   paidRent: number;                 // 已交租金
   transferItems?: string;            // 转租赁2多组货品JSON（兼容多组）
   importSource?: string;            // 订单来源标记（hc-order-assist=赞晨租导入）
+  afterSaleSourceOrderId?: string;  // 手工售后订单关联的原订单 ID
+  afterSaleSourceSerialNumber?: number; // 原订单序号快照（原订单删除后仍可追溯）
+  afterSaleRequestId?: string;      // 售后创建请求 ID（提交重试幂等）
+  afterSaleCreatedBy?: string;      // 售后订单创建人 ID
   attachments: OrderAttachment[];   // 订单附件
   returnStatus?: string;            // 归还状态（租后发货/租后退货时使用）
   returnTrackingNumbers?: string;   // 归还物流单号（多个逗号分隔，归还状态=运输途中时必填）

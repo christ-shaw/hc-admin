@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Button, Dialog, Input, MessagePlugin, Select, Table, Tabs, Tag } from 'tdesign-react';
+import { Button, Dialog, Input, MessagePlugin, Select, Switch, Table, Tabs, Tag } from 'tdesign-react';
 import { FileDown, RotateCcw, Search, Truck } from 'lucide-react';
 import type { OrderRecord } from '../types';
 import { callFunction } from '../lib/cloudbase';
@@ -9,6 +9,7 @@ import { getOrderProducts } from '../utils/orderProducts';
 import { getBrandLabel, getProductLabel } from '../data/dict';
 import {
   exportSfOfflineOrders,
+  buildSfExportGroups,
   loadSfExportConfig,
   saveSfExportConfig,
   type SfExportConfig,
@@ -50,8 +51,20 @@ interface SfConfigResult {
   errMsg?: string;
 }
 
+interface SfExportRecordResult {
+  success: boolean;
+  updatedCount?: number;
+  duplicatedCount?: number;
+  errMsg?: string;
+}
+
 const EMPTY_FILTERS: SfFilters = {};
 const PAGE_SIZE = 20;
+
+function createExportBatchId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  return `sf-export-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+}
 
 const APPLY_STATUS_META: Record<string, { label: string; theme: 'default' | 'primary' | 'warning' | 'success' | 'danger' }> = {
   applying: { label: '申请中', theme: 'warning' },
@@ -116,6 +129,7 @@ export function SfExpress() {
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [selectedRecords, setSelectedRecords] = useState<Record<string, OrderRecord>>({});
+  const selectedList = useMemo(() => Object.values(selectedRecords), [selectedRecords]);
 
   const [sfEnv, setSfEnv] = useState<'sandbox' | 'production' | ''>('');
   const [sfEnvError, setSfEnvError] = useState('');
@@ -128,9 +142,16 @@ export function SfExpress() {
   const [exportVisible, setExportVisible] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportConfig, setExportConfig] = useState<SfExportConfig>(loadSfExportConfig);
+  const [mergeSameRecipient, setMergeSameRecipient] = useState(true);
   const exportInitialRef = useRef('');
+  const exportGroups = useMemo(
+    () => buildSfExportGroups(selectedList, mergeSameRecipient),
+    [selectedList, mergeSameRecipient],
+  );
   useTabDirty(
-    exportVisible && !!exportInitialRef.current && JSON.stringify(exportConfig) !== exportInitialRef.current,
+    exportVisible
+      && !!exportInitialRef.current
+      && JSON.stringify({ exportConfig, mergeSameRecipient }) !== exportInitialRef.current,
     '顺丰快递',
   );
 
@@ -232,19 +253,20 @@ export function SfExpress() {
   };
 
   const handleOpenExport = () => {
-    const selected = Object.values(selectedRecords);
+    const selected = selectedList;
     if (selected.length === 0) {
       MessagePlugin.warning('请先勾选需要导入顺丰模板的订单');
       return;
     }
     const config = loadSfExportConfig();
     setExportConfig(config);
-    exportInitialRef.current = JSON.stringify(config);
+    setMergeSameRecipient(true);
+    exportInitialRef.current = JSON.stringify({ exportConfig: config, mergeSameRecipient: true });
     setExportVisible(true);
   };
 
   const handleExport = async () => {
-    const selected = Object.values(selectedRecords);
+    const selected = selectedList;
     if (!exportConfig.senderName.trim()) return void MessagePlugin.warning('请填写寄件人');
     if (!exportConfig.senderMobile.trim() && !exportConfig.senderPhone.trim()) return void MessagePlugin.warning('请填写寄件人手机或电话');
     if (exportConfig.senderMobile.trim() && !/^\d{6,20}$/.test(exportConfig.senderMobile.trim())) return void MessagePlugin.warning('寄件人手机格式不正确');
@@ -253,8 +275,31 @@ export function SfExpress() {
     setExporting(true);
     try {
       saveSfExportConfig(exportConfig);
-      await exportSfOfflineOrders(selected, exportConfig);
-      MessagePlugin.success(`已生成 ${selected.length} 条顺丰待发货数据`);
+      const result = await exportSfOfflineOrders(selected, exportConfig, { mergeSameRecipient });
+      const exportBatchId = createExportBatchId();
+      let countRecorded = false;
+      try {
+        const recordResult = await callFunction<SfExportRecordResult>('recordSfExport', {
+          data: { orderIds: selected.map(record => record._id), exportBatchId },
+        });
+        countRecorded = !!recordResult.success;
+        if (!recordResult.success) {
+          MessagePlugin.warning(`Excel 已生成，但导出次数记录失败：${recordResult.errMsg || '未知错误'}`);
+        }
+      } catch (recordError) {
+        MessagePlugin.warning(`Excel 已生成，但导出次数记录失败：${recordError instanceof Error ? recordError.message : String(recordError)}`);
+      }
+
+      if (countRecorded) {
+        const exportedIds = new Set(selected.map(record => record._id));
+        const exportedAt = new Date().toISOString();
+        setRecords(previous => previous.map(record => exportedIds.has(record._id)
+          ? { ...record, sfExportCount: (Number(record.sfExportCount) || 0) + 1, sfLastExportTime: exportedAt }
+          : record));
+      }
+      MessagePlugin.success(result.rowCount === result.sourceOrderCount
+        ? `已生成 ${result.rowCount} 条顺丰待发货数据`
+        : `已将 ${result.sourceOrderCount} 条订单合并为 ${result.rowCount} 条顺丰待发货数据`);
       setExportVisible(false);
       setSelectedRecords({});
     } catch (error) {
@@ -336,6 +381,17 @@ export function SfExpress() {
     { colKey: 'products', title: '货品', width: 210, ellipsis: true, cell: ({ row }: { row: OrderRecord }) => getProductSummary(row) },
     { colKey: 'salesperson', title: '人员', width: 75, cell: ({ row }: { row: OrderRecord }) => row.salesperson || '-' },
     { colKey: 'shippingFee', title: '顺丰付款', width: 100, cell: ({ row }: { row: OrderRecord }) => getPaymentLabel(row.shippingFee) },
+    {
+      colKey: 'sfExportCount', title: '导出记录', width: 145,
+      cell: ({ row }: { row: OrderRecord }) => (
+        <div>
+          <Tag theme={Number(row.sfExportCount) > 0 ? 'primary' : 'default'} variant="light">
+            {Number(row.sfExportCount) || 0} 次
+          </Tag>
+          {row.sfLastExportTime && <div className="mt-1 text-[11px] text-gray-400">{formatDate(row.sfLastExportTime)}</div>}
+        </div>
+      ),
+    },
   ];
 
   const columns = view === 'pending' ? [
@@ -371,8 +427,6 @@ export function SfExpress() {
     { colKey: 'expressApplyTime', title: '申请时间', width: 150, cell: ({ row }: { row: OrderRecord }) => row.expressApplyTime ? formatDate(row.expressApplyTime) : '-' },
     { colKey: 'expressErrorMsg', title: '错误信息', width: 220, ellipsis: true, cell: ({ row }: { row: OrderRecord }) => row.expressErrorMsg || '-' },
   ];
-
-  const selectedList = Object.values(selectedRecords);
 
   return (
     <div className="space-y-4">
@@ -505,16 +559,35 @@ export function SfExpress() {
       >
         <div className="max-h-[68vh] space-y-5 overflow-auto pr-1">
           <div className="rounded-lg border border-blue-100 bg-blue-50/60 px-4 py-3 text-sm text-blue-700">
-            已选择 <strong>{selectedList.length}</strong> 条待发货订单。导出后订单仍保留在待处理列表，可再次导出。
+            已选择 <strong>{selectedList.length}</strong> 条待发货订单，将生成 <strong>{exportGroups.length}</strong> 条顺丰订单数据。
+            导出后原订单仍保留在待处理列表，可再次导出。
+          </div>
+          <div className="flex items-start justify-between gap-4 rounded-lg border border-gray-200 px-4 py-3">
+            <div>
+              <div className="text-sm font-medium text-gray-800">合并相同收件人的订单</div>
+              <div className="mt-1 text-xs leading-5 text-gray-500">姓名、电话、地址和付款方式完全一致时合并为一条顺丰订单，并汇总货品数量、备注和来源订单号。</div>
+            </div>
+            <Switch value={mergeSameRecipient} onChange={value => setMergeSameRecipient(!!value)} />
           </div>
           <div className="max-h-44 overflow-auto rounded-lg border border-gray-200">
             <table className="w-full table-fixed text-left text-xs">
               <thead className="sticky top-0 bg-gray-50 text-gray-500">
-                <tr><th className="w-24 px-3 py-2">收件人</th><th className="w-28 px-3 py-2">手机</th><th className="px-3 py-2">地址</th><th className="w-24 px-3 py-2">付款</th></tr>
+                <tr><th className="w-56 px-3 py-2">收件信息</th><th className="w-20 px-3 py-2">订单数</th><th className="px-3 py-2">来源订单/货品</th><th className="w-20 px-3 py-2">付款</th></tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {selectedList.map(record => (
-                  <tr key={record._id}><td className="px-3 py-2">{record.consignee}</td><td className="px-3 py-2">{record.consigneePhone}</td><td className="px-3 py-2">{record.consigneeAddress}</td><td className="px-3 py-2">{getPaymentLabel(record.shippingFee)}</td></tr>
+                {exportGroups.map(group => (
+                  <tr key={group.key}>
+                    <td className="px-3 py-2">
+                      <div>{group.record.consignee}，{group.record.consigneePhone}</div>
+                      <div className="mt-1 text-gray-400">{group.record.consigneeAddress}</div>
+                    </td>
+                    <td className="px-3 py-2">{group.sourceRecords.length} 条</td>
+                    <td className="px-3 py-2">
+                      <div>{group.sourceRecords.map(record => record.onlineOrderNumber || `序号${record.serialNumber}`).join('、')}</div>
+                      <div className="mt-1 text-gray-400">{getProductSummary(group.record)}</div>
+                    </td>
+                    <td className="px-3 py-2">{getPaymentLabel(group.record.shippingFee)}</td>
+                  </tr>
                 ))}
               </tbody>
             </table>

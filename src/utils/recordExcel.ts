@@ -32,22 +32,29 @@ export function exportInboundRecordsExcel(
   const sortedRecords = [...records].sort((a, b) => (
     (extractDateString(b.inboundDate) || '').localeCompare(extractDateString(a.inboundDate) || '')
   ));
-  const rows: Array<Array<string | number>> = [
-    ['入库日期', '客户名称', '渠道类型', '渠道名称', '快递单号', '手机型号及数量', '总数量', '是否异常', '备注'],
-    ...sortedRecords.map(record => [
+  const dataRows = sortedRecords.flatMap(record => {
+    const products = record.phoneModels?.length > 0
+      ? record.phoneModels
+      : [{ model: '', quantity: 0 }];
+
+    return products.map(product => [
       extractDateString(record.inboundDate) || '',
       record.customerName || '',
       getChannelLabel(record.type) || record.type || '',
       record.shopName || '',
       record.trackingNumber || '',
-      formatModels(record),
-      getTotalQuantity(record),
+      product.model || '',
+      product.quantity || 0,
       record.hasIssue ? '是' : '否',
       record.remark || '',
-    ]),
+    ]);
+  });
+  const rows: Array<Array<string | number>> = [
+    ['入库日期', '客户名称', '渠道类型', '渠道名称', '快递单号', '手机型号', '数量', '是否异常', '备注'],
+    ...dataRows,
   ];
 
-  writeWorkbook(rows, [12, 20, 12, 16, 22, 36, 10, 10, 30], '入库记录', formatFilename('入库记录', startDate, endDate));
+  writeWorkbook(rows, [12, 20, 12, 16, 22, 28, 10, 10, 30], '入库记录', formatFilename('入库记录', startDate, endDate));
 }
 
 export function exportOutboundRecordsExcel(records: OutboundRecord[], startDate: string, endDate: string) {

@@ -10,6 +10,16 @@ export interface SfExportConfig {
   senderAddress: string;
 }
 
+export interface SfExportGroup {
+  key: string;
+  record: OrderRecord;
+  sourceRecords: OrderRecord[];
+}
+
+export interface SfExportOptions {
+  mergeSameRecipient?: boolean;
+}
+
 export const DEFAULT_SF_EXPORT_CONFIG: SfExportConfig = {
   senderName: '汇创',
   senderMobile: '18123809373',
@@ -107,6 +117,88 @@ function buildSfRemark(record: OrderRecord): string {
   ].filter(Boolean).join('；'), 200);
 }
 
+function getRecipientGroupKey(record: OrderRecord): string {
+  const payment = getSfPayment(record.shippingFee);
+  return [
+    normalizeText(record.consignee, 100).replace(/\s+/g, '').toLocaleLowerCase('zh-CN'),
+    normalizeText(record.consigneePhone, 20).replace(/\s+/g, ''),
+    normalizeText(record.consigneeAddress, 200).replace(/\s+/g, '').toLocaleLowerCase('zh-CN'),
+    payment.method,
+    payment.monthlyCard,
+  ].join('\u0001');
+}
+
+function aggregateProducts(records: OrderRecord[]) {
+  const products = new Map<string, ReturnType<typeof getOrderProducts>[number]>();
+  for (const record of records) {
+    for (const product of getOrderProducts(record)) {
+      const brand = String(product.brand || '').trim();
+      const productName = String(product.productName || '').trim();
+      const specification = String(product.specification || '').trim();
+      const key = [brand, productName, specification].join('\u0001');
+      const existing = products.get(key);
+      if (existing) {
+        existing.quantity = (Number(existing.quantity) || 0) + (Number(product.quantity) || 0);
+      } else {
+        products.set(key, {
+          ...product,
+          brand,
+          productName,
+          specification,
+          quantity: Number(product.quantity) || 0,
+        });
+      }
+    }
+  }
+  return Array.from(products.values());
+}
+
+function buildMergedRecord(records: OrderRecord[]): OrderRecord {
+  const first = records[0];
+  if (records.length === 1) return first;
+
+  const sourceReferences = Array.from(new Set(records.map(record => {
+    const onlineOrderNumber = String(record.onlineOrderNumber || '').trim();
+    return onlineOrderNumber
+      ? `${onlineOrderNumber}（序号${record.serialNumber}）`
+      : `序号${record.serialNumber}`;
+  })));
+  const remarks = Array.from(new Set(
+    records.map(record => String(record.customerRemark || '').trim()).filter(Boolean)
+  ));
+
+  return {
+    ...first,
+    _id: `sf-merged-${first._id}`,
+    onlineOrderNumber: sourceReferences.join('、'),
+    products: aggregateProducts(records),
+    customerRemark: [`来源订单：${sourceReferences.join('、')}`, ...remarks].join('；'),
+  };
+}
+
+/**
+ * 将同一收件人的订单整理为顺丰导出分组。
+ * 姓名、电话、去空格地址和付款方式均一致时才允许合并。
+ */
+export function buildSfExportGroups(records: OrderRecord[], mergeSameRecipient = true): SfExportGroup[] {
+  if (!mergeSameRecipient) {
+    return records.map(record => ({ key: record._id, record, sourceRecords: [record] }));
+  }
+
+  const groups = new Map<string, OrderRecord[]>();
+  for (const record of records) {
+    const key = getRecipientGroupKey(record);
+    const group = groups.get(key);
+    if (group) group.push(record);
+    else groups.set(key, [record]);
+  }
+  return Array.from(groups.entries()).map(([key, sourceRecords]) => ({
+    key,
+    sourceRecords,
+    record: buildMergedRecord(sourceRecords),
+  }));
+}
+
 const SF_COLUMNS = 'ABCDEFGHIJKLMNOP'.split('');
 const DATA_CELL_STYLES: Record<string, string> = { A: '47', B: '47', D: '48' };
 
@@ -154,7 +246,15 @@ function downloadWorkbook(bytes: Uint8Array, fileName: string): void {
 }
 
 /** 将勾选的待发货订单写入顺丰线下订单模板并触发下载。 */
-export async function exportSfOfflineOrders(records: OrderRecord[], config: SfExportConfig): Promise<void> {
+export async function exportSfOfflineOrders(
+  records: OrderRecord[],
+  config: SfExportConfig,
+  options: SfExportOptions = {},
+): Promise<{ rowCount: number; sourceOrderCount: number }> {
+  const groups = buildSfExportGroups(records, options.mergeSameRecipient !== false);
+  const exportRecords = groups.map(group => group.record);
+  if (exportRecords.length === 0) throw new Error('没有可导出的顺丰订单');
+
   const response = await fetch(getTemplateUrl());
   if (!response.ok) throw new Error(`顺丰模板加载失败（HTTP ${response.status}）`);
 
@@ -162,9 +262,10 @@ export async function exportSfOfflineOrders(records: OrderRecord[], config: SfEx
   const worksheetPath = 'xl/worksheets/sheet1.xml';
   const worksheet = files[worksheetPath];
   if (!worksheet) throw new Error('顺丰模板缺少“填写模板”工作表');
-  files[worksheetPath] = strToU8(fillTemplateSheet(strFromU8(worksheet), records, config));
+  files[worksheetPath] = strToU8(fillTemplateSheet(strFromU8(worksheet), exportRecords, config));
 
   const now = new Date();
   const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-  downloadWorkbook(zipSync(files, { level: 6 }), `顺丰待发货订单_${date}_${records.length}条.xlsx`);
+  downloadWorkbook(zipSync(files, { level: 6 }), `顺丰待发货订单_${date}_${exportRecords.length}条.xlsx`);
+  return { rowCount: exportRecords.length, sourceOrderCount: records.length };
 }
