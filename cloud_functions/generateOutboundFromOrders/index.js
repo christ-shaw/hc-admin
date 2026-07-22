@@ -182,30 +182,34 @@ exports.main = async (event) => {
       }
     }
 
-    // 2. 同一客户校验
-    const customerName = String(orders[0].customerName || '').trim();
-    if (!orders.every(o => String(o.customerName || '').trim() === customerName)) {
+    // 2. 同一收件信息校验
+    const first = orders[0];
+    const consignee = String(first.consignee || '').trim();
+    const recipientKey = [first.consignee, first.consigneePhone, first.consigneeAddress]
+      .map(value => String(value || '').trim()).join('|');
+    if (!orders.every(o => [o.consignee, o.consigneePhone, o.consigneeAddress]
+      .map(value => String(value || '').trim()).join('|') === recipientKey)) {
       await transaction.rollback();
-      return { success: false, code: 'MIXED_CUSTOMER', errMsg: '合并的订单必须属于同一客户' };
+      return { success: false, code: 'MIXED_RECIPIENT', errMsg: '合并的订单必须使用相同的收件人、电话和地址' };
     }
 
     // 3. 聚合货品并建出库单；备注缺省时带入各订单客服备注（去重拼接）
     const phoneModels = aggregatePhoneModels(orders);
-    const first = orders[0];
     const now = db.serverDate();
     const effectiveRemark = remark || Array.from(new Set(
       orders.map(o => String(o.customerRemark || '').trim()).filter(Boolean)
     )).join('；');
     const addRes = await transaction.collection(OUTBOUND).add({
       data: {
-        customerName,
+        // 出库记录的主名称展示收件人；无收件人的历史兼容场景才回退订单人。
+        customerName: consignee || String(first.customerName || '').trim(),
         outboundStatus: 'pending',
         source: 'order',
         orderIds,
         shippingMethod,
         remark: effectiveRemark,
         salesperson: first.salesperson || '',
-        consignee: first.consignee || '',
+        consignee,
         consigneePhone: first.consigneePhone || '',
         consigneeAddress: first.consigneeAddress || '',
         phoneModels,

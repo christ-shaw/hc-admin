@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Table, Button, Input, Dialog, MessagePlugin, Textarea } from 'tdesign-react';
 import { ClipboardPaste, Plus, Sparkles } from 'lucide-react';
 import { CompanyTemplate } from '../types';
+import { useTabDirty } from '../contexts/TabWorkspaceContext';
 import { useCompanies } from '../hooks/useCompanies';
 import { parseCompanyInfo } from '../lib/cloudbase';
 
@@ -31,6 +32,13 @@ export function Companies() {
   const [importText, setImportText] = useState('');
   const [readingClipboard, setReadingClipboard] = useState(false);
   const [parsing, setParsing] = useState(false);
+  const editInitialRef = useRef('');
+  useTabDirty(
+    (addVisible && JSON.stringify(addForm) !== JSON.stringify(EMPTY_COMPANY))
+      || (editVisible && JSON.stringify(editForm) !== editInitialRef.current)
+      || (importVisible && !!importText.trim()),
+    '公司信息',
+  );
 
   useEffect(() => {
     companies.fetchRecords();
@@ -115,7 +123,7 @@ export function Companies() {
   /** 编辑 */
   const handleEditOpen = (record: CompanyTemplate) => {
     setEditId(record._id);
-    setEditForm({
+    const form = {
       companyName: record.companyName,
       taxId: record.taxId,
       registeredAddress: record.registeredAddress,
@@ -123,7 +131,9 @@ export function Companies() {
       bankName: record.bankName,
       bankAccount: record.bankAccount,
       bankCode: record.bankCode,
-    });
+    };
+    setEditForm(form);
+    editInitialRef.current = JSON.stringify(form);
     setEditVisible(true);
   };
 

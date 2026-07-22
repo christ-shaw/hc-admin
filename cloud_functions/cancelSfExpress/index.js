@@ -339,9 +339,8 @@ exports.main = async (event) => {
     }
 
     await updateOrder(orderId, {
-      status: 'unknown',
+      status: 'unshipped',
       trackingNumber: '',
-      shippingFee: '',
       expressProvider: 'sf',
       sfEnv: config.env,
       expressApplyStatus: 'cancelled',

@@ -119,6 +119,14 @@ function formatOrderPaymentAccount(record: OrderRecord): string {
   return splits.map(split => `${split.account || '-'} ¥${split.amount || 0}`).join('；');
 }
 
+/** 单价导出最多保留两位小数，避免浮点计算产生多余小数位。 */
+function formatExportUnitPrice(value: unknown): number | '' {
+  if (value === '' || value === undefined || value === null) return '';
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) return '';
+  return Math.round((numericValue + Number.EPSILON) * 100) / 100;
+}
+
 /** 从 Excel 文件解析订单数据 */
 export function parseOrderExcel(file: File): Promise<OrderRecord[]> {
   return new Promise((resolve, reject) => {
@@ -233,6 +241,7 @@ export function exportOrderExcel(records: OrderRecord[], filename?: string): voi
         if (c.key === 'brand' && typeof val === 'string') return getBrandLabel(val);
         if ((c.key === 'productName' || c.key === 'transferProductName') && typeof val === 'string') return getProductLabel(val);
         if (c.key === 'paymentAccount') return formatOrderPaymentAccount(r);
+        if (c.key === 'unitPrice') return formatExportUnitPrice(val);
         const dict = DICT_FIELDS[c.key];
         if (dict && typeof val === 'string' && val) return getDictLabel(dict, val);
         return val ?? '';
@@ -242,6 +251,17 @@ export function exportOrderExcel(records: OrderRecord[], filename?: string): voi
 
   const wsData = [headerRow, ...dataRows];
   const ws = XLSX.utils.aoa_to_sheet(wsData);
+
+  // 按实际精度设置单元格格式，避免部分表格软件用 0.## 显示出多余的小数点。
+  const unitPriceColumnIndex = EXPORT_COLUMNS.findIndex(column => column.key === 'unitPrice');
+  for (let rowIndex = 1; rowIndex < wsData.length; rowIndex += 1) {
+    const cell = ws[XLSX.utils.encode_cell({ r: rowIndex, c: unitPriceColumnIndex })];
+    if (cell?.t === 'n') {
+      const scaledPrice = Math.round(Number(cell.v) * 100);
+      const decimalPlaces = scaledPrice % 100 === 0 ? 0 : scaledPrice % 10 === 0 ? 1 : 2;
+      cell.z = decimalPlaces === 0 ? '0' : decimalPlaces === 1 ? '0.0' : '0.00';
+    }
+  }
 
   // 设置列宽
   ws['!cols'] = EXPORT_COLUMNS.map((c) => {

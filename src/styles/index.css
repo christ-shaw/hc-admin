@@ -112,4 +112,18 @@
   .order-basic-form-field .t-select__wrap {
     width: 100%;
   }
+
+  .workspace-tabs-scroll {
+    scrollbar-width: thin;
+    scrollbar-color: #d1d5db transparent;
+  }
+
+  .workspace-tabs-scroll::-webkit-scrollbar {
+    height: 4px;
+  }
+
+  .workspace-tabs-scroll::-webkit-scrollbar-thumb {
+    background: #d1d5db;
+    border-radius: 9999px;
+  }
 }

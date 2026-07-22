@@ -262,6 +262,7 @@ export interface ProductItem {
 
 /** 订单筛选条件 */
 export interface OrderFilters {
+  serialNumber?: string;
   customerName?: string;
   salesperson?: string;
   salesChannel?: string;

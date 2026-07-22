@@ -1,0 +1,10 @@
+{
+  "name": "querySfExpressOrders",
+  "version": "1.0.0",
+  "description": "查询顺丰快递工作台订单",
+  "main": "index.js",
+  "dependencies": {
+    "@cloudbase/node-sdk": "^3.16.0",
+    "wx-server-sdk": "~2.6.3"
+  }
+}

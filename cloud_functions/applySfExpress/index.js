@@ -15,8 +15,7 @@
  * SF_PROD_CLIENT_CODE      生产客户编码（可选，优先于 SF_CLIENT_CODE）
  * SF_SANDBOX_SERVICE_URL   沙箱业务接口地址（可选）
  * SF_PROD_SERVICE_URL      生产业务接口地址（可选）
- * SF_PAY_METHOD            付款方式，默认 1
- * SF_MONTHLY_CARD          顺丰月结卡号（可选）
+ * SF_MONTHLY_CARD          顺丰月结卡号（包邮/寄方月结订单必填）
  * SF_EXPRESS_TYPE_ID       快件产品类别，默认 1
  * SF_PARCEL_QTY            包裹数，默认 1
  * SF_SENDER_MAP            按订单人员切换寄件人，JSON 对象（可选）
@@ -42,6 +41,7 @@ cloud.init({
 const db = cloud.database();
 
 const ORDERS_COLLECTION = 'orders';
+const OUTBOUND_COLLECTION = 'outbound_records';
 const TOKEN_COLLECTION = 'sf_tokens';
 const CONFIG_COLLECTION = 'system_config';
 const SF_CONFIG_DOC_ID = 'sf_express';
@@ -111,7 +111,6 @@ function getSfConfig(env) {
     env,
     partnerID,
     serviceUrl,
-    payMethod: getPositiveIntegerEnv('SF_PAY_METHOD', 1),
     monthlyCard: getFirstEnv(['SF_MONTHLY_CARD', 'SF_MONTHLY_CARD_NO']),
     expressTypeId: getPositiveIntegerEnv('SF_EXPRESS_TYPE_ID', 1),
     parcelQty: getPositiveIntegerEnv('SF_PARCEL_QTY', 1),
@@ -120,7 +119,32 @@ function getSfConfig(env) {
 }
 
 function isApplicableOrderStatus(status) {
-  return status === 'unknown' || status === '--';
+  return status === 'unknown' || status === '--' || status === 'unshipped';
+}
+
+function normalizeShippingFee(value) {
+  const normalized = trimString(value);
+  if (['prepaid', '包邮', '寄付月结'].includes(normalized)) return 'prepaid';
+  if (['cod', '到付', '收方付'].includes(normalized)) return 'cod';
+  if (['pickup', '自提'].includes(normalized)) return 'pickup';
+  return normalized;
+}
+
+function getOrderPaymentConfig(order, config) {
+  const shippingFee = normalizeShippingFee(order.shippingFee);
+  if (shippingFee === 'prepaid') {
+    if (!config.monthlyCard) {
+      throw new Error('包邮订单缺少顺丰月结卡号配置 SF_MONTHLY_CARD');
+    }
+    return { payMethod: 1, monthlyCard: config.monthlyCard };
+  }
+  if (shippingFee === 'cod') {
+    return { payMethod: 2, monthlyCard: '' };
+  }
+  if (shippingFee === 'pickup') {
+    throw new Error('自提订单不能生成顺丰单');
+  }
+  throw new Error('订单缺少包邮/到付快递方式，无法生成顺丰单');
 }
 
 function isMobilePhone(phone) {
@@ -318,19 +342,20 @@ function buildCargoDetails(order) {
 }
 
 function buildMsgData(order, sfOrderId, sender, config) {
+  const payment = getOrderPaymentConfig(order, config);
   const msgData = {
     language: 'zh-CN',
     orderId: sfOrderId,
     cargoDetails: buildCargoDetails(order),
     contactInfoList: buildContactInfoList(order, sender),
-    payMethod: config.payMethod,
+    payMethod: payment.payMethod,
     expressTypeId: config.expressTypeId,
     parcelQty: config.parcelQty,
     remark: trimString(order.customerRemark).slice(0, 100),
   };
 
-  if (config.monthlyCard) {
-    msgData.monthlyCard = config.monthlyCard;
+  if (payment.monthlyCard) {
+    msgData.monthlyCard = payment.monthlyCard;
   }
 
   return msgData;
@@ -343,6 +368,17 @@ async function getOrder(orderId) {
   } catch (err) {
     if (err.errCode === -1 || String(err.message || '').includes('not exist')) return null;
     throw err;
+  }
+}
+
+async function resolveOrderShippingFee(order) {
+  if (!order || trimString(order.shippingFee) || !trimString(order.outboundRecordId)) return order;
+  try {
+    const result = await db.collection(OUTBOUND_COLLECTION).doc(trimString(order.outboundRecordId)).get();
+    const shippingMethod = trimString(result.data && result.data.shippingMethod);
+    return shippingMethod ? { ...order, shippingFee: shippingMethod } : order;
+  } catch (err) {
+    return order;
   }
 }
 
@@ -572,7 +608,7 @@ exports.main = async (event) => {
   try {
     const env = await resolveSfEnv();
     const config = getSfConfig(env);
-    const order = await getOrder(orderId);
+    const order = await resolveOrderShippingFee(await getOrder(orderId));
     validateOrder(order);
     const sender = getSenderConfig(order);
 

@@ -59,6 +59,11 @@ export function getTotalQuantity(record: { phoneModels?: { quantity?: number }[]
   return 0;
 }
 
+/** 出库记录展示收件人；历史/手工记录没有 consignee 时回退 customerName。 */
+export function getOutboundRecipientName(record: { consignee?: string; customerName?: string }): string {
+  return String(record.consignee || '').trim() || String(record.customerName || '').trim() || '-';
+}
+
 /** 获取渠道类型文本 */
 export function getChannelTypeText(channelType: string | undefined): string {
   if (!channelType) return '-';

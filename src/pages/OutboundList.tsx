@@ -6,12 +6,13 @@ import { OUTBOUND_STATUS_MAP } from '../data/dict';
 import { useOutbound } from '../hooks/useOutbound';
 import { useLogs } from '../hooks/useLogs';
 import { useStorage } from '../hooks/useStorage';
-import { formatDate, getTotalQuantity } from '../utils/format';
+import { formatDate, getOutboundRecipientName, getTotalQuantity } from '../utils/format';
 import { getCurrentOperatorName } from '../lib/cloudbase';
 import { RecordDetail } from '../components/RecordDetail';
 import { RecordEdit } from '../components/RecordEdit';
 import { exportOutboundRecordsExcel } from '../utils/recordExcel';
 import { RecordExportDialog } from '../components/RecordExportDialog';
+import { useTabDirty } from '../contexts/TabWorkspaceContext';
 
 export function OutboundList() {
   const outbound = useOutbound();
@@ -25,6 +26,8 @@ export function OutboundList() {
   const [filters, setFilters] = useState<OutboundFilters>({});
   const [exportVisible, setExportVisible] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [editDirty, setEditDirty] = useState(false);
+  useTabDirty(editVisible && editDirty, '出库记录');
 
   useEffect(() => {
     outbound.fetchRecords();
@@ -115,7 +118,7 @@ export function OutboundList() {
       const st = row.outboundStatus === 'pending' ? 'pending' : 'completed';
       return <Tag theme={st === 'pending' ? 'warning' : 'success'} variant="light">{OUTBOUND_STATUS_MAP[st]}</Tag>;
     } },
-    { colKey: 'customerName', title: '客户名称', width: 140, ellipsis: true },
+    { colKey: 'customerName', title: '收件人', width: 140, ellipsis: true, cell: ({ row }: { row: OutboundRecord }) => getOutboundRecipientName(row) },
     { colKey: 'trackingNumber', title: '快递单号', width: 140, cell: ({ row }: { row: OutboundRecord }) => row.trackingNumber || '-' },
     { colKey: 'phoneModels', title: '手机型号', width: 200, cell: ({ row }: { row: OutboundRecord }) =>
       row.phoneModels?.map(m => `${m.model} x${m.quantity}`).join(', ') || '-'
@@ -211,6 +214,7 @@ export function OutboundList() {
         type="outbound"
         onClose={() => setEditVisible(false)}
         onSave={handleSave}
+        onDirtyChange={setEditDirty}
       />
 
       {/* 删除确认 */}

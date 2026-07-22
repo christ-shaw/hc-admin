@@ -9,6 +9,7 @@ import { useSuppliers } from '../hooks/useSuppliers';
 import { usePurchases, type PurchaseRecord } from '../hooks/usePurchases';
 import { useDictionaries } from '../contexts/DictionaryContext';
 import { DICT_CODES } from '../data/dict';
+import { useTabDirty } from '../contexts/TabWorkspaceContext';
 
 interface PurchaseForm {
   date: string;
@@ -113,6 +114,18 @@ export function Purchases() {
   const [returnForm, setReturnForm] = useState({ quantity: 1, reason: '', remark: '' });
   const [returnSaving, setReturnSaving] = useState(false);
   const voucherInputRef = useRef<HTMLInputElement>(null);
+  const createInitialRef = useRef('');
+  const paymentInitialRef = useRef('');
+  const returnInitialRef = useRef('');
+
+  useTabDirty(
+    (createOpen && !!createInitialRef.current && JSON.stringify(form) !== createInitialRef.current)
+      || (!!paymentTarget && !!paymentInitialRef.current && (
+        JSON.stringify(paymentForm) !== paymentInitialRef.current || voucherFiles.length > 0
+      ))
+      || (!!returnTarget && !!returnInitialRef.current && JSON.stringify(returnForm) !== returnInitialRef.current),
+    '采购管理',
+  );
 
   const canCreate = can('purchases:create') || can('orders:create');
   const canReturn = can('purchases:update');
@@ -182,7 +195,9 @@ export function Purchases() {
   };
 
   const openCreate = () => {
-    setForm(emptyForm(currentOwner));
+    const nextForm = emptyForm(currentOwner);
+    setForm(nextForm);
+    createInitialRef.current = JSON.stringify(nextForm);
     setCreateOpen(true);
   };
 
@@ -191,8 +206,10 @@ export function Purchases() {
       MessagePlugin.warning('该采购单已完成结算，不能再登记退货');
       return;
     }
+    const nextForm = { quantity: 1, reason: '', remark: '' };
     setReturnTarget(record);
-    setReturnForm({ quantity: 1, reason: '', remark: '' });
+    setReturnForm(nextForm);
+    returnInitialRef.current = JSON.stringify(nextForm);
   };
 
   const updateBrand = (brand: string) => {
@@ -286,13 +303,15 @@ export function Purchases() {
     setVoucherFiles([]);
     setVoucherUrls([]);
     setVoucherLoading(false);
-    setPaymentForm({
+    const nextPaymentForm = {
       date: record.payment?.date || localDateValue(),
       splits: record.payment?.splits?.length
         ? record.payment.splits.map(item => ({ ...item }))
         : [{ account: record.payment?.account || '', amount: record.payment?.amount || record.payableAmount || record.totalAmount || record.quantity * record.unitPrice }],
       remark: record.payment?.remark || '',
-    });
+    };
+    setPaymentForm(nextPaymentForm);
+    paymentInitialRef.current = JSON.stringify(nextPaymentForm);
 
     const vouchers = record.payment?.vouchers || [];
     if (vouchers.length > 0) {

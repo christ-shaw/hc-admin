@@ -6,6 +6,7 @@ import { useInvoices } from '../hooks/useInvoices';
 import { callFunction, getCurrentOperatorName, uploadToCloudStorage, getCloudFileURLs } from '../lib/cloudbase';
 import { formatDate } from '../utils/format';
 import { DICT_CODES, useDictionaries } from '../contexts/DictionaryContext';
+import { useTabDirty } from '../contexts/TabWorkspaceContext';
 
 const STATUS_TAG_THEME: Record<string, 'success' | 'warning' | 'danger' | 'default'> = {
   paid: 'success',
@@ -177,6 +178,20 @@ export function Invoices() {
   const [previewRecord, setPreviewRecord] = useState<InvoiceRecord | null>(null);
   const [previewUrls, setPreviewUrls] = useState<Array<{ fileID: string; tempFileURL: string; fileName: string }>>([]);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const addInitialRef = useRef('');
+  const editInitialRef = useRef('');
+
+  useTabDirty(
+    (addVisible && !!addInitialRef.current && (
+      JSON.stringify(addForm) !== addInitialRef.current || addAttachFiles.length > 0
+    ))
+      || (editVisible && !!editInitialRef.current && (
+        JSON.stringify({ form: editForm, attachments: editExistingAttachments }) !== editInitialRef.current
+        || editAttachFiles.length > 0
+      ))
+      || (invoiceUploadVisible && uploadFiles.length > 0),
+    '开票管理',
+  );
 
   useEffect(() => {
     invoices.fetchRecords();
@@ -270,7 +285,9 @@ export function Invoices() {
     const today = new Date();
     const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
     const applicant = await getCurrentOperatorName();
-    setAddForm({ ...EMPTY_INVOICE, applyDate: dateStr, applicant });
+    const form = { ...EMPTY_INVOICE, applyDate: dateStr, applicant };
+    setAddForm(form);
+    addInitialRef.current = JSON.stringify(form);
     setAddStep(1);
     setAddAttachFiles([]);
     setAddVisible(true);
@@ -398,10 +415,7 @@ export function Invoices() {
 
   /** 编辑 */
   const handleEditOpen = (record: InvoiceRecord) => {
-    setEditId(record._id);
-    setEditExistingAttachments(record.attachments || []);
-    setEditAttachFiles([]);
-    setEditForm({
+    const form = {
       applyDate: record.applyDate,
       companyName: record.companyName,
       applicant: record.applicant,
@@ -422,7 +436,12 @@ export function Invoices() {
       invoiceFiles: record.invoiceFiles,
       attachments: record.attachments,
       completedTime: record.completedTime,
-    });
+    };
+    setEditId(record._id);
+    setEditExistingAttachments(record.attachments || []);
+    setEditAttachFiles([]);
+    setEditForm(form);
+    editInitialRef.current = JSON.stringify({ form, attachments: record.attachments || [] });
     setEditVisible(true);
   };
 

@@ -12,6 +12,7 @@ import { RecordEdit } from '../components/RecordEdit';
 import { DICT_CODES, useDictionaries } from '../contexts/DictionaryContext';
 import { exportInboundRecordsExcel } from '../utils/recordExcel';
 import { RecordExportDialog } from '../components/RecordExportDialog';
+import { useTabDirty } from '../contexts/TabWorkspaceContext';
 
 export function InboundList() {
   const inbound = useInbound();
@@ -29,6 +30,8 @@ export function InboundList() {
   const [channelTypeFilter, setChannelTypeFilter] = useState('');
   const [exportVisible, setExportVisible] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [editDirty, setEditDirty] = useState(false);
+  useTabDirty(editVisible && editDirty, '入库记录');
 
   useEffect(() => {
     inbound.fetchRecords();
@@ -229,6 +232,7 @@ export function InboundList() {
         type="inbound"
         onClose={() => setEditVisible(false)}
         onSave={handleSave}
+        onDirtyChange={setEditDirty}
       />
 
       {/* 删除确认 */}

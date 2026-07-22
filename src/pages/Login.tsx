@@ -49,7 +49,7 @@ export function Login() {
     const rawFrom = (location.state as any)?.from?.pathname || '/';
     // 避免跳回禁止访问页或登录页本身
     const from = ['/forbidden', '/login'].includes(rawFrom) ? '/' : rawFrom;
-    navigate(from, { replace: true });
+    navigate(from, { replace: true, state: { restoreWorkspace: from === '/' } });
   };
 
   return (

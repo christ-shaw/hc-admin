@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Dialog, Tag, Loading } from 'tdesign-react';
 import { InboundRecord, OutboundRecord } from '../types';
-import { formatDate, getTotalQuantity } from '../utils/format';
+import { formatDate, getOutboundRecipientName, getTotalQuantity } from '../utils/format';
 import { useLogs } from '../hooks/useLogs';
 import { DICT_CODES, useDictionaries } from '../contexts/DictionaryContext';
 import { getCloudFileURLs } from '../lib/cloudbase';
@@ -103,7 +103,10 @@ export function RecordDetail({ visible, record, type, onClose, onEdit, onDelete 
         }
       >
         <div className="space-y-3">
-          <DetailItem label="客户名称" value={record.customerName} />
+          <DetailItem
+            label={isInbound ? '客户名称' : '收件人'}
+            value={isInbound ? record.customerName : getOutboundRecipientName(record as OutboundRecord)}
+          />
           <DetailItem label="日期" value={isInbound ? formatDate((record as InboundRecord).inboundDate) : formatDate((record as OutboundRecord).outboundDate)} />
           {isInbound && (
             <>

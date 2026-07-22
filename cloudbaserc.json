@@ -141,6 +141,11 @@
       "runtime": "Nodejs18.15"
     },
     {
+      "name": "querySfExpressOrders",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
       "name": "saveOrders",
       "handler": "index.main",
       "runtime": "Nodejs18.15"

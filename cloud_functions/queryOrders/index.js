@@ -19,6 +19,7 @@ exports.main = async (event, context) => {
   const {
     limit = 20,
     cursor,
+    serialNumber,
     customerName,
     salesperson,
     salesChannel,
@@ -37,6 +38,14 @@ exports.main = async (event, context) => {
   try {
     // 构建查询条件
     const conditions = {};
+
+    if (serialNumber !== undefined && serialNumber !== null && String(serialNumber).trim() !== '') {
+      const parsedSerialNumber = Number(String(serialNumber).trim());
+      if (!Number.isSafeInteger(parsedSerialNumber) || parsedSerialNumber < 0) {
+        throw new Error('序号必须为非负整数');
+      }
+      conditions.serialNumber = parsedSerialNumber;
+    }
 
     if (customerName) {
       conditions.customerName = db.RegExp({

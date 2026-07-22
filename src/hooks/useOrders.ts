@@ -287,9 +287,8 @@ export function useOrders() {
           ...prev,
           records: prev.records.map(r => r._id === _id ? {
             ...r,
-            status: 'unknown',
+            status: 'unshipped',
             trackingNumber: '',
-            shippingFee: '',
             expressProvider: 'sf',
             sfEnv: result.env || r.sfEnv,
             expressApplyStatus: 'cancelled',

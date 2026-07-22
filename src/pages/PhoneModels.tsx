@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Dialog, Input, MessagePlugin, Switch, Textarea } from 'tdesign-react';
 import { Plus, UploadCloud } from 'lucide-react';
 import { usePhoneModels } from '../hooks/usePhoneModels';
 import { PhoneBrand, PhoneModelSpec, PhoneProduct } from '../types';
 import { buildProductModelSeed } from '../data/productDict';
 import { usePermission } from '../contexts/PermissionContext';
+import { useTabDirty } from '../contexts/TabWorkspaceContext';
 
 type DialogMode = 'brand' | 'product' | 'spec';
 
@@ -117,6 +118,18 @@ export function PhoneModels() {
   const [selectedBrand, setSelectedBrand] = useState('');
   const [selectedProduct, setSelectedProduct] = useState('');
   const [dialog, setDialog] = useState<DialogState>(EMPTY_DIALOG);
+  const [dialogInitial, setDialogInitial] = useState('');
+  const dialogWasVisibleRef = useRef(false);
+
+  useEffect(() => {
+    if (dialog.visible && !dialogWasVisibleRef.current) {
+      setDialogInitial(JSON.stringify(dialog));
+    }
+    if (!dialog.visible) setDialogInitial('');
+    dialogWasVisibleRef.current = dialog.visible;
+  }, [dialog]);
+
+  useTabDirty(dialog.visible && !!dialogInitial && JSON.stringify(dialog) !== dialogInitial, '型号管理');
 
   useEffect(() => {
     loadBrands();

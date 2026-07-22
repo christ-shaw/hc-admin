@@ -16,6 +16,7 @@ import { UserRoleTab } from '../components/UserRoleTab';
 import { LoginLogTab } from '../components/LoginLogTab';
 import { DictionaryManageTab } from '../components/DictionaryManageTab';
 import { SupplierManageTab } from '../components/SupplierManageTab';
+import { useTabDirty } from '../contexts/TabWorkspaceContext';
 
 interface InitializePermissionResult {
   success: boolean;
@@ -185,6 +186,7 @@ export function SettingsPage() {
 
   const hasChanged = counterValue !== savedValue;
   const sfEnvChanged = sfEnv !== savedSfEnv;
+  useTabDirty(hasChanged || sfEnvChanged, '系统设置');
   const showPermissionBootstrap = permissionStatus === 'uninitialized' && canInitialize;
   const canUpdateSettings = can('settings:update');
   const canManageRoles = can('settings:role_manage');
@@ -301,7 +303,7 @@ export function SettingsPage() {
                 </div>
               </div>
 
-              {/* 顺丰下单环境（功能暂未开放，SF_EXPRESS_UI_ENABLED 控制显隐） */}
+              {/* 顺丰下单环境（SF_EXPRESS_UI_ENABLED 控制显隐） */}
               {SF_EXPRESS_UI_ENABLED && (
               <div className="rounded-lg border border-gray-100 p-5">
                 <div className="flex items-center gap-3 mb-4">

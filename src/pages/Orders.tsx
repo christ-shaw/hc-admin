@@ -8,12 +8,6 @@ import { useOrders } from '../hooks/useOrders';
 import { usePhoneModels } from '../hooks/usePhoneModels';
 import { formatDate, getTotalQuantity } from '../utils/format';
 import { parseOrderExcel, exportOrderExcel } from '../utils/orderExcel';
-import {
-  exportSfOfflineOrders,
-  loadSfExportConfig,
-  saveSfExportConfig,
-  type SfExportConfig,
-} from '../utils/sfOrderExcel';
 import { getOrderProducts, getOrderTotalAmount, getOrderTotalQuantity, getOrderPaymentSplits, hasUnreceivedPayment } from '../utils/orderProducts';
 import { getBrandLabel, getProductLabel } from '../data/dict';
 import {
@@ -24,8 +18,9 @@ import {
   getCurrentPermissionUserPayload,
   uploadToCloudStorage,
 } from '../lib/cloudbase';
-import { PAGE_SIZE, SF_EXPRESS_UI_ENABLED } from '../utils/constants';
+import { PAGE_SIZE } from '../utils/constants';
 import { DICT_CODES, useDictionaries } from '../contexts/DictionaryContext';
+import { useTabDirty } from '../contexts/TabWorkspaceContext';
 
 /** ========== 预计算静态 options（模块级常量，避免每次渲染重建） ========== */
 const PLACEHOLDER_OPTION = { label: '请选择', value: '' };
@@ -102,11 +97,21 @@ interface OrderFormData {
 
 /** 新建订单时"保存后自动生成待出库单"选项 */
 interface AutoOutboundOption {
-  enabled: boolean;
-  shippingMethod: string;
+  enabled: boolean | null;
 }
 
-const DEFAULT_AUTO_OUTBOUND: AutoOutboundOption = { enabled: true, shippingMethod: 'prepaid' };
+const DEFAULT_AUTO_OUTBOUND: AutoOutboundOption = { enabled: null };
+
+const CONSIGNEE_PHONE_PATTERN = /^\d{6,20}$/;
+
+function hasCompleteOutboundDetails(form: OrderFormData): boolean {
+  return !!(
+    form.consignee.trim()
+    && CONSIGNEE_PHONE_PATTERN.test(form.consigneePhone.trim())
+    && form.consigneeAddress.trim()
+    && form.shippingFee
+  );
+}
 
 interface OrderWizardDictionaries {
   ORDER_SOURCE_MAP: Record<string, string>;
@@ -188,16 +193,6 @@ function isPendingShipmentStatus(status: string | undefined): boolean {
   return status === 'unknown' || status === '--' || status === 'unshipped';
 }
 
-function isSfTemplateExportEligible(record: OrderRecord): boolean {
-  const shippingFee = String(record.shippingFee || '').trim();
-  return isPendingShipmentStatus(record.status)
-    && record.needsOutbound !== false
-    && !record.trackingNumber
-    && !record.sfWaybillNo
-    && !['pickup', '自提'].includes(shippingFee)
-    && (!!shippingFee || !!record.outboundRecordId);
-}
-
 // 终态：不随「需要出库」开关改写的订单状态
 const TERMINAL_ORDER_STATUSES = new Set(['shipped', 'returnReceived', 'returnShipped']);
 
@@ -217,27 +212,6 @@ function applyNeedsOutbound(prev: OrderFormData, needsOutbound: boolean): OrderF
     shippingFee: status === 'shipped' ? prev.shippingFee : '',
     trackingNumber: status === 'shipped' ? prev.trackingNumber : '',
   };
-}
-
-function isExpressApplicableStatus(status: string | undefined): boolean {
-  return isPendingShipmentStatus(status);
-}
-
-function canApplySfExpressOrder(record: OrderRecord): boolean {
-  return isExpressApplicableStatus(record.status)
-    && !record.trackingNumber
-    && !record.sfWaybillNo
-    && record.expressApplyStatus !== 'applying';
-}
-
-function canCancelExpressOrder(record: OrderRecord): boolean {
-  const hasSfOrderInfo = !!(record.sfOrderId || record.sfWaybillNo || (record.expressProvider === 'sf' && record.trackingNumber));
-  return hasSfOrderInfo && !['applying', 'cancelled'].includes(record.expressApplyStatus || '');
-}
-
-function canQuerySfOrder(record: OrderRecord): boolean {
-  const hasSfTrace = !!(record.sfOrderId || record.sfWaybillNo || record.expressProvider === 'sf');
-  return hasSfTrace && record.expressApplyStatus !== 'cancelled';
 }
 
 function isVirtualProductOrder(products: ProductItem[]): boolean {
@@ -594,12 +568,10 @@ export function Orders() {
   const [importing, setImporting] = useState(false);
   const [importPreviewVisible, setImportPreviewVisible] = useState(false);
   const [importPreviewData, setImportPreviewData] = useState<OrderRecord[]>([]);
-  const [applyingExpressId, setApplyingExpressId] = useState<string | null>(null);
-  const [queryingSfResultId, setQueryingSfResultId] = useState<string | null>(null);
-  const [cancelingSfId, setCancelingSfId] = useState<string | null>(null);
   const [showMoreFilters, setShowMoreFilters] = useState(false);
   const [addVisible, setAddVisible] = useState(false);
   const [addForm, setAddForm] = useState<OrderFormData>(EMPTY_ORDER);
+  const [addNeedsOutboundDecision, setAddNeedsOutboundDecision] = useState<boolean | null>(null);
   const [addAutoOutbound, setAddAutoOutbound] = useState<AutoOutboundOption>(DEFAULT_AUTO_OUTBOUND);
   const [saving, setSaving] = useState(false);
   const [editVisible, setEditVisible] = useState(false);
@@ -662,17 +634,25 @@ export function Orders() {
   const [exportChannels, setExportChannels] = useState<string[]>([]); // 空=全部
   const [exportSalespersons, setExportSalespersons] = useState<string[]>([]); // 空=全部
   const [exporting, setExporting] = useState(false);
-  const [sfExportVisible, setSfExportVisible] = useState(false);
-  const [sfExportPreparing, setSfExportPreparing] = useState(false);
-  const [sfExporting, setSfExporting] = useState(false);
-  const [sfExportRecords, setSfExportRecords] = useState<OrderRecord[]>([]);
-  const [sfExportConfig, setSfExportConfig] = useState<SfExportConfig>(loadSfExportConfig);
+  const editInitialRef = useRef('');
+  const exportInitialRef = useRef('');
+  const ordersInitialLoadedRef = useRef(false);
+  const handledLocationKeysRef = useRef(new Set<string>());
 
   useEffect(() => {
+    if (location.pathname !== '/orders') return;
     const state = location.state as { filter?: OrderFilters } | null;
+    const hasNavigationFilter = !!state?.filter;
+    if (hasNavigationFilter && handledLocationKeysRef.current.has(location.key)) return;
+    if (!hasNavigationFilter && ordersInitialLoadedRef.current) return;
+    handledLocationKeysRef.current.add(location.key);
+    ordersInitialLoadedRef.current = true;
     const stateFilter = state?.filter || {};
     const initialFilters: OrderFilters = {};
 
+    if (stateFilter.serialNumber) {
+      initialFilters.serialNumber = stateFilter.serialNumber.trim();
+    }
     if (stateFilter.onlineOrderNumber) {
       initialFilters.onlineOrderNumber = stateFilter.onlineOrderNumber.trim();
     } else if (stateFilter.customerName) {
@@ -685,12 +665,13 @@ export function Orders() {
 
     setFilters(initialFilters);
     orders.fetchRecords(null, initialFilters);
-  }, [location.state]);
+  }, [location.key, location.pathname, location.state]);
 
   const handleSearch = () => {
     orders.resetFilters();
     const searchFilters: OrderFilters = { ...filters };
     // trim 字符串字段，避免前后空格导致查不到
+    if (searchFilters.serialNumber) searchFilters.serialNumber = searchFilters.serialNumber.trim();
     if (searchFilters.customerName) searchFilters.customerName = searchFilters.customerName.trim();
     if (searchFilters.onlineOrderNumber) searchFilters.onlineOrderNumber = searchFilters.onlineOrderNumber.trim();
     orders.fetchRecords(null, searchFilters);
@@ -704,77 +685,12 @@ export function Orders() {
   };
 
   // 折叠区内生效的筛选数，收起时在「更多筛选」按钮上提示，避免隐藏筛选无感知
-  const moreFilterCount = [filters.salesperson, filters.orderType, filters.status, filters.abnormalStatus].filter(Boolean).length;
+  const moreFilterCount = [filters.serialNumber, filters.salesperson, filters.orderType, filters.status, filters.abnormalStatus].filter(Boolean).length;
 
   const handleDetail = useCallback((record: OrderRecord) => {
     setCurrentRecord(record);
     setDetailVisible(true);
   }, []);
-
-  const handleApplyExpress = useCallback(async (record: OrderRecord) => {
-    if (!record._id || applyingExpressId) return;
-    if (!isExpressApplicableStatus(record.status)) {
-      MessagePlugin.warning('仅订单状态为 -- 的订单可申请快递');
-      return;
-    }
-    if (record.trackingNumber || record.sfWaybillNo) {
-      MessagePlugin.warning('订单已存在快递单号，请勿重复申请');
-      return;
-    }
-
-    setApplyingExpressId(record._id);
-    try {
-      const result = await orders.applySfExpress(record._id);
-      if (result.success) {
-        MessagePlugin.success(`顺丰下单成功，运单号：${result.waybillNo || '-'}`);
-      } else {
-        MessagePlugin.error(result.errMsg || '顺丰下单失败');
-      }
-    } finally {
-      setApplyingExpressId(null);
-    }
-  }, [applyingExpressId, orders]);
-
-  const handleQuerySfOrderResult = useCallback(async (record: OrderRecord) => {
-    if (!record._id || queryingSfResultId) return;
-    if (!canQuerySfOrder(record)) {
-      MessagePlugin.warning('请先申请快递，生成顺丰订单后再查询');
-      return;
-    }
-
-    setQueryingSfResultId(record._id);
-    try {
-      const result = await orders.querySfOrderResult(record._id);
-      if (result.success) {
-        MessagePlugin.success(`顺丰订单已更新，运单号：${result.waybillNo || '-'}`);
-      } else {
-        MessagePlugin.error(result.errMsg || '查询顺丰订单失败');
-      }
-    } finally {
-      setQueryingSfResultId(null);
-    }
-  }, [orders, queryingSfResultId]);
-
-  const handleCancelSfExpress = useCallback(async (record: OrderRecord) => {
-    if (!record._id || cancelingSfId) return;
-    if (!record.sfOrderId && !record.sfWaybillNo && !record.trackingNumber) {
-      MessagePlugin.warning('订单缺少顺丰订单信息，无法取消');
-      return;
-    }
-    if (!window.confirm('确认取消这笔顺丰发货吗？取消后的顺丰客户订单号不能重复使用。')) return;
-
-    setCancelingSfId(record._id);
-    try {
-      const result = await orders.cancelSfExpress(record._id);
-      if (result.success) {
-        MessagePlugin.success('顺丰发货已取消');
-      } else {
-        MessagePlugin.error(result.errMsg || '取消顺丰发货失败');
-      }
-    } finally {
-      setCancelingSfId(null);
-    }
-  }, [cancelingSfId, orders]);
 
   /** 导入 Excel */
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -847,6 +763,7 @@ export function Orders() {
     setExportChannels([]);
     setExportSalespersons([]);
     setExportStep(1);
+    exportInitialRef.current = JSON.stringify({ startDate, endDate, channels: [], salespersons: [], step: 1 });
     setExportVisible(true);
   };
 
@@ -916,116 +833,6 @@ export function Orders() {
     }
   };
 
-  const getSelectedSfRecords = (): OrderRecord[] => {
-    const selectedKeys = new Set(selectedRowKeys.map(String));
-    return orders.getAllRecords().filter(record => selectedKeys.has(String(record._id)));
-  };
-
-  const resolveSfShippingFees = async (records: OrderRecord[]): Promise<OrderRecord[]> => {
-    const outboundIds = Array.from(new Set(
-      records.filter(record => !record.shippingFee && record.outboundRecordId)
-        .map(record => record.outboundRecordId as string)
-    ));
-    if (outboundIds.length === 0) return records;
-
-    const currentUser = await getCurrentPermissionUserPayload().catch(() => null);
-    const outboundShippingFees = new Map<string, string>();
-    await Promise.all(outboundIds.map(async outboundId => {
-      const result = await callFunction<{ success?: boolean; data?: OutboundRecord[]; errMsg?: string }>('queryRecords', {
-        data: { type: 'outbound', _id: outboundId, limit: 1, cursor: null, currentUser },
-      });
-      if (result.success === false) throw new Error(result.errMsg || '读取出库单快递方式失败');
-      const shippingMethod = String(result.data?.[0]?.shippingMethod || '').trim();
-      if (shippingMethod) outboundShippingFees.set(outboundId, shippingMethod);
-    }));
-
-    return records.map(record => ({
-      ...record,
-      shippingFee: record.shippingFee || outboundShippingFees.get(record.outboundRecordId || '') || '',
-    }));
-  };
-
-  /** 打开顺丰模板导出确认。 */
-  const handleOpenSfExport = async () => {
-    const selectedRecords = getSelectedSfRecords();
-    if (selectedRecords.length === 0) {
-      MessagePlugin.warning('请先勾选需要发货的订单');
-      return;
-    }
-
-    const ineligible = selectedRecords.filter(record => !isSfTemplateExportEligible(record));
-    if (ineligible.length > 0) {
-      MessagePlugin.warning(`所选订单中有 ${ineligible.length} 条不是可快递发货订单，可能为自提、已发货或缺少出库信息`);
-      return;
-    }
-
-    const invalidReceiver = selectedRecords.find(record =>
-      !record.consignee?.trim()
-      || !record.consigneePhone?.trim()
-      || !/^\d{6,20}$/.test(record.consigneePhone.trim())
-      || !record.consigneeAddress?.trim()
-    );
-    if (invalidReceiver) {
-      const label = invalidReceiver.onlineOrderNumber || invalidReceiver.customerName || `序号 ${invalidReceiver.serialNumber}`;
-      MessagePlugin.warning(`订单「${label}」的收件人、手机或详细地址不完整，请先编辑订单`);
-      return;
-    }
-
-    setSfExportPreparing(true);
-    try {
-      const resolvedRecords = await resolveSfShippingFees(selectedRecords);
-      const invalidShipping = resolvedRecords.find(record => !['prepaid', 'cod', '包邮', '到付', '寄付月结', '收方付'].includes(record.shippingFee));
-      if (invalidShipping) {
-        const label = invalidShipping.onlineOrderNumber || invalidShipping.customerName || `序号 ${invalidShipping.serialNumber}`;
-        MessagePlugin.warning(`订单「${label}」缺少包邮/到付信息，无法生成顺丰模板`);
-        return;
-      }
-      setSfExportRecords(resolvedRecords);
-      setSfExportConfig(loadSfExportConfig());
-      setSfExportVisible(true);
-    } catch (err) {
-      MessagePlugin.error('读取订单快递方式失败: ' + String(err));
-    } finally {
-      setSfExportPreparing(false);
-    }
-  };
-
-  const handleSfExportExec = async () => {
-    const selectedRecords = sfExportRecords;
-    if (selectedRecords.length === 0) {
-      MessagePlugin.warning('当前没有已勾选的订单');
-      return;
-    }
-    if (!sfExportConfig.senderName.trim()) {
-      MessagePlugin.warning('请填写寄件人');
-      return;
-    }
-    if (!sfExportConfig.senderMobile.trim() && !sfExportConfig.senderPhone.trim()) {
-      MessagePlugin.warning('寄件人手机和电话至少填写一个');
-      return;
-    }
-    if (sfExportConfig.senderMobile.trim() && !/^\d{6,20}$/.test(sfExportConfig.senderMobile.trim())) {
-      MessagePlugin.warning('寄件人手机只能填写 6–20 位数字');
-      return;
-    }
-    if (!sfExportConfig.senderAddress.trim()) {
-      MessagePlugin.warning('请填写寄件人详细地址');
-      return;
-    }
-
-    setSfExporting(true);
-    try {
-      saveSfExportConfig(sfExportConfig);
-      await exportSfOfflineOrders(selectedRecords, sfExportConfig);
-      MessagePlugin.success(`已生成 ${selectedRecords.length} 条顺丰待发货数据`);
-      setSfExportVisible(false);
-    } catch (err) {
-      MessagePlugin.error('顺丰模板导出失败: ' + String(err));
-    } finally {
-      setSfExporting(false);
-    }
-  };
-
   /** 新增订单 — 打开向导 Step 1 */
   const handleAddOpen = async () => {
     const today = new Date();
@@ -1033,11 +840,19 @@ export function Orders() {
     const operatorName = await getCurrentOperatorName();
     const nickname = operatorName || SALESPERSONS[0];
     setAddForm({ ...EMPTY_ORDER, date: dateStr, salesperson: nickname, products: [{ ...EMPTY_PRODUCT }] });
+    setAddNeedsOutboundDecision(null);
     setAddAutoOutbound(DEFAULT_AUTO_OUTBOUND);
     setAddAttachFiles([]);
     setAddStep(1);
     setAddVisible(true);
   };
+
+  /** 新建订单必须显式确认是否出库；每次改变该决定都重新确认自动生成。 */
+  const handleAddOutboundDecisionChange = useCallback((value: boolean | null) => {
+    setAddNeedsOutboundDecision(value);
+    setAddAutoOutbound(DEFAULT_AUTO_OUTBOUND);
+    setAddForm(prev => applyNeedsOutbound(prev, value === true));
+  }, []);
 
   /** 新增向导 — 下一步校验 */
   const handleAddNext = () => {
@@ -1065,7 +880,19 @@ export function Orders() {
       if (addForm.products.some(p => p.productName === '部分转租赁2' || p.productName === '全部转租赁2') && addForm.transferProducts.some(t => !t.paidRent || t.paidRent <= 0)) { MessagePlugin.warning('转租赁2请填写已交租金'); return; }
     }
     if (addStep === 4) {
-      const { status } = getEffectiveShipmentFields(addForm);
+      const virtualProductOrder = isVirtualProductOrder(addForm.products);
+      if (!virtualProductOrder && addNeedsOutboundDecision === null) {
+        MessagePlugin.warning('请选择是否需要出库'); return;
+      }
+      if (!virtualProductOrder && addNeedsOutboundDecision === true) {
+        if (!addForm.consignee.trim()) { MessagePlugin.warning('请填写收货人名称'); return; }
+        if (!CONSIGNEE_PHONE_PATTERN.test(addForm.consigneePhone.trim())) {
+          MessagePlugin.warning('收货人电话只能填写 6–20 位数字'); return;
+        }
+        if (!addForm.consigneeAddress.trim()) { MessagePlugin.warning('请填写收货人地址'); return; }
+        if (!addForm.shippingFee) { MessagePlugin.warning('请选择快递方式'); return; }
+        if (addAutoOutbound.enabled === null) { MessagePlugin.warning('请选择是否自动生成出库单'); return; }
+      }
     }
     if (addStep === 5) {
       const needReturnStatus = addForm.orderType === 'postRentalShip' || addForm.orderType === 'postRentalReturn';
@@ -1085,6 +912,7 @@ export function Orders() {
         addForm.salesChannel || addForm.channelCategory ||
         addForm.consignee.trim() || addForm.consigneePhone.trim() || addForm.consigneeAddress.trim() ||
         addForm.shippingFee || addForm.trackingNumber.trim() ||
+        addNeedsOutboundDecision !== null || addAutoOutbound.enabled !== null ||
         addForm.customerRemark.trim() ||
         addForm.transferProducts.some(t => t.brand || t.productName || t.specification || t.paidPeriod || t.paidRent) ||
         addAttachFiles.length > 0) return true;
@@ -1092,6 +920,23 @@ export function Orders() {
     if (addForm.paymentSplits.some(split => split.account || split.amount > 0)) return true;
     return addForm.products.some(p => p.brand || p.productName || p.specification || p.quantity || p.unitPrice);
   };
+
+  const exportState = JSON.stringify({
+    startDate: exportDateStart,
+    endDate: exportDateEnd,
+    channels: exportChannels,
+    salespersons: exportSalespersons,
+    step: exportStep,
+  });
+  const orderPageDirty = (addVisible && isAddFormDirty())
+    || (editVisible && (JSON.stringify(editForm) !== editInitialRef.current || editAttachFiles.length > 0))
+    || importPreviewVisible
+    || (exportVisible && !!exportInitialRef.current && exportState !== exportInitialRef.current)
+    || (!!manualTrackingTarget && manualTrackingVisible && (
+      manualTrackingNumber !== (manualTrackingTarget.trackingNumber || '')
+      || manualTrackingShippingFee !== (manualTrackingTarget.shippingFee || 'prepaid')
+    ));
+  useTabDirty(orderPageDirty, '订单管理');
 
   const handleRequestCloseAdd = () => {
     if (isAddFormDirty()) {
@@ -1108,6 +953,8 @@ export function Orders() {
     setAddVisible(false);
     setAddStep(1);
     setAddForm(EMPTY_ORDER);
+    setAddNeedsOutboundDecision(null);
+    setAddAutoOutbound(DEFAULT_AUTO_OUTBOUND);
     setAddAttachFiles([]);
   };
 
@@ -1153,12 +1000,10 @@ export function Orders() {
         products: addForm.products.map(serializeProductForSave),
         ...serializeOrderPayment(addForm),
         trackingNumber: shipmentFields.trackingNumber,
-        consignee: addForm.consignee,
-        consigneePhone: addForm.consigneePhone,
-        consigneeAddress: addForm.consigneeAddress,
-        shippingFee: isPendingShipmentStatus(shipmentFields.status) && addForm.needsOutbound
-          ? addAutoOutbound.shippingMethod
-          : shipmentFields.shippingFee,
+        consignee: addForm.needsOutbound ? addForm.consignee.trim() : '',
+        consigneePhone: addForm.needsOutbound ? addForm.consigneePhone.trim() : '',
+        consigneeAddress: addForm.needsOutbound ? addForm.consigneeAddress.trim() : '',
+        shippingFee: addForm.needsOutbound ? shipmentFields.shippingFee : '',
         status: shipmentFields.status,
         customerRemark: addForm.customerRemark,
         transferBrand: firstTransfer?.brand || '',
@@ -1178,8 +1023,8 @@ export function Orders() {
         MessagePlugin.success(newRecord.products && newRecord.products.length > 1 ? `新增订单成功，含 ${newRecord.products.length} 条货品` : '新增订单成功');
         // 勾选了"保存后自动生成待出库单"且订单为待发货时，自动生成；失败不影响订单已创建
         const newOrderId = result.savedIds?.[0];
-        if (addAutoOutbound.enabled && addForm.needsOutbound && newOrderId && isPendingShipmentStatus(shipmentFields.status)) {
-          const gen = await orders.generateOutbound([newOrderId], addAutoOutbound.shippingMethod, addForm.customerRemark.trim());
+        if (addAutoOutbound.enabled === true && addForm.needsOutbound && newOrderId && isPendingShipmentStatus(shipmentFields.status)) {
+          const gen = await orders.generateOutbound([newOrderId], addForm.shippingFee, addForm.customerRemark.trim());
           if (gen.success) {
             MessagePlugin.success('已自动生成待出库单');
           } else {
@@ -1189,6 +1034,8 @@ export function Orders() {
         setAddVisible(false);
         setAddStep(1);
         setAddForm(EMPTY_ORDER);
+        setAddNeedsOutboundDecision(null);
+        setAddAutoOutbound(DEFAULT_AUTO_OUTBOUND);
         setAddAttachFiles([]);
       } else {
         MessagePlugin.error('新增失败: ' + (result.errMsg || '未知错误'));
@@ -1202,10 +1049,12 @@ export function Orders() {
 
   /** 编辑订单 */
   const handleEditOpen = useCallback((record: OrderRecord) => {
+    const form = buildEditFormFromRecord(record);
     setEditId(record._id);
     setEditStep(1);
     setEditAttachFiles([]);
-    setEditForm(buildEditFormFromRecord(record));
+    setEditForm(form);
+    editInitialRef.current = JSON.stringify(form);
     setEditVisible(true);
   }, []);
 
@@ -1355,15 +1204,17 @@ export function Orders() {
     openGenerateDialog([record]);
   }, [openGenerateDialog]);
 
-  // 合并多订单生成一个出库单：校验同客户、均需出库、均未生成、均待发货
+  // 合并多订单生成一个出库单：校验同收件信息、均需出库、均未生成、均待发货
   const handleMergeGenerateOpen = useCallback(() => {
     const selected = orders.getAllRecords().filter(r => selectedRowKeys.includes(r._id));
     if (selected.length < 2) { MessagePlugin.warning('请至少选择 2 条订单合并'); return; }
     const bad = selected.find(r => !r.needsOutbound || !isPendingShipmentStatus(r.status) || r.outboundRecordId);
     if (bad) { MessagePlugin.warning('所选订单须均为「需要出库 + 未发货 + 未生成出库单」'); return; }
-    const customer = (selected[0].customerName || '').trim();
-    if (!selected.every(r => (r.customerName || '').trim() === customer)) {
-      MessagePlugin.warning('合并的订单必须属于同一客户'); return;
+    const recipientKey = [selected[0].consignee, selected[0].consigneePhone, selected[0].consigneeAddress]
+      .map(value => String(value || '').trim()).join('|');
+    if (!selected.every(r => [r.consignee, r.consigneePhone, r.consigneeAddress]
+      .map(value => String(value || '').trim()).join('|') === recipientKey)) {
+      MessagePlugin.warning('合并的订单必须使用相同的收件人、电话和地址'); return;
     }
     openGenerateDialog(selected);
   }, [orders, selectedRowKeys, openGenerateDialog]);
@@ -1747,37 +1598,13 @@ export function Orders() {
       },
     },
     {
-      colKey: 'op', title: '操作', width: SF_EXPRESS_UI_ENABLED ? 390 : 240, fixed: 'right' as const,
+      colKey: 'op', title: '操作', width: 240, fixed: 'right' as const,
       cell: ({ row }: { row: OrderRecord }) => (
         <div className="flex gap-1 flex-wrap">
           <Button variant="text" theme="primary" size="small"
             onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleDetail(row); }}>
             详情
           </Button>
-          {SF_EXPRESS_UI_ENABLED && (
-            <Button variant="text" theme="primary" size="small"
-              loading={applyingExpressId === row._id}
-              disabled={!canApplySfExpressOrder(row) || (!!applyingExpressId && applyingExpressId !== row._id)}
-              onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleApplyExpress(row); }}>
-              生成顺丰单
-            </Button>
-          )}
-          {SF_EXPRESS_UI_ENABLED && (
-            <Button variant="text" theme="primary" size="small"
-              loading={queryingSfResultId === row._id}
-              disabled={!canQuerySfOrder(row) || (!!queryingSfResultId && queryingSfResultId !== row._id)}
-              onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleQuerySfOrderResult(row); }}>
-              查询顺丰
-            </Button>
-          )}
-          {SF_EXPRESS_UI_ENABLED && canCancelExpressOrder(row) && (
-            <Button variant="text" theme="danger" size="small"
-              loading={cancelingSfId === row._id}
-              disabled={!!cancelingSfId && cancelingSfId !== row._id}
-              onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleCancelSfExpress(row); }}>
-              取消快递单
-            </Button>
-          )}
           {row.needsOutbound && isPendingShipmentStatus(row.status) && !row.outboundRecordId && (
             <Button variant="text" theme="primary" size="small"
               onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleGenerateOutboundOpen(row); }}>
@@ -1817,7 +1644,7 @@ export function Orders() {
         </div>
       ),
     },
-  ], [handleDetail, handleViewOutbound, handleApplyExpress, handleQuerySfOrderResult, handleCancelSfExpress, handleIntroduction, handleEditOpen, handleManualTrackingOpen, handleShipOpen, handleGenerateOutboundOpen, handleAfterSaleInboundOpen, handleDeleteConfirm, applyingExpressId, queryingSfResultId, cancelingSfId, ORDER_TYPE_MAP, SALES_CHANNEL_MAP, ORDER_ATTRIBUTE_MAP, ORDER_STATUS_MAP]);
+  ], [handleDetail, handleViewOutbound, handleIntroduction, handleEditOpen, handleManualTrackingOpen, handleShipOpen, handleGenerateOutboundOpen, handleAfterSaleInboundOpen, handleDeleteConfirm, ORDER_TYPE_MAP, SALES_CHANNEL_MAP, ORDER_ATTRIBUTE_MAP, ORDER_STATUS_MAP]);
 
   const displayRecords = orders.getPageRecords(orders.currentPage);
   const hasLoadedNextPage = orders.currentPage * PAGE_SIZE < orders.records.length;
@@ -1841,11 +1668,6 @@ export function Orders() {
           <p className="text-gray-500 mt-1">管理所有订单</p>
         </div>
         <div className="flex flex-wrap justify-end gap-2">
-          {selectedRowKeys.length > 0 && (
-            <Button theme="primary" icon={<FileDown size={16} />} loading={sfExportPreparing} onClick={handleOpenSfExport}>
-              导出顺丰模板（{selectedRowKeys.length}）
-            </Button>
-          )}
           {selectedRowKeys.length >= 2 && (
             <Button theme="primary" variant="outline" onClick={handleMergeGenerateOpen}>
               合并生成出库单（{selectedRowKeys.length}）
@@ -1916,6 +1738,11 @@ export function Orders() {
 
         {showMoreFilters && (
           <div className="flex flex-wrap gap-3 items-end mt-3 pt-3 border-t border-dashed border-gray-200">
+            <div className="w-40">
+              <label className="block text-xs text-gray-500 mb-1">序号</label>
+              <Input type="number" placeholder="请输入序号" value={filters.serialNumber || ''}
+                onChange={(val) => setFilters(prev => ({ ...prev, serialNumber: val as string }))} />
+            </div>
             <div className="w-40">
               <label className="block text-xs text-gray-500 mb-1">人员</label>
               <Select placeholder="请选择人员" value={filters.salesperson || ''}
@@ -2111,8 +1938,7 @@ export function Orders() {
                 : <StatusPill theme="success" label="已出库" />;
             })()} />
             <DetailRow label="出库时间" value={formatDate(outboundDetail.outboundDate, false)} />
-            <DetailRow label="客户名称" value={outboundDetail.customerName} />
-            {outboundDetail.consignee && <DetailRow label="收货人" value={outboundDetail.consignee} />}
+            <DetailRow label="收件人" value={outboundDetail.consignee || outboundDetail.customerName || '-'} />
             {outboundDetail.shippingMethod && <DetailRow label="快递方式" value={getDictLabel(SHIPPING_FEE_MAP, outboundDetail.shippingMethod)} />}
             <DetailRow label="快递单号" value={outboundDetail.trackingNumber || '-'} />
             <DetailRow label="手机型号" value={formatPhoneModels(outboundDetail.phoneModels)} />
@@ -2406,82 +2232,6 @@ export function Orders() {
         </div>
       </Dialog>
 
-      {/* 顺丰线下模板导出 */}
-      <Dialog
-        header="导出顺丰待发货模板"
-        visible={sfExportVisible}
-        onClose={() => setSfExportVisible(false)}
-        width="780px"
-        footer={
-          <div className="flex justify-end gap-2">
-            <Button onClick={() => setSfExportVisible(false)}>取消</Button>
-            <Button theme="primary" icon={<FileDown size={16} />} loading={sfExporting} onClick={handleSfExportExec}>
-              生成顺丰 Excel
-            </Button>
-          </div>
-        }
-      >
-        <div className="max-h-[68vh] space-y-5 overflow-auto pr-1">
-          <div className="rounded-lg border border-blue-100 bg-blue-50/60 px-4 py-3 text-sm text-blue-700">
-            已选择 <strong>{sfExportRecords.length}</strong> 条待发货订单。收件信息、包邮/到付、订单备注和发货型号会自动读取订单数据。
-          </div>
-
-          <section>
-            <h3 className="mb-2 text-sm font-medium text-gray-800">待发货收件清单</h3>
-            <div className="max-h-40 overflow-auto rounded-lg border border-gray-200">
-              <table className="w-full table-fixed text-left text-xs">
-                <thead className="sticky top-0 bg-gray-50 text-gray-500">
-                  <tr>
-                    <th className="w-28 px-3 py-2 font-medium">收件人</th>
-                    <th className="w-32 px-3 py-2 font-medium">手机</th>
-                    <th className="px-3 py-2 font-medium">详细地址</th>
-                    <th className="w-28 px-3 py-2 font-medium">顺丰付款</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {sfExportRecords.map(record => (
-                    <tr key={record._id}>
-                      <td className="px-3 py-2 text-gray-800">{record.consignee}</td>
-                      <td className="px-3 py-2 text-gray-700">{record.consigneePhone}</td>
-                      <td className="px-3 py-2 text-gray-700">{record.consigneeAddress}</td>
-                      <td className="px-3 py-2 text-gray-700">{['prepaid', '包邮', '寄付月结'].includes(record.shippingFee) ? '寄付月结' : '收方付'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-
-          <section>
-            <h3 className="mb-3 text-sm font-medium text-gray-800">寄件信息</h3>
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-              <div>
-                <label className="mb-1 block text-xs text-gray-500">寄件人 <span className="text-red-500">*</span></label>
-                <Input value={sfExportConfig.senderName} maxlength={100} onChange={value => setSfExportConfig(prev => ({ ...prev, senderName: value as string }))} />
-              </div>
-              <div>
-                <label className="mb-1 block text-xs text-gray-500">寄件人手机 <span className="text-red-500">*</span></label>
-                <Input value={sfExportConfig.senderMobile} maxlength={20} onChange={value => setSfExportConfig(prev => ({ ...prev, senderMobile: value as string }))} />
-              </div>
-              <div>
-                <label className="mb-1 block text-xs text-gray-500">寄件人电话</label>
-                <Input value={sfExportConfig.senderPhone} maxlength={20} onChange={value => setSfExportConfig(prev => ({ ...prev, senderPhone: value as string }))} />
-              </div>
-              <div className="md:col-span-2">
-                <label className="mb-1 block text-xs text-gray-500">寄件人详细地址 <span className="text-red-500">*</span></label>
-                <Input value={sfExportConfig.senderAddress} maxlength={200} onChange={value => setSfExportConfig(prev => ({ ...prev, senderAddress: value as string }))} />
-              </div>
-            </div>
-          </section>
-
-          <div className="rounded-lg border border-gray-100 bg-gray-50 px-4 py-3 text-xs leading-5 text-gray-500">
-            托寄物固定为“电子产品”，物流产品固定为“顺丰标快”。包邮订单导出为“寄付月结”并自动填写月结卡号 7555396782；到付订单导出为“收方付”且月结卡号留空。通知揽件与预约时间不填写。
-          </div>
-
-          <p className="text-xs text-gray-400">寄件人配置会保存在当前浏览器；收件信息、订单备注和发货型号始终读取最新订单数据。</p>
-        </div>
-      </Dialog>
-
       {/* 导入预览弹窗 */}
       <Dialog
         header={`确认导入 (${importPreviewData.length} 条订单)`}
@@ -2558,6 +2308,8 @@ export function Orders() {
           productModelBrands={productModels.brands}
           productModelLoading={productModels.loading}
           productModelLoadError={productModels.loadError}
+          outboundDecision={addNeedsOutboundDecision}
+          onOutboundDecisionChange={handleAddOutboundDecisionChange}
           autoOutbound={addAutoOutbound}
           onAutoOutboundChange={setAddAutoOutbound}
         />
@@ -2842,7 +2594,7 @@ export function Orders() {
 
 /** 新增订单 6 步向导 */
 function AddOrderWizard({
-  step, form, attachFiles, attachInputRef, onChange, onAttachFilesChange, dictionaries, productModelBrands, productModelLoading = false, productModelLoadError = '', mode = 'add', autoOutbound, onAutoOutboundChange,
+  step, form, attachFiles, attachInputRef, onChange, onAttachFilesChange, dictionaries, productModelBrands, productModelLoading = false, productModelLoadError = '', mode = 'add', outboundDecision, onOutboundDecisionChange, autoOutbound, onAutoOutboundChange,
 }: {
   step: number;
   form: OrderFormData;
@@ -2855,6 +2607,8 @@ function AddOrderWizard({
   productModelLoading?: boolean;
   productModelLoadError?: string;
   mode?: 'add' | 'edit';
+  outboundDecision?: boolean | null;
+  onOutboundDecisionChange?: (value: boolean | null) => void;
   autoOutbound?: AutoOutboundOption;
   onAutoOutboundChange?: (value: AutoOutboundOption) => void;
 }) {
@@ -2925,21 +2679,26 @@ function AddOrderWizard({
     return { ...next, paymentSplits: syncOrderPaymentSplits(next) };
   }, []);
   const updateProduct = useCallback((index: number, patch: Partial<ProductItem>) => {
+    if (mode === 'add' && patch.brand !== undefined && patch.brand !== form.products[index]?.brand) {
+      onOutboundDecisionChange?.(null);
+    }
     onChange(prev => {
       const products = [...prev.products];
       products[index] = { ...products[index], ...patch };
       return applyProductsChange(prev, products);
     });
-  }, [onChange, applyProductsChange]);
+  }, [mode, form.products, onChange, onOutboundDecisionChange, applyProductsChange]);
   const addProduct = useCallback(() => {
+    if (mode === 'add') onOutboundDecisionChange?.(null);
     onChange(prev => applyProductsChange(prev, [...prev.products, { ...EMPTY_PRODUCT }]));
-  }, [onChange, applyProductsChange]);
+  }, [mode, onChange, onOutboundDecisionChange, applyProductsChange]);
   const removeProduct = useCallback((index: number) => {
+    if (mode === 'add' && form.products.length > 1) onOutboundDecisionChange?.(null);
     onChange(prev => {
       if (prev.products.length <= 1) return prev;
       return applyProductsChange(prev, prev.products.filter((_, i) => i !== index));
     });
-  }, [onChange, applyProductsChange]);
+  }, [mode, form.products.length, onChange, onOutboundDecisionChange, applyProductsChange]);
   // 订单级收款拆分编辑
   const updateOrderPaymentSplits = useCallback((splits: PaymentSplit[]) => {
     const cleanedSplits = splits.map(split => ({
@@ -3046,6 +2805,8 @@ function AddOrderWizard({
   const virtualProductOrder = useMemo(() => {
     return isVirtualProductOrder(form.products);
   }, [form.products.map(p => p.brand).join(',')]);
+  const needsOutboundForStep = mode === 'add' ? outboundDecision === true : form.needsOutbound;
+  const outboundDetailsComplete = hasCompleteOutboundDetails(form);
 
   useEffect(() => {
     if (!virtualProductOrder || form.status === 'noShip') return;
@@ -3160,6 +2921,7 @@ function AddOrderWizard({
               <label className="block text-xs text-gray-500 mb-1">订单类型 <span className="text-red-500">*</span></label>
               <Select placeholder="请选择" value={form.orderType || ''} onChange={val => {
                 const newType = val as string;
+                if (mode === 'add' && newType !== form.orderType) onOutboundDecisionChange?.(null);
                 onChange(prev => {
                   const updated = { ...prev, orderType: newType };
                   // 如果当前有虚拟产品/无品牌的货品，且货品名称不在新订单类型白名单内，清空选择（仅租赁1生效）
@@ -3173,8 +2935,8 @@ function AddOrderWizard({
                     });
                   }
                   updated.products = clearHiddenProductPaymentFields({ ...updated, products: updated.products || prev.products });
-                  // 订单类型联动「需要出库」默认值并驱动订单状态（用户后续可在收件人信息步手动改）
-                  return applyNeedsOutbound(updated, defaultNeedsOutbound(newType, updated.products));
+                  // 新建订单必须在收件人步骤显式选择；编辑订单保留原有智能联动。
+                  return applyNeedsOutbound(updated, mode === 'add' ? false : defaultNeedsOutbound(newType, updated.products));
                 });
               }} options={filteredOrderTypeOptions} />
             </div>
@@ -3375,58 +3137,55 @@ function AddOrderWizard({
         <div className="py-4">
           <h4 className="text-sm font-medium text-gray-600 mb-4">收件人信息</h4>
 
-          {/* 是否需要出库（驱动订单状态） */}
+          {/* 第一步：明确确认是否需要出库 */}
           <div className="mb-4 p-3 rounded-lg border border-gray-200 bg-gray-50">
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="text-sm text-gray-700">需要出库</div>
-                <div className="text-xs text-gray-400 mt-0.5">
-                  {virtualProductOrder
-                    ? '虚拟货品单，无需出库（订单状态：不用发货）'
-                    : (form.needsOutbound
-                      ? '需生成出库单发货（订单状态：未发货）'
-                      : '无需出库（订单状态：不用发货）')}
-                </div>
-              </div>
-              <Switch
-                value={!!form.needsOutbound}
-                disabled={virtualProductOrder}
-                onChange={val => onChange(prev => applyNeedsOutbound(prev, !!val))}
-              />
-            </div>
-          </div>
-
-          {/* 保存后自动生成待出库单（仅新建，且需要出库时） */}
-          {mode === 'add' && form.needsOutbound && autoOutbound && onAutoOutboundChange && (
-            <div className="mb-4 p-3 rounded-lg border border-gray-200 bg-gray-50">
-              <div className="flex items-center justify-between">
+            {mode === 'add' ? (
+              <>
                 <div>
-                  <div className="text-sm text-gray-700">保存后自动生成待出库单</div>
+                  <div className="text-sm text-gray-700">第一步：该订单是否需要出库？ <span className="text-red-500">*</span></div>
                   <div className="text-xs text-gray-400 mt-0.5">
-                    {autoOutbound.enabled
-                      ? '订单创建成功后自动生成待出库单，小程序端可直接发货'
-                      : '不自动生成，可稍后在订单列表点"生成出库单"'}
+                    {virtualProductOrder ? '虚拟货品单固定为无需出库' : '请主动选择，不会根据订单类型自动确认'}
                   </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  {autoOutbound.enabled && (
-                    <Select
-                      value={autoOutbound.shippingMethod}
-                      style={{ width: 96 }}
-                      options={dictToOptions(SHIPPING_FEE_MAP)}
-                      onChange={val => onAutoOutboundChange({ ...autoOutbound, shippingMethod: val as string })}
-                    />
-                  )}
-                  <Switch
-                    value={autoOutbound.enabled}
-                    onChange={val => onAutoOutboundChange({ ...autoOutbound, enabled: !!val })}
-                  />
+                {virtualProductOrder ? (
+                  <div className="mt-3 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-500">无需出库（订单状态：不用发货）</div>
+                ) : (
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      aria-pressed={outboundDecision === true}
+                      className={`rounded-lg border px-3 py-2 text-sm transition-colors ${outboundDecision === true ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-200 bg-white text-gray-600 hover:border-blue-300'}`}
+                      onClick={() => onOutboundDecisionChange?.(true)}
+                    >
+                      需要出库
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={outboundDecision === false}
+                      className={`rounded-lg border px-3 py-2 text-sm transition-colors ${outboundDecision === false ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-200 bg-white text-gray-600 hover:border-blue-300'}`}
+                      onClick={() => onOutboundDecisionChange?.(false)}
+                    >
+                      无需出库
+                    </button>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-sm text-gray-700">需要出库</div>
+                  <div className="text-xs text-gray-400 mt-0.5">
+                    {virtualProductOrder
+                      ? '虚拟货品单，无需出库（订单状态：不用发货）'
+                      : (form.needsOutbound ? '需生成出库单发货（订单状态：未发货）' : '无需出库（订单状态：不用发货）')}
+                  </div>
                 </div>
+                <Switch value={!!form.needsOutbound} disabled={virtualProductOrder} onChange={val => onChange(prev => applyNeedsOutbound(prev, !!val))} />
               </div>
-            </div>
-          )}
+            )}
+          </div>
 
-          {form.needsOutbound ? (
+          {needsOutboundForStep ? (
             <>
               <div className="mb-3 p-3 bg-blue-50/50 rounded-lg border border-blue-100">
                 <div className="flex items-center gap-2 mb-2">
@@ -3441,25 +3200,65 @@ function AddOrderWizard({
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1">收货人名称</label>
+                  <label className="block text-xs text-gray-500 mb-1">收货人名称 {mode === 'add' && <span className="text-red-500">*</span>}</label>
                   <Input placeholder="收货人名称"
                     value={form.consignee} onChange={val => updateField('consignee', val as string)} />
                 </div>
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1">收货人电话</label>
+                  <label className="block text-xs text-gray-500 mb-1">收货人电话 {mode === 'add' && <span className="text-red-500">*</span>}</label>
                   <Input placeholder="收货人电话"
                     value={form.consigneePhone} onChange={val => updateField('consigneePhone', val as string)} />
                 </div>
                 <div className="col-span-2">
-                  <label className="block text-xs text-gray-500 mb-1">收货人地址</label>
+                  <label className="block text-xs text-gray-500 mb-1">收货人地址 {mode === 'add' && <span className="text-red-500">*</span>}</label>
                   <Input placeholder="收货人地址"
                     value={form.consigneeAddress} onChange={val => updateField('consigneeAddress', val as string)} />
                 </div>
+                {mode === 'add' && (
+                  <div className="col-span-2">
+                    <label className="block text-xs text-gray-500 mb-1">快递方式 <span className="text-red-500">*</span></label>
+                    <Select placeholder="请选择快递方式" value={form.shippingFee || ''}
+                      onChange={val => updateField('shippingFee', val as string)}
+                      options={SHIPPING_FEE_OPTIONS} />
+                  </div>
+                )}
               </div>
+
+              {/* 第二步：收件信息完整后明确确认是否自动生成出库单 */}
+              {mode === 'add' && autoOutbound && onAutoOutboundChange && (
+                outboundDetailsComplete ? (
+                  <div className="mt-4 p-3 rounded-lg border border-gray-200 bg-gray-50">
+                    <div className="text-sm text-gray-700">第二步：是否自动生成出库单？ <span className="text-red-500">*</span></div>
+                    <div className="text-xs text-gray-400 mt-0.5">自动生成时将复用上方选择的快递方式</div>
+                    <div className="mt-3 grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        aria-pressed={autoOutbound.enabled === true}
+                        className={`rounded-lg border px-3 py-2 text-sm transition-colors ${autoOutbound.enabled === true ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-200 bg-white text-gray-600 hover:border-blue-300'}`}
+                        onClick={() => onAutoOutboundChange({ enabled: true })}
+                      >
+                        自动生成
+                      </button>
+                      <button
+                        type="button"
+                        aria-pressed={autoOutbound.enabled === false}
+                        className={`rounded-lg border px-3 py-2 text-sm transition-colors ${autoOutbound.enabled === false ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-200 bg-white text-gray-600 hover:border-blue-300'}`}
+                        onClick={() => onAutoOutboundChange({ enabled: false })}
+                      >
+                        暂不生成
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mt-4 rounded-lg border border-dashed border-gray-200 px-3 py-2 text-xs text-gray-400">
+                    请先完整填写收货人、有效电话、地址和快递方式，再选择是否自动生成出库单。
+                  </div>
+                )
+              )}
             </>
-          ) : (
+          ) : mode === 'edit' || outboundDecision === false || virtualProductOrder ? (
             <div className="text-xs text-gray-400 p-3">该订单无需出库，无需填写收件人信息。</div>
-          )}
+          ) : null}
         </div>
       )}
 
@@ -3603,11 +3402,22 @@ function AddOrderWizard({
               </PreviewSection>
             )}
             <PreviewSection title="收件人信息">
-              <PreviewItem label="收货人名称" value={form.consignee} />
-              <PreviewItem label="收货人电话" value={form.consigneePhone} />
-              <PreviewItem label="收货人地址" value={form.consigneeAddress} />
-              {form.status === 'shipped' && <PreviewItem label="邮寄结算方式" value={getDictLabel(SHIPPING_FEE_MAP, form.shippingFee)} />}
-              {form.status === 'shipped' && <PreviewItem label="物流单号" value={form.trackingNumber} />}
+              {mode === 'add' && <PreviewItem label="是否需要出库" value={needsOutboundForStep ? '是' : '否'} />}
+              {(mode === 'edit' || needsOutboundForStep) && (
+                <>
+                  <PreviewItem label="收货人名称" value={form.consignee} />
+                  <PreviewItem label="收货人电话" value={form.consigneePhone} />
+                  <PreviewItem label="收货人地址" value={form.consigneeAddress} />
+                </>
+              )}
+              {mode === 'add' && needsOutboundForStep && (
+                <>
+                  <PreviewItem label="快递方式" value={getDictLabel(SHIPPING_FEE_MAP, form.shippingFee)} />
+                  <PreviewItem label="自动生成出库单" value={autoOutbound?.enabled === true ? '是' : '否'} />
+                </>
+              )}
+              {mode === 'edit' && form.status === 'shipped' && <PreviewItem label="邮寄结算方式" value={getDictLabel(SHIPPING_FEE_MAP, form.shippingFee)} />}
+              {mode === 'edit' && form.status === 'shipped' && <PreviewItem label="物流单号" value={form.trackingNumber} />}
               <PreviewItem label="订单状态" value={getDictLabel(ORDER_STATUS_MAP, form.status)} />
             </PreviewSection>
             {showReturnStatus && form.returnStatus && (

@@ -2,54 +2,23 @@ import { useState, useEffect, useCallback } from 'react';
 import { Layout as TLayout, MessagePlugin } from 'tdesign-react';
 import {
   Package,
-  ArrowDownCircle,
-  ArrowUpCircle,
-  BarChart3,
-  FileText,
-  Smartphone,
-  Warehouse,
   PanelLeftClose,
   PanelLeftOpen,
-  LayoutDashboard,
   LogOut,
   User,
-  ShoppingCart,
-  ClipboardList,
-  Receipt,
-  Building2,
   Bell,
   ChevronDown,
   ChevronRight,
-  Settings,
+  X,
 } from 'lucide-react';
-import { useNavigate, useLocation } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { getCurrentUser, signOut, callFunction } from '../lib/cloudbase';
 import { usePermission } from '../contexts/PermissionContext';
 import { hasUnreceivedPayment, OrderProductSource } from '../utils/orderProducts';
+import { appNavigation, isAppNavGroup, type AppNavItem } from '../routes/appRoutes';
+import { useTabWorkspace } from '../contexts/TabWorkspaceContext';
 
 const { Header, Content, Aside } = TLayout;
-
-const navItems = [
-  { path: '/', label: '首页', Icon: LayoutDashboard },
-  { path: '/inbound', label: '入库记录', Icon: ArrowDownCircle },
-  { path: '/outbound', label: '出库记录', Icon: ArrowUpCircle },
-  { path: '/inventory', label: '库存管理', Icon: Warehouse },
-  { path: '/stats', label: '统计分析', Icon: BarChart3 },
-  { path: '/logs', label: '操作日志', Icon: FileText },
-  { path: '/models', label: '型号管理', Icon: Smartphone },
-  { path: '/orders', label: '订单管理', Icon: ShoppingCart },
-  { path: '/purchases', label: '采购管理', Icon: ClipboardList },
-  {
-    label: '发票', Icon: Receipt,
-    children: [
-      { path: '/invoices', label: '开票管理', Icon: FileText },
-      { path: '/companies', label: '公司信息', Icon: Building2 },
-    ],
-  },
-  { path: '/settings', label: '系统设置', Icon: Settings },
-];
-
-type NavItem = typeof navItems[number];
 
 interface OrderMessageRecord extends OrderProductSource {
   salesperson?: string;
@@ -72,7 +41,16 @@ function getUserDisplayName(user: { id?: string; user_metadata?: { username?: st
 
 export function AppLayout({ children }: { children: React.ReactNode }) {
   const navigate = useNavigate();
-  const location = useLocation();
+  const {
+    tabs,
+    activePath,
+    openTab,
+    closeTab,
+    closeOtherTabs,
+    closeRightTabs,
+    closeAllTabs,
+    isTabDirty,
+  } = useTabWorkspace();
   const { status: permissionStatus, canInitialize, canAccessPage } = usePermission();
   const [collapsed, setCollapsed] = useState(false);
   const sidebarToggleLabel = collapsed ? '展开侧边栏' : '收起侧边栏';
@@ -80,6 +58,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
   const [currentUser, setCurrentUser] = useState<{ id?: string; user_metadata?: { username?: string; nickName?: string } } | null>(null);
   const [pendingCount, setPendingCount] = useState(0);
   const [hasUserMessages, setHasUserMessages] = useState(false);
+  const [tabMenu, setTabMenu] = useState<{ path: string; x: number; y: number } | null>(null);
   const currentUserName = getUserDisplayName(currentUser);
 
   useEffect(() => {
@@ -156,7 +135,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
   };
 
   const isGroupActive = (children: { path: string }[]) =>
-    children.some(c => location.pathname === c.path);
+    children.some(c => activePath === c.path);
 
   const handleLogout = async () => {
     await signOut();
@@ -164,25 +143,36 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
     navigate('/login', { replace: true });
   };
 
-  const visibleNavItems = navItems
-    .map((item): NavItem | null => {
+  const visibleNavItems = appNavigation
+    .map((item): AppNavItem | null => {
       if (permissionStatus === 'loading') return null;
 
       if (permissionStatus === 'uninitialized') {
-        return canInitialize && 'path' in item && item.path === '/settings' ? item : null;
+        return canInitialize && !isAppNavGroup(item) && item.path === '/settings' ? item : null;
       }
 
       if (permissionStatus !== 'ready') return null;
 
-      if ('children' in item && item.children) {
+      if (isAppNavGroup(item)) {
         const children = item.children.filter(child => canAccessPage(child.path));
         if (children.length === 0) return null;
-        return { ...item, children } as NavItem;
+        return { ...item, children };
       }
 
-      return 'path' in item && canAccessPage(item.path) ? item : null;
+      return canAccessPage(item.path) ? item : null;
     })
-    .filter((item): item is NavItem => !!item);
+    .filter((item): item is AppNavItem => !!item);
+
+  useEffect(() => {
+    if (!tabMenu) return;
+    const closeMenu = () => setTabMenu(null);
+    window.addEventListener('click', closeMenu);
+    window.addEventListener('resize', closeMenu);
+    return () => {
+      window.removeEventListener('click', closeMenu);
+      window.removeEventListener('resize', closeMenu);
+    };
+  }, [tabMenu]);
 
   return (
     <TLayout className="h-screen">
@@ -208,7 +198,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
           <nav className="flex-1 pt-4 px-2 space-y-1">
             {visibleNavItems.map((item) => {
               // 带子菜单的分组
-              if ('children' in item && item.children) {
+              if (isAppNavGroup(item)) {
                 const groupActive = isGroupActive(item.children);
                 const expanded = expandedMenus.includes(item.label);
                 return (
@@ -237,11 +227,11 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
                     {expanded && !collapsed && (
                       <div className="ml-5 mt-1 space-y-1">
                         {item.children.map((child) => {
-                          const isActive = location.pathname === child.path;
+                          const isActive = activePath === child.path;
                           return (
                             <button
                               key={child.path}
-                              onClick={() => navigate(child.path)}
+                              onClick={() => openTab(child.path)}
                               aria-label={child.label}
                               className={`w-full relative flex items-center gap-3 px-4 py-2.5 rounded-lg cursor-pointer ${
                                 isActive
@@ -266,12 +256,12 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
               }
 
               // 普通菜单项
-              const { path, label, Icon } = item as { path: string; label: string; Icon: React.ComponentType<{ size?: number; className?: string }> };
-              const isActive = location.pathname === path;
+              const { path, label, Icon } = item;
+              const isActive = activePath === path;
               return (
                 <button
                   key={path}
-                  onClick={() => navigate(path)}
+                  onClick={() => openTab(path)}
                   aria-label={label}
                   title={collapsed ? label : undefined}
                   className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl cursor-pointer ${
@@ -289,7 +279,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
         </div>
       </Aside>
 
-      <TLayout className="min-w-0">
+      <TLayout className="min-h-0 min-w-0">
         {/* 顶栏 */}
         <Header className="!bg-white/95 border-b border-gray-100 !h-14 flex items-center justify-between px-6">
           <button
@@ -304,7 +294,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
           {/* 用户信息 + 退出 */}
           <div className="flex items-center gap-3">
             <button
-              onClick={() => navigate('/')}
+              onClick={() => openTab('/')}
               className="relative flex h-8 w-8 items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 hover:text-primary"
               title="消息提醒"
               aria-label="消息提醒"
@@ -331,16 +321,64 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
           </div>
         </Header>
 
-        {/* 内容区 */}
-        <Content className="!bg-gray-50 min-w-0 overflow-y-auto overflow-x-hidden">
-          <div className="flex min-h-full min-w-0 flex-col p-6">
-            <div className="flex-1 min-w-0">
-              {children}
-            </div>
-            <footer className="mt-8 py-4 text-center text-sm text-gray-400">
-              Copyright 2026 Hongcheng. All Rights Reserved
-            </footer>
+        <div className="relative z-[3000] flex h-11 min-w-0 items-end border-b border-gray-200 bg-white px-2">
+          <div className="workspace-tabs-scroll flex min-w-0 flex-1 gap-1 overflow-x-auto pb-1">
+            {tabs.map(tab => (
+              <button
+                key={tab.path}
+                type="button"
+                onClick={() => openTab(tab.path)}
+                onContextMenu={event => {
+                  event.preventDefault();
+                  setTabMenu({ path: tab.path, x: event.clientX, y: event.clientY });
+                }}
+                className={`group flex h-9 flex-shrink-0 items-center gap-2 rounded-lg px-3 text-sm transition-colors ${
+                  activePath === tab.path
+                    ? 'bg-blue-50 font-medium text-primary'
+                    : 'text-gray-500 hover:bg-gray-100 hover:text-gray-800'
+                }`}
+              >
+                <span className={`h-1.5 w-1.5 rounded-full ${isTabDirty(tab.path) ? 'bg-orange-500' : 'bg-transparent'}`} />
+                <span>{tab.title}</span>
+                {tab.closable && (
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`关闭${tab.title}`}
+                    onClick={event => { event.stopPropagation(); closeTab(tab.path); }}
+                    onKeyDown={event => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        closeTab(tab.path);
+                      }
+                    }}
+                    className="rounded p-0.5 text-gray-400 hover:bg-gray-200 hover:text-gray-700"
+                  >
+                    <X size={13} />
+                  </span>
+                )}
+              </button>
+            ))}
           </div>
+        </div>
+
+        {tabMenu && (
+          <div
+            className="fixed z-[6000] min-w-[132px] rounded-lg border border-gray-200 bg-white py-1 text-sm shadow-xl"
+            style={{ left: Math.min(tabMenu.x, window.innerWidth - 150), top: Math.min(tabMenu.y, window.innerHeight - 170) }}
+            onClick={event => event.stopPropagation()}
+          >
+            <button className="w-full px-4 py-2 text-left hover:bg-gray-50 disabled:text-gray-300" disabled={!tabs.find(tab => tab.path === tabMenu.path)?.closable} onClick={() => { closeTab(tabMenu.path); setTabMenu(null); }}>关闭</button>
+            <button className="w-full px-4 py-2 text-left hover:bg-gray-50" onClick={() => { closeOtherTabs(tabMenu.path); setTabMenu(null); }}>关闭其他</button>
+            <button className="w-full px-4 py-2 text-left hover:bg-gray-50" onClick={() => { closeRightTabs(tabMenu.path); setTabMenu(null); }}>关闭右侧</button>
+            <button className="w-full px-4 py-2 text-left hover:bg-gray-50" onClick={() => { closeAllTabs(); setTabMenu(null); }}>关闭全部</button>
+          </div>
+        )}
+
+        {/* 各标签页拥有独立滚动容器，切换时保持滚动位置 */}
+        <Content className="!bg-gray-50 min-h-0 min-w-0 flex-1 overflow-hidden">
+          {children}
         </Content>
       </TLayout>
     </TLayout>

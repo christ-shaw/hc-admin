@@ -21,6 +21,7 @@ const USER_ROLE_COLLECTION = 'user_roles';
 
 const READ_PERMISSION = 'settings:read';
 const UPDATE_PERMISSION = 'settings:update';
+const ORDER_READ_PERMISSION = 'orders:read';
 
 function trimString(value) {
   return String(value || '').trim();
@@ -143,8 +144,10 @@ async function requirePermission(permissions) {
   const permission = await loadCurrentPermission(currentUser);
   if (!permission.allowed) return permission;
 
-  if (!hasAnyPermission(permission.role.actionPermissions, permissions)) {
-    return { allowed: false, code: 'ACCESS_DENIED', errMsg: '无权修改系统设置' };
+  const hasOrderPageFallback = permissions.includes(ORDER_READ_PERMISSION)
+    && (permission.role.pagePermissions || []).includes('/orders');
+  if (!hasAnyPermission(permission.role.actionPermissions, permissions) && !hasOrderPageFallback) {
+    return { allowed: false, code: 'ACCESS_DENIED', errMsg: '无权访问顺丰环境配置' };
   }
 
   return { allowed: true, currentUser, role: permission.role };
@@ -203,7 +206,7 @@ exports.main = async (event) => {
 
   try {
     const permissions = action === 'get'
-      ? [READ_PERMISSION, UPDATE_PERMISSION]
+      ? [READ_PERMISSION, UPDATE_PERMISSION, ORDER_READ_PERMISSION]
       : [UPDATE_PERMISSION];
     const auth = await requirePermission(permissions);
     if (!auth.allowed) {

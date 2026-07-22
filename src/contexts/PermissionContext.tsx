@@ -137,6 +137,10 @@ export function PermissionProvider({ children }: { children: React.ReactNode }) 
     if (normalizedPath === '/purchases') {
       return pagePermissions.includes('/purchases') || pagePermissions.includes('/orders');
     }
+    // 顺丰工作台沿用订单域权限，避免存量角色需要重新配置。
+    if (normalizedPath === '/sf-express') {
+      return pagePermissions.includes('/orders');
+    }
     return pagePermissions.includes(normalizedPath);
   }, [pagePermissions]);
 
