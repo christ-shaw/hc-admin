@@ -686,7 +686,9 @@ exports.main = async (event) => {
       return ok('OK', '查询成功', {
         found: true,
         trackingNumber: String(doc.trackingNumber || '').trim(),
-        sfWaybillNo: String(doc.sfWaybillNo || '').trim(),
+        sfWaybillNo: String(doc.expressProvider || '').toLowerCase() === 'sf'
+          ? String(doc.trackingNumber || '').trim()
+          : '',
         expressProvider: doc.expressProvider || (outbound && (outbound.expressProvider || outbound.expressCompany)) || '',
         customerName: (outbound && outbound.customerName) || doc.customerName || doc.consignee || '',
         status: doc.status || '',

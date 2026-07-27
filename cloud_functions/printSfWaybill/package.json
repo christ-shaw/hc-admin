@@ -1,0 +1,10 @@
+{
+  "name": "printSfWaybill",
+  "version": "1.0.0",
+  "description": "获取顺丰丰密面单 PDF",
+  "main": "index.js",
+  "dependencies": {
+    "@cloudbase/node-sdk": "^3.16.0",
+    "wx-server-sdk": "~2.6.3"
+  }
+}

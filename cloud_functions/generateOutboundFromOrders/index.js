@@ -96,6 +96,22 @@ function isPendingShipment(status) {
   return s === 'unknown' || s === '--' || s === '' || s === 'unshipped';
 }
 
+function planInitialOutboundTracking(orders) {
+  const trackingNumbers = unique(
+    (orders || []).map(order => String(order && order.trackingNumber || '').trim())
+  );
+  if (trackingNumbers.length > 1) {
+    return {
+      action: 'conflict',
+      trackingNumbers,
+    };
+  }
+  return {
+    action: 'set',
+    trackingNumber: trackingNumbers[0] || '',
+  };
+}
+
 // 读取订单货品明细：新结构 products 数组，旧扁平字段回退为单货品
 function getOrderProducts(order) {
   if (Array.isArray(order.products) && order.products.length > 0) return order.products;
@@ -138,6 +154,35 @@ function aggregatePhoneModels(orders) {
     }
   }
   return order.map(model => ({ model, quantity: map.get(model) }));
+}
+
+function buildPhoneModelsRemark(phoneModels) {
+  const summary = (phoneModels || [])
+    .map(item => {
+      const model = String(item && item.model || '').trim();
+      if (!model) return '';
+      const quantity = Number(item && item.quantity || 0);
+      return `${model}×${Number.isFinite(quantity) && quantity > 0 ? quantity : 0}`;
+    })
+    .filter(Boolean)
+    .join('，');
+  return summary ? `客户下单：${summary}` : '';
+}
+
+function mergeRemarkParts(parts) {
+  const merged = [];
+  for (const value of parts || []) {
+    const text = String(value || '').trim();
+    if (!text) continue;
+    const containedIndex = merged.findIndex(existing => text.includes(existing));
+    if (containedIndex >= 0) {
+      merged[containedIndex] = text;
+      continue;
+    }
+    if (merged.some(existing => existing.includes(text))) continue;
+    merged.push(text);
+  }
+  return merged.join('；');
 }
 
 exports.main = async (event) => {
@@ -193,12 +238,26 @@ exports.main = async (event) => {
       return { success: false, code: 'MIXED_RECIPIENT', errMsg: '合并的订单必须使用相同的收件人、电话和地址' };
     }
 
-    // 3. 聚合货品并建出库单；备注缺省时带入各订单客服备注（去重拼接）
+    const trackingPlan = planInitialOutboundTracking(orders);
+    if (trackingPlan.action === 'conflict') {
+      await transaction.rollback();
+      return {
+        success: false,
+        code: 'TRACKING_NUMBER_CONFLICT',
+        errMsg: `合并订单存在不同快递单号：${trackingPlan.trackingNumbers.join('、')}`,
+      };
+    }
+
+    // 3. 聚合货品并建出库单；备注包含客户下单型号数量，并带入出库备注/客服备注
     const phoneModels = aggregatePhoneModels(orders);
     const now = db.serverDate();
-    const effectiveRemark = remark || Array.from(new Set(
+    const customerRemark = Array.from(new Set(
       orders.map(o => String(o.customerRemark || '').trim()).filter(Boolean)
     )).join('；');
+    const effectiveRemark = mergeRemarkParts([
+      buildPhoneModelsRemark(phoneModels),
+      remark || customerRemark,
+    ]);
     const addRes = await transaction.collection(OUTBOUND).add({
       data: {
         // 出库记录的主名称展示收件人；无收件人的历史兼容场景才回退订单人。
@@ -214,7 +273,7 @@ exports.main = async (event) => {
         consigneeAddress: first.consigneeAddress || '',
         phoneModels,
         outboundDate: todayInBeijing(),
-        trackingNumber: '',
+        trackingNumber: trackingPlan.trackingNumber,
         phonePhotos: [],
         createTime: now,
       },
@@ -229,10 +288,21 @@ exports.main = async (event) => {
     }
 
     await transaction.commit();
-    return { success: true, outboundId, orderIds };
+    return {
+      success: true,
+      outboundId,
+      orderIds,
+      trackingNumber: trackingPlan.trackingNumber,
+    };
   } catch (err) {
     try { await transaction.rollback(); } catch (_) {}
     console.error('[generateOutboundFromOrders] 失败:', err);
     return { success: false, code: 'INTERNAL_ERROR', errMsg: err.message || '生成出库单失败' };
   }
+};
+
+exports.__test__ = {
+  planInitialOutboundTracking,
+  buildPhoneModelsRemark,
+  mergeRemarkParts,
 };

@@ -7,7 +7,10 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test:sf-token": "node --test cloud_functions/getSfAccessToken/index.test.cjs"
+    "test:sf-token": "node --test cloud_functions/getSfAccessToken/index.test.cjs",
+    "test:sf-print": "node --test cloud_functions/printSfWaybill/index.test.cjs",
+    "test:sf-plugin-print": "node --test cloud_functions/manageSfPluginPrint/index.test.cjs",
+    "test:sf-data-model": "node --test cloud_functions/sfDataModel.test.cjs"
   },
   "dependencies": {
     "@cloudbase/js-sdk": "^2.28.5",

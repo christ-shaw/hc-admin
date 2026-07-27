@@ -133,7 +133,9 @@ exports.main = async (event, context) => {
           const update = { outboundRecordId: '' };
           if (wasCompleted && o.status === 'shipped' && String(o.trackingNumber || '').trim() === outboundTracking) {
             update.status = 'unshipped';
-            update.trackingNumber = '';
+            if (String(o.expressProvider || '').trim().toLowerCase() !== 'sf') {
+              update.trackingNumber = '';
+            }
           }
           await db.collection('orders').doc(oid).update({ data: update });
         } catch (_) { /* 单条解链失败忽略，不阻断删除 */ }

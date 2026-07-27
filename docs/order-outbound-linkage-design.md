@@ -104,12 +104,16 @@
 
 ### 4.6 需求6：完成发货 + 自动回填订单
 
-- 小程序打开某待出库单，录入 `trackingNumber` + `phonePhotos`，点「完成发货」。
-- 调用新云函数 `completeOutbound(outboundId, trackingNumber, phonePhotos, remark?)`：
+- 顺丰单号先生成时，`generateOutboundFromOrders` 自动把订单已有的 `trackingNumber` 带入待出库记录。
+- 待出库记录先生成时，顺丰申请成功或查询恢复成功后自动回填其 `trackingNumber`；已有不同单号时不覆盖并返回冲突警告。
+- 小程序打开某待出库单：已有顺丰单号时直接核对并点「完成发货」，不要求再次扫码；没有单号的其他快递仍可录入/扫码。
+- 调用新云函数 `completeOutbound(outboundId, trackingNumber?, phonePhotos, remark?)`：
   1. 置 `outboundStatus='completed'`，保存单号与照片。
-  2. **自动回填（不覆盖，决策⑤）**：对 `orderIds` 中每个订单：
-     - 若订单**已是 `shipped` 或已有 `trackingNumber`** → **跳过回填**（不覆盖已有单号），仅记录/提示。
-     - 否则更新 `trackingNumber`=出库单单号、`status='shipped'`、`shippingFee`=`shippingMethod`。
+  2. **自动回填（不覆盖不同单号，决策⑤）**：对 `orderIds` 中每个订单：
+     - 若订单已是 `shipped` → 跳过。
+     - 若订单已有与出库单相同的 `trackingNumber`（例如提前生成的顺丰单）→ 保留单号并更新 `status='shipped'`。
+     - 若订单已有其他 `trackingNumber` → 整个事务失败并提示单号冲突。
+     - 若订单无单号 → 写入出库单号并更新 `status='shipped'`、`shippingFee`=`shippingMethod`。
   3. 事务/批量，保证出库单与订单状态一致；跳过的订单在返回结果中列出，便于人工核对。
 - 该流程**自动化并取代** hc-admin 现有手动匹配发货对话框（对「由订单生成」的出库单而言）。
 
@@ -142,7 +146,8 @@
 - ✅ **① 合并快递方式**：生成时**统一选择一个** `shippingMethod`（不逐单沿用）。
 - ✅ **② 需要出库默认值**：**仅按订单类型**自动判定（渠道不参与，=C），映射表见 §4.1；`newBusiness`/`postRentalShip` 默认 `true`，其余 `false`，虚拟货品单强制 `false`。用户可手动改。
 - ✅ **③ 库存**：**不校验、不占用、不扣减**（库存模型未上线）。
-- ✅ **⑤ 回填不覆盖**：订单已 `shipped` 或已有 `trackingNumber` 时**跳过**，不覆盖已有单号。
+- ✅ **⑤ 回填不覆盖不同单号**：相同预生成运单号允许完成出库并标记
+  `shipped`；不同单号拒绝完成，避免出库与订单物流信息不一致。
 - ✅ **④ 手动匹配流程保留**：旧「发货对话框」**保留**；特殊情况允许**手工创建出库单**（`source='manual'`）。出库单**必须标明来源** `source`（`order` 订单生成 / `manual` 手工创建），列表/详情均展示。
 
 ### 待决策
@@ -190,17 +195,18 @@
 - 事务逻辑：
   1. 载入订单，校验：存在、`needsOutbound===true`、`status` 为待发货(`unknown`)、`outboundRecordId` 为空、**同一 `customerName`**、非虚拟货品单。
   2. 聚合 `phoneModels`（8.2）。
-  3. 建 `outbound_records`（`outboundStatus='pending'`, `source='order'`, `orderIds`, `shippingMethod`, `remark`, 客户/收货信息, `phoneModels`）。
+  3. 建 `outbound_records`（`outboundStatus='pending'`, `source='order'`, `orderIds`, `shippingMethod`, `remark`, 客户/收货信息, `phoneModels`）；订单已有唯一快递单号时同步写入 `trackingNumber`，合并订单存在多个不同单号时拒绝生成。
   4. 回写每个订单 `outboundRecordId = 新出库单._id`。
 - 出参：`{ success, outboundId }`；异常：`MIXED_CUSTOMER` / `ALREADY_GENERATED` / `INVALID_STATUS` 等。
 
 **`completeOutbound`（共享，hc-admin 为唯一 owner，权限 `outbound:update` + `orders:update`，双鉴权）**
-- 入参：`{ outboundId: string, trackingNumber: string, phonePhotos?: string[], remark?: string }`
+- 入参：`{ outboundId: string, trackingNumber?: string, phonePhotos?: string[], remark?: string }`
 - 逻辑：
   1. 载入出库单，须 `outboundStatus==='pending'`。
-  2. 置 `completed`、写 `trackingNumber`/`phonePhotos`/`outboundDate=今天`/`remark`。
-  3. 逐个 `orderIds` 回填（**不覆盖，决策⑤**）：订单已 `shipped` 或已有 `trackingNumber` → 跳过；否则写 `trackingNumber`、`status='shipped'`、`shippingFee=shippingMethod`。
-- 出参：`{ success, backfilled: string[], skipped: string[] }`（跳过项供人工核对）。
+  2. 优先使用出库记录已有的 `trackingNumber`；已有单号时调用方无需再次提交或扫码。记录无单号时才使用入参，二者不同时返回冲突。
+  3. 置 `completed`、写 `trackingNumber`/`phonePhotos`/`outboundDate=今天`/`remark`。
+  4. 逐个 `orderIds` 回填（**不覆盖不同单号，决策⑤**）：已发货跳过；相同已有单号保留并标记 `shipped`；不同单号返回 `TRACKING_NUMBER_CONFLICT` 并回滚；无单号则写入出库单号。
+- 出参：`{ success, backfilled: string[], skipped: string[] }`；不同单号返回 `TRACKING_NUMBER_CONFLICT`。
 
 ### 8.4 hc-admin UI
 
@@ -213,7 +219,7 @@
 ### 8.5 小程序 UI
 
 - **首页**：把现有 `pendingOutboundTotal` 计数扩成**待出库卡片列表**（`queryRecords` `type='outbound'` `pendingOnly=true`）。卡片显示客户、型号汇总、快递方式、备注，点击进「完成发货」。
-- **完成发货表单**：预填出库单信息，录入 `trackingNumber`（+ 拍照 `phonePhotos`）→ 调 `completeOutbound`。
+- **完成发货表单**：预填出库单信息；已有顺丰单号时只展示核对并直接完成，无单号的其他快递才录入/扫码（+ 拍照 `phonePhotos`）→ 调 `completeOutbound`。
 - **手工创建出库单**（`source='manual'`）：阶段2，复用现有出库录入表单，`orderIds=[]`。
 
 > **现状（已存在脚手架）**：小程序首页已有「待处理出库单」入口卡（计数徽标）→ 跳 `query` 页按 `pendingOnly` 列出待出库记录（状态徽标 未出库/已出库）；`query` 详情弹窗已有「完成发货」区块（单号输入 + 按钮），调用 `completeOutbound`。**阶段1 只需部署 `completeOutbound` 云函数即闭环**，无需新增小程序代码。

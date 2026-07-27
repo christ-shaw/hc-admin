@@ -10,14 +10,13 @@
  *
  * 云函数环境变量：
  * SF_ENV                   sandbox | production，默认 sandbox（仅作为数据库配置缺失时的回退）
- * SF_CLIENT_CODE           默认顺丰客户编码
- * SF_SANDBOX_CLIENT_CODE   沙箱客户编码（可选，优先于 SF_CLIENT_CODE）
- * SF_PROD_CLIENT_CODE      生产客户编码（可选，优先于 SF_CLIENT_CODE）
+ * SF_SANDBOX_CLIENT_CODE   沙箱客户编码
+ * SF_PROD_CLIENT_CODE      生产客户编码
  * SF_SANDBOX_SERVICE_URL   沙箱业务接口地址（可选）
  * SF_PROD_SERVICE_URL      生产业务接口地址（可选）
  *
  * event.data:
- * orderId: string          orders 集合的 _id
+ * sfExpressOrderId: string sf_express_orders 集合的 _id
  */
 
 const crypto = require('node:crypto');
@@ -30,6 +29,8 @@ cloud.init({
 const db = cloud.database();
 
 const ORDERS_COLLECTION = 'orders';
+const OUTBOUND_COLLECTION = 'outbound_records';
+const SF_ORDERS_COLLECTION = 'sf_express_orders';
 const TOKEN_COLLECTION = 'sf_tokens';
 const CONFIG_COLLECTION = 'system_config';
 const SF_CONFIG_DOC_ID = 'sf_express';
@@ -41,6 +42,28 @@ const DEFAULT_SERVICE_URLS = {
 
 function trimString(value) {
   return String(value || '').trim();
+}
+
+function planPendingOutboundTrackingClear(outbound, waybillNo) {
+  if (!outbound) return { action: 'not_linked' };
+  const outboundStatus = trimString(outbound.outboundStatus);
+  if (outboundStatus !== 'pending') {
+    return {
+      action: 'skipped_status',
+      outboundStatus,
+    };
+  }
+  const existingTrackingNumber = trimString(outbound.trackingNumber);
+  if (existingTrackingNumber !== trimString(waybillNo)) {
+    return {
+      action: 'unchanged',
+      existingTrackingNumber,
+    };
+  }
+  return {
+    action: 'clear',
+    trackingNumber: existingTrackingNumber,
+  };
 }
 
 function normalizeSfEnv(value = process.env.SF_ENV || 'sandbox') {
@@ -71,16 +94,16 @@ async function resolveSfEnv() {
 
 function getSfConfig(env) {
   const partnerID = env === 'production'
-    ? getFirstEnv(['SF_PROD_CLIENT_CODE', 'SF_PRODUCTION_CLIENT_CODE', 'SF_CLIENT_CODE'])
-    : getFirstEnv(['SF_SANDBOX_CLIENT_CODE', 'SF_CLIENT_CODE']);
+    ? getFirstEnv(['SF_PROD_CLIENT_CODE', 'SF_PRODUCTION_CLIENT_CODE'])
+    : getFirstEnv(['SF_SANDBOX_CLIENT_CODE']);
   const serviceUrl = env === 'production'
     ? getFirstEnv(['SF_PROD_SERVICE_URL', 'SF_PRODUCTION_SERVICE_URL']) || DEFAULT_SERVICE_URLS.production
     : getFirstEnv(['SF_SANDBOX_SERVICE_URL']) || DEFAULT_SERVICE_URLS.sandbox;
 
   if (!partnerID) {
     throw new Error(env === 'production'
-      ? '缺少云函数环境变量 SF_PROD_CLIENT_CODE 或 SF_CLIENT_CODE'
-      : '缺少云函数环境变量 SF_SANDBOX_CLIENT_CODE 或 SF_CLIENT_CODE');
+      ? '缺少云函数环境变量 SF_PROD_CLIENT_CODE'
+      : '缺少云函数环境变量 SF_SANDBOX_CLIENT_CODE');
   }
 
   return { env, partnerID, serviceUrl };
@@ -90,40 +113,44 @@ function buildRequestID() {
   return crypto.randomUUID().replace(/-/g, '');
 }
 
-function buildSfOrderId(orderId) {
-  const normalized = trimString(orderId).replace(/[^a-zA-Z0-9_-]/g, '');
-  return `HC_${normalized}`.slice(0, 64);
-}
-
-function getSfEnvLabel(env) {
-  return env === 'production' ? '生产环境' : '沙箱测试环境';
-}
-
-function assertOrderEnvMatchesConfig(order, config) {
-  if (!trimString(order.sfEnv)) return;
-  const orderEnv = normalizeSfEnv(order.sfEnv);
-  if (orderEnv !== config.env) {
-    throw new Error(`该订单是在${getSfEnvLabel(orderEnv)}下申请的，当前系统为${getSfEnvLabel(config.env)}，请先切换顺丰环境后再取消`);
-  }
-}
-
-async function getOrder(orderId) {
+async function getDoc(collectionName, id) {
   try {
-    const result = await db.collection(ORDERS_COLLECTION).doc(orderId).get();
+    const result = await db.collection(collectionName).doc(id).get();
     return result.data || null;
   } catch (err) {
-    if (err.errCode === -1 || String(err.message || '').includes('not exist')) return null;
+    if (
+      err.errCode === -1
+      || err.errCode === -502005
+      || String(err.message || '').includes('not exist')
+    ) return null;
     throw err;
   }
 }
 
-async function updateOrder(orderId, data) {
-  await db.collection(ORDERS_COLLECTION).doc(orderId).update({
+async function updateSfRecord(recordId, data) {
+  await db.collection(SF_ORDERS_COLLECTION).doc(recordId).update({
     data: {
       ...data,
-      updateTime: db.serverDate(),
+      updatedAt: new Date().toISOString(),
     },
   });
+}
+
+function sanitizeForStorage(value, key = '') {
+  if (value === null || value === undefined) return value;
+  const normalizedKey = String(key).toLowerCase();
+  if (normalizedKey.includes('token') || normalizedKey.includes('authorization')) return '[REDACTED]';
+  if (Array.isArray(value)) return value.map(item => sanitizeForStorage(item));
+  if (typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([childKey, childValue]) => [childKey, sanitizeForStorage(childValue, childKey)])
+    );
+  }
+  return typeof value === 'string' ? value.slice(0, 4096) : value;
+}
+
+function toLimitedJson(value) {
+  return JSON.stringify(sanitizeForStorage(value)).slice(0, 64 * 1024);
 }
 
 async function getAccessToken(config, forceRefresh = false) {
@@ -279,27 +306,43 @@ async function cancelOrder({ config, requestID, msgData }) {
 }
 
 exports.main = async (event) => {
-  const { orderId } = event.data || {};
+  const { sfExpressOrderId } = event.data || {};
 
-  if (!orderId) {
+  if (!trimString(sfExpressOrderId)) {
     return {
       success: false,
-      errMsg: '缺少订单ID',
+      errMsg: '缺少顺丰记录ID',
     };
   }
 
+  let resolvedEnv = '';
   try {
     const env = await resolveSfEnv();
+    resolvedEnv = env;
     const config = getSfConfig(env);
-    const order = await getOrder(orderId);
-    if (!order) throw new Error('订单不存在');
-    assertOrderEnvMatchesConfig(order, config);
+    const record = await getDoc(SF_ORDERS_COLLECTION, trimString(sfExpressOrderId));
+    if (!record) throw new Error('顺丰记录不存在');
+    if (record.isCurrent !== true) throw new Error('该顺丰记录已不是当前记录');
+    if (normalizeSfEnv(record.env) !== config.env) {
+      throw new Error('顺丰记录环境与当前系统环境不一致，请切换环境后重试');
+    }
+    if (record.status === 'cancelled') throw new Error('该顺丰订单已经取消');
+    if (record.status !== 'applied') throw new Error('只有申请成功的顺丰订单可以取消');
+    const order = await getDoc(ORDERS_COLLECTION, record.sourceOrderId);
+    if (!order) throw new Error('关联订单不存在');
+    const linkedOutboundRecordId = trimString(order.outboundRecordId);
+    if (linkedOutboundRecordId) {
+      const linkedOutbound = await getDoc(OUTBOUND_COLLECTION, linkedOutboundRecordId);
+      if (linkedOutbound && trimString(linkedOutbound.outboundStatus) === 'completed') {
+        throw new Error('关联出库记录已完成，不能取消顺丰订单');
+      }
+    }
 
-    const sfOrderId = trimString(order.sfOrderId) || buildSfOrderId(orderId);
+    const sfOrderId = trimString(record.sfOrderId);
     if (!sfOrderId) throw new Error('订单缺少顺丰客户订单号');
 
-    const storedWaybillNoInfoList = normalizeWaybillNoInfoList(order.sfWaybillNoInfoList);
-    const waybillNo = trimString(order.sfWaybillNo || order.trackingNumber);
+    const storedWaybillNoInfoList = normalizeWaybillNoInfoList(record.waybillNoInfoList);
+    const waybillNo = trimString(record.waybillNo);
     const waybillNoInfoList = storedWaybillNoInfoList.length
       ? storedWaybillNoInfoList
       : (waybillNo ? [{ waybillType: 1, waybillNo }] : []);
@@ -317,19 +360,19 @@ exports.main = async (event) => {
     const parsed = await cancelOrder({ config, requestID, msgData });
 
     if (!parsed.success) {
-      await updateOrder(orderId, {
-        expressProvider: 'sf',
-        sfEnv: config.env,
-        expressErrorMsg: parsed.errMsg,
-        sfCancelRequestId: requestID,
-        sfOrderId,
-        sfCancelRawResponse: parsed.raw || null,
+      await updateSfRecord(record._id, {
+        errorCode: trimString(parsed.errorCode),
+        errorMessage: trimString(parsed.errMsg),
+        cancelRequestId: requestID,
+        cancelRequestTime: new Date().toISOString(),
+        responseSummary: toLimitedJson(parsed.raw),
       });
 
       return {
         success: false,
         env: config.env,
-        orderId,
+        sourceOrderId: record.sourceOrderId,
+        sfExpressOrderId: record._id,
         sfOrderId,
         waybillNo,
         errMsg: parsed.errMsg,
@@ -338,42 +381,102 @@ exports.main = async (event) => {
       };
     }
 
-    await updateOrder(orderId, {
-      status: 'unshipped',
-      trackingNumber: '',
-      expressProvider: 'sf',
-      sfEnv: config.env,
-      expressApplyStatus: 'cancelled',
-      expressCancelTime: new Date().toISOString(),
-      expressErrorMsg: '',
-      sfCancelRequestId: requestID,
-      sfOrderId: parsed.sfOrderId || sfOrderId,
-      sfWaybillNo: '',
-      sfWaybillNoInfoList: [],
-      sfCancelRawResponse: parsed.raw,
-    });
+    const cancelledAt = new Date().toISOString();
+    const transaction = await db.startTransaction();
+    let outboundSyncResult = { action: 'not_linked', outboundRecordId: '' };
+    try {
+      let currentOrderResult = null;
+      try {
+        currentOrderResult = await transaction.collection(ORDERS_COLLECTION).doc(record.sourceOrderId).get();
+      } catch (_) {
+        currentOrderResult = null;
+      }
+      if (!currentOrderResult || !currentOrderResult.data) {
+        throw new Error('关联订单不存在');
+      }
+      const currentOrder = currentOrderResult.data;
+      const outboundRecordId = trimString(currentOrder.outboundRecordId);
+      let outbound = null;
+      if (outboundRecordId) {
+        try {
+          const outboundResult = await transaction.collection(OUTBOUND_COLLECTION).doc(outboundRecordId).get();
+          outbound = outboundResult && outboundResult.data || null;
+        } catch (_) {
+          outbound = null;
+        }
+      }
+      const outboundSync = planPendingOutboundTrackingClear(outbound, waybillNo);
+      const shouldClearOrder = trimString(currentOrder.trackingNumber) === waybillNo
+        && trimString(currentOrder.expressProvider).toLowerCase() === 'sf'
+        && trimString(outbound && outbound.outboundStatus) !== 'completed';
+
+      await transaction.collection(SF_ORDERS_COLLECTION).doc(record._id).update({
+        data: {
+          status: 'cancelled',
+          sfOrderId: parsed.sfOrderId || sfOrderId,
+          cancelRequestId: requestID,
+          cancelRequestTime: cancelledAt,
+          cancelTime: cancelledAt,
+          errorCode: '',
+          errorMessage: '',
+          responseSummary: toLimitedJson(parsed.raw),
+          updatedAt: cancelledAt,
+        },
+      });
+      if (shouldClearOrder) {
+        await transaction.collection(ORDERS_COLLECTION).doc(record.sourceOrderId).update({
+          data: {
+            status: 'unshipped',
+            trackingNumber: '',
+            expressProvider: '',
+            updateTime: db.serverDate(),
+          },
+        });
+      }
+      if (outboundRecordId && outboundSync.action === 'clear') {
+        await transaction.collection(OUTBOUND_COLLECTION).doc(outboundRecordId).update({
+          data: {
+            trackingNumber: '',
+          },
+        });
+      }
+      outboundSyncResult = {
+        ...outboundSync,
+        outboundRecordId,
+      };
+      await transaction.commit();
+    } catch (error) {
+      try { await transaction.rollback(); } catch (_) { /* ignore */ }
+      throw error;
+    }
 
     return {
       success: true,
       env: config.env,
-      orderId,
+      sourceOrderId: record.sourceOrderId,
+      sfExpressOrderId: record._id,
       sfOrderId: parsed.sfOrderId || sfOrderId,
       waybillNo: parsed.waybillNo || waybillNo,
       resStatus: parsed.resStatus,
+      outboundSync: outboundSyncResult,
     };
   } catch (err) {
     console.error('取消顺丰发货失败:', {
-      orderId,
+      sfExpressOrderId,
       message: err.message,
     });
 
     return {
       success: false,
-      env: (() => {
+      env: resolvedEnv || (() => {
         try { return normalizeSfEnv(); } catch { return trimString(process.env.SF_ENV) || 'sandbox'; }
       })(),
-      orderId,
+      sfExpressOrderId,
       errMsg: err.message || String(err),
     };
   }
+};
+
+exports.__test__ = {
+  planPendingOutboundTrackingClear,
 };

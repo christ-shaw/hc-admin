@@ -143,7 +143,7 @@ test('returns cached sandbox token when it is still valid', async () => {
       },
     },
     env: {
-      SF_CLIENT_CODE: 'partner-test',
+      SF_SANDBOX_CLIENT_CODE: 'partner-test',
       SF_SANDBOX_CHECK_WORD: 'secret-test',
     },
     fetchImpl: async () => {
@@ -178,7 +178,7 @@ test('refreshes expired token and persists the new token', async () => {
       },
     },
     env: {
-      SF_CLIENT_CODE: 'partner-test',
+      SF_SANDBOX_CLIENT_CODE: 'partner-test',
       SF_SANDBOX_CHECK_WORD: 'secret-test',
     },
     fetchImpl: async (url, options) => {
@@ -280,7 +280,7 @@ test('rejects when caller expected env differs from token function env', async (
     initialDocs: {},
     env: {
       SF_ENV: 'sandbox',
-      SF_CLIENT_CODE: 'partner-test',
+      SF_SANDBOX_CLIENT_CODE: 'partner-test',
       SF_SANDBOX_CHECK_WORD: 'secret-test',
     },
     fetchImpl: async () => {
@@ -299,7 +299,7 @@ test('creates token cache document when it does not exist', async () => {
   await withFunctionRuntime({
     initialDocs: {},
     env: {
-      SF_CLIENT_CODE: 'partner-test',
+      SF_SANDBOX_CLIENT_CODE: 'partner-test',
       SF_SANDBOX_CHECK_WORD: 'secret-test',
     },
     fetchImpl: async () => ({
@@ -343,7 +343,7 @@ test('uses database sf_express env before SF_ENV fallback', async () => {
     },
     env: {
       SF_ENV: 'sandbox',
-      SF_CLIENT_CODE: 'fallback-partner',
+      SF_SANDBOX_CLIENT_CODE: 'sandbox-partner',
       SF_PROD_CLIENT_CODE: 'prod-partner',
       SF_PROD_CHECK_WORD: 'prod-secret',
       SF_SANDBOX_CHECK_WORD: 'sandbox-secret',
@@ -379,7 +379,7 @@ test('returns a clear error when sandbox secret env var is missing', async () =>
   await withFunctionRuntime({
     initialDocs: {},
     env: {
-      SF_CLIENT_CODE: 'partner-test',
+      SF_SANDBOX_CLIENT_CODE: 'partner-test',
     },
     fetchImpl: async () => {
       throw new Error('fetch should not be called when config is invalid');

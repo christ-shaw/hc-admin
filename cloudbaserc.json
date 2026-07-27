@@ -34,6 +34,30 @@
       "runtime": "Nodejs18.15"
     },
     {
+      "name": "printSfWaybill",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15",
+      "timeout": 30,
+      "envVariables": {
+        "SF_SANDBOX_CLIENT_CODE": "HCSMKBNA9WWC",
+        "SF_ENV": "sandbox",
+        "SF_SANDBOX_PRINT_TEMPLATE_CODE": "fm_76130_standard_HCSMKBNA9WWC",
+        "SF_SANDBOX_CUSTOM_TEMPLATE_CODE": "fm_76130_standard_custom_10057208710_3"
+      }
+    },
+    {
+      "name": "manageSfPluginPrint",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15",
+      "timeout": 30,
+      "envVariables": {
+        "SF_SANDBOX_CLIENT_CODE": "HCSMKBNA9WWC",
+        "SF_ENV": "sandbox",
+        "SF_SANDBOX_PRINT_TEMPLATE_CODE": "fm_76130_standard_HCSMKBNA9WWC",
+        "SF_SANDBOX_CUSTOM_TEMPLATE_CODE": "fm_76130_standard_custom_10057208710_3"
+      }
+    },
+    {
       "name": "manageSfConfig",
       "handler": "index.main",
       "runtime": "Nodejs18.15"

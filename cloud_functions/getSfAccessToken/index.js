@@ -7,9 +7,8 @@
  *
  * 云函数环境变量：
  * SF_ENV                      sandbox | production，默认 sandbox（仅作为数据库配置缺失时的回退）
- * SF_CLIENT_CODE              默认顺丰客户编码
- * SF_SANDBOX_CLIENT_CODE      沙箱客户编码（可选，优先于 SF_CLIENT_CODE）
- * SF_PROD_CLIENT_CODE         生产客户编码（可选，优先于 SF_CLIENT_CODE）
+ * SF_SANDBOX_CLIENT_CODE      沙箱客户编码
+ * SF_PROD_CLIENT_CODE         生产客户编码
  * SF_SANDBOX_CHECK_WORD       顺丰沙箱校验码
  * SF_PROD_CHECK_WORD          顺丰生产校验码
  * SF_SANDBOX_ACCESS_TOKEN_URL 沙箱 token 地址（可选）
@@ -73,8 +72,8 @@ function getSfConfig(env, expectedEnv) {
   }
 
   const partnerID = env === 'production'
-    ? getFirstEnv(['SF_PROD_CLIENT_CODE', 'SF_PRODUCTION_CLIENT_CODE', 'SF_CLIENT_CODE'])
-    : getFirstEnv(['SF_SANDBOX_CLIENT_CODE', 'SF_CLIENT_CODE']);
+    ? getFirstEnv(['SF_PROD_CLIENT_CODE', 'SF_PRODUCTION_CLIENT_CODE'])
+    : getFirstEnv(['SF_SANDBOX_CLIENT_CODE']);
 
   const secret = env === 'production'
     ? getFirstEnv(['SF_PROD_CHECK_WORD', 'SF_PRODUCTION_CHECK_WORD'])
@@ -86,8 +85,8 @@ function getSfConfig(env, expectedEnv) {
 
   if (!partnerID) {
     throw new Error(env === 'production'
-      ? '缺少云函数环境变量 SF_PROD_CLIENT_CODE 或 SF_CLIENT_CODE'
-      : '缺少云函数环境变量 SF_SANDBOX_CLIENT_CODE 或 SF_CLIENT_CODE');
+      ? '缺少云函数环境变量 SF_PROD_CLIENT_CODE'
+      : '缺少云函数环境变量 SF_SANDBOX_CLIENT_CODE');
   }
 
   if (!secret) {

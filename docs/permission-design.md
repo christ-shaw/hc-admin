@@ -205,6 +205,7 @@ interface PermissionSystemConfig {
 | 型号 | `models:read` | 查询型号 |
 | 型号 | `models:write` | 新增、编辑、删除型号 |
 | 订单 | `orders:read` | 查询订单 |
+| 顺丰 | `sf:print` | 生成或打印顺丰丰密面单 |
 | 订单 | `orders:create` | 新增订单 |
 | 订单 | `orders:update` | 编辑订单 |
 | 订单 | `orders:delete` | 删除订单 |
@@ -587,6 +588,8 @@ async function requirePermission(actionPermission) {
 | `saveOrders` | 新增订单 | `orders:create` |
 | `updateOrder` | 编辑订单 | `orders:update` |
 | `deleteOrder` | 删除订单 | `orders:delete` |
+| `manageSfPluginPrint` | 初始化、准备并记录 Windows 顺丰插件打印 | `sf:print` |
+| `printSfWaybill` | 生成顺丰丰密面单 PDF | `sf:print` |
 | `queryInvoices` | 查询发票 | `invoices:read` |
 | `saveInvoice` | 新增发票 | `invoices:create` |
 | `updateInvoice` | 编辑发票 | `invoices:update` |

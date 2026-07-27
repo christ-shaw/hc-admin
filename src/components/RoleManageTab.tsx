@@ -51,6 +51,7 @@ const ACTION_PERMISSION_OPTIONS = [
   { label: '型号查询', value: 'models:read' },
   { label: '型号维护', value: 'models:write' },
   { label: '订单查询', value: 'orders:read' },
+  { label: '顺丰面单打印', value: 'sf:print' },
   { label: '订单新增', value: 'orders:create' },
   { label: '订单编辑', value: 'orders:update' },
   { label: '订单删除', value: 'orders:delete' },

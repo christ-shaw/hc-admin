@@ -2,7 +2,8 @@
  * completeOutbound - 完成发货
  *
  * 出库单录入快递单号/照片后置 outboundStatus='completed'，并把物流单号
- * 回填到关联订单（不覆盖已发货/已有单号的订单）。主要由小程序完成发货调用。
+ * 回填到关联订单。订单已有相同运单号时保留该单号并标记已发货；已有其他
+ * 运单号时拒绝完成，防止出库记录与订单物流信息不一致。主要由小程序完成发货调用。
  * 设计见 docs/order-outbound-linkage-design.md §8.3
  *
  * 权限：仅要求 outbound:update（订单回填为该动作的系统副作用，不再单独要 orders:update，
@@ -94,6 +95,43 @@ function todayInBeijing() {
   return d.toISOString().slice(0, 10);
 }
 
+function planOrderShipmentUpdate(order, trackingNumber, shippingMethod) {
+  const status = String(order && order.status || '').trim();
+  const existingTrackingNumber = String(order && order.trackingNumber || '').trim();
+  if (status === 'shipped') return { action: 'skip' };
+  if (existingTrackingNumber && existingTrackingNumber !== trackingNumber) {
+    return {
+      action: 'conflict',
+      existingTrackingNumber,
+    };
+  }
+  const update = {
+    trackingNumber: existingTrackingNumber || trackingNumber,
+    status: 'shipped',
+  };
+  if (shippingMethod) update.shippingFee = shippingMethod;
+  return { action: 'update', update };
+}
+
+function planOutboundCompletionTracking(outbound, submittedTrackingNumber) {
+  const existingTrackingNumber = String(outbound && outbound.trackingNumber || '').trim();
+  const submitted = String(submittedTrackingNumber || '').trim();
+  if (existingTrackingNumber && submitted && existingTrackingNumber !== submitted) {
+    return {
+      action: 'conflict',
+      existingTrackingNumber,
+      submittedTrackingNumber: submitted,
+    };
+  }
+  const trackingNumber = existingTrackingNumber || submitted;
+  if (!trackingNumber) return { action: 'missing' };
+  return {
+    action: 'complete',
+    trackingNumber,
+    source: existingTrackingNumber ? 'outbound' : 'submitted',
+  };
+}
+
 exports.main = async (event) => {
   const payload = (event && event.data) || event || {};
 
@@ -101,7 +139,7 @@ exports.main = async (event) => {
   if (!perm.allowed) return { success: false, code: perm.code, errMsg: perm.errMsg };
 
   const outboundId = String(payload.outboundId || '').trim();
-  const trackingNumber = String(payload.trackingNumber || '').trim();
+  const submittedTrackingNumber = String(payload.trackingNumber || '').trim();
   const hasPhotos = Array.isArray(payload.phonePhotos); // 未传则不改动出库单原照片
   const phonePhotos = hasPhotos ? payload.phonePhotos : [];
   const hasRemark = payload.remark !== undefined && payload.remark !== null;
@@ -109,7 +147,6 @@ exports.main = async (event) => {
   const completedBy = payload.completedBy != null ? String(payload.completedBy) : '';
 
   if (!outboundId) return { success: false, code: 'MISSING_FIELDS', errMsg: '缺少 outboundId' };
-  if (!trackingNumber) return { success: false, code: 'MISSING_FIELDS', errMsg: '缺少快递单号 trackingNumber' };
 
   const transaction = await db.startTransaction();
   try {
@@ -125,6 +162,20 @@ exports.main = async (event) => {
       await transaction.rollback();
       return { success: false, code: 'ALREADY_COMPLETED', errMsg: '该出库单已完成发货' };
     }
+    const trackingPlan = planOutboundCompletionTracking(outbound, submittedTrackingNumber);
+    if (trackingPlan.action === 'conflict') {
+      await transaction.rollback();
+      return {
+        success: false,
+        code: 'TRACKING_NUMBER_CONFLICT',
+        errMsg: `待出库记录已有快递单号 ${trackingPlan.existingTrackingNumber}，不能改为 ${trackingPlan.submittedTrackingNumber}`,
+      };
+    }
+    if (trackingPlan.action === 'missing') {
+      await transaction.rollback();
+      return { success: false, code: 'MISSING_FIELDS', errMsg: '该出库记录尚无快递单号，请先生成顺丰单或录入其他快递单号' };
+    }
+    const trackingNumber = trackingPlan.trackingNumber;
 
     // 2. 置已出库
     const outboundUpdate = {
@@ -137,7 +188,7 @@ exports.main = async (event) => {
     if (completedBy) outboundUpdate.completedBy = completedBy;
     await transaction.collection(OUTBOUND).doc(outboundId).update({ data: outboundUpdate });
 
-    // 3. 回填订单（不覆盖已发货/已有单号）
+    // 3. 回填订单：已有相同顺丰单号时确认发货；不同单号时整单回滚。
     const orderIds = Array.isArray(outbound.orderIds) ? outbound.orderIds : [];
     const shippingMethod = String(outbound.shippingMethod || '').trim();
     const backfilled = [];
@@ -147,10 +198,17 @@ exports.main = async (event) => {
       try { oRes = await transaction.collection(ORDERS).doc(oid).get(); } catch (_) { oRes = null; }
       if (!oRes || !oRes.data) { skipped.push(oid); continue; }
       const o = oRes.data;
-      if (o.status === 'shipped' || String(o.trackingNumber || '').trim()) { skipped.push(oid); continue; }
-      const orderUpdate = { trackingNumber, status: 'shipped' };
-      if (shippingMethod) orderUpdate.shippingFee = shippingMethod;
-      await transaction.collection(ORDERS).doc(oid).update({ data: orderUpdate });
+      const plan = planOrderShipmentUpdate(o, trackingNumber, shippingMethod);
+      if (plan.action === 'skip') { skipped.push(oid); continue; }
+      if (plan.action === 'conflict') {
+        await transaction.rollback();
+        return {
+          success: false,
+          code: 'TRACKING_NUMBER_CONFLICT',
+          errMsg: `订单 ${oid} 已有其他快递单号 ${plan.existingTrackingNumber}，无法完成发货`,
+        };
+      }
+      await transaction.collection(ORDERS).doc(oid).update({ data: plan.update });
       backfilled.push(oid);
     }
 
@@ -161,4 +219,9 @@ exports.main = async (event) => {
     console.error('[completeOutbound] 失败:', err);
     return { success: false, code: 'INTERNAL_ERROR', errMsg: err.message || '完成发货失败' };
   }
+};
+
+exports.__test__ = {
+  planOrderShipmentUpdate,
+  planOutboundCompletionTracking,
 };

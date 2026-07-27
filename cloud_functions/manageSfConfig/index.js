@@ -2,8 +2,10 @@
  * manageSfConfig - 管理顺丰下单环境
  *
  * action:
- * - get: 读取当前生效环境
+ * - get: 读取当前生效环境和插件打印开关
  * - set: 保存环境到 system_config/sf_express.env
+ * - setPluginPrint: 按环境保存 Windows 插件打印开关
+ * - setDataModel: 启用独立顺丰订单集合并写入切换日期
  */
 
 const cloud = require('wx-server-sdk');
@@ -50,6 +52,13 @@ function normalizeSfEnv(value = process.env.SF_ENV || 'sandbox') {
   if (!normalized || normalized === 'sandbox' || normalized === 'sbox') return 'sandbox';
   if (normalized === 'prod' || normalized === 'production') return 'production';
   throw new Error(`顺丰环境仅支持 sandbox 或 production，当前值: ${value}`);
+}
+
+function normalizePluginPrintEnabledByEnv(value) {
+  return {
+    sandbox: value && value.sandbox === true,
+    production: value && value.production === true,
+  };
 }
 
 function hasPermission(actions, permission) {
@@ -161,6 +170,9 @@ async function readSfConfig() {
   return {
     success: true,
     env,
+    dataModelVersion: Number(config && config.dataModelVersion || 1),
+    dataModelCutoverDate: trimString(config && config.dataModelCutoverDate),
+    pluginPrintEnabledByEnv: normalizePluginPrintEnabledByEnv(config && config.pluginPrintEnabledByEnv),
     source: rawEnv ? 'database' : 'env',
     updatedAt: config && config.updatedAt || '',
     updatedBy: config && config.updatedBy || '',
@@ -174,6 +186,8 @@ async function saveSfConfig(payload, currentUser) {
   const existing = await getDocById(CONFIG_COLLECTION, CONFIG_ID);
   const data = {
     env,
+    dataModelVersion: Number(existing && existing.dataModelVersion || 1),
+    dataModelCutoverDate: trimString(existing && existing.dataModelCutoverDate),
     updatedAt: now(),
     updatedBy: currentUser.id,
   };
@@ -194,6 +208,93 @@ async function saveSfConfig(payload, currentUser) {
   return {
     success: true,
     env,
+    pluginPrintEnabledByEnv: normalizePluginPrintEnabledByEnv(existing && existing.pluginPrintEnabledByEnv),
+    source: 'database',
+    updatedAt: data.updatedAt,
+    updatedBy: data.updatedBy,
+  };
+}
+
+async function savePluginPrintConfig(payload, currentUser) {
+  const env = normalizeSfEnv(payload.env);
+  if (typeof payload.enabled !== 'boolean') {
+    throw new Error('enabled 必须是布尔值');
+  }
+
+  await ensureCollection(CONFIG_COLLECTION);
+  const existing = await getDocById(CONFIG_COLLECTION, CONFIG_ID);
+  const pluginPrintEnabledByEnv = {
+    ...normalizePluginPrintEnabledByEnv(existing && existing.pluginPrintEnabledByEnv),
+    [env]: payload.enabled,
+  };
+  const data = {
+    pluginPrintEnabledByEnv,
+    updatedAt: now(),
+    updatedBy: currentUser.id,
+  };
+
+  if (existing) {
+    await db.collection(CONFIG_COLLECTION).doc(CONFIG_ID).update({ data });
+  } else {
+    await db.collection(CONFIG_COLLECTION).add({
+      data: {
+        _id: CONFIG_ID,
+        env: normalizeSfEnv(),
+        ...data,
+        createdAt: now(),
+        createdBy: currentUser.id,
+      },
+    });
+  }
+
+  return {
+    success: true,
+    env: existing && existing.env ? normalizeSfEnv(existing.env) : normalizeSfEnv(),
+    dataModelVersion: Number(existing && existing.dataModelVersion || 1),
+    dataModelCutoverDate: trimString(existing && existing.dataModelCutoverDate),
+    pluginPrintEnabledByEnv,
+    source: 'database',
+    updatedAt: data.updatedAt,
+    updatedBy: data.updatedBy,
+  };
+}
+
+async function saveDataModelConfig(payload, currentUser) {
+  const version = Number(payload.dataModelVersion);
+  const cutoverDate = trimString(payload.dataModelCutoverDate);
+  if (version !== 2) throw new Error('dataModelVersion 仅支持 2');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(cutoverDate)) {
+    throw new Error('dataModelCutoverDate 必须是 YYYY-MM-DD');
+  }
+
+  await ensureCollection(CONFIG_COLLECTION);
+  const existing = await getDocById(CONFIG_COLLECTION, CONFIG_ID);
+  const data = {
+    dataModelVersion: version,
+    dataModelCutoverDate: cutoverDate,
+    updatedAt: now(),
+    updatedBy: currentUser.id,
+  };
+  if (existing) {
+    await db.collection(CONFIG_COLLECTION).doc(CONFIG_ID).update({ data });
+  } else {
+    await db.collection(CONFIG_COLLECTION).add({
+      data: {
+        _id: CONFIG_ID,
+        env: normalizeSfEnv(),
+        pluginPrintEnabledByEnv: normalizePluginPrintEnabledByEnv(),
+        ...data,
+        createdAt: now(),
+        createdBy: currentUser.id,
+      },
+    });
+  }
+  return {
+    success: true,
+    env: existing && existing.env ? normalizeSfEnv(existing.env) : normalizeSfEnv(),
+    dataModelVersion: version,
+    dataModelCutoverDate: cutoverDate,
+    pluginPrintEnabledByEnv: normalizePluginPrintEnabledByEnv(existing && existing.pluginPrintEnabledByEnv),
     source: 'database',
     updatedAt: data.updatedAt,
     updatedBy: data.updatedBy,
@@ -215,6 +316,8 @@ exports.main = async (event) => {
 
     if (action === 'get') return readSfConfig();
     if (action === 'set') return saveSfConfig(payload, auth.currentUser);
+    if (action === 'setPluginPrint') return savePluginPrintConfig(payload, auth.currentUser);
+    if (action === 'setDataModel') return saveDataModelConfig(payload, auth.currentUser);
 
     return { success: false, errMsg: '不支持的操作类型' };
   } catch (error) {
@@ -225,4 +328,9 @@ exports.main = async (event) => {
       errMsg: error.message || '管理顺丰配置失败',
     };
   }
+};
+
+exports._test = {
+  normalizeSfEnv,
+  normalizePluginPrintEnabledByEnv,
 };

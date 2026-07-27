@@ -110,10 +110,6 @@ function trimString(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-function hasTrackingNumber(record) {
-  return trimString(record.trackingNumber) !== '';
-}
-
 function isPendingStatus(record) {
   return record.outboundStatus === 'pending';
 }
@@ -123,7 +119,7 @@ function isOrderOutboundRecord(record) {
 }
 
 function isPendingOutboundRecord(record) {
-  return isOrderOutboundRecord(record) && isPendingStatus(record) && !hasTrackingNumber(record);
+  return isOrderOutboundRecord(record) && isPendingStatus(record);
 }
 
 function normalizePageSize(limit) {
@@ -350,4 +346,8 @@ exports.main = async (event, context) => {
       errMsg: e.message || '查询记录失败'
     };
   }
+};
+
+exports.__test__ = {
+  isPendingOutboundRecord,
 };

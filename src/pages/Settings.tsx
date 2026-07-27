@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Button, Input, MessagePlugin, Select, Tabs } from 'tdesign-react';
+import { Button, Input, MessagePlugin, Select, Switch, Tabs } from 'tdesign-react';
 import { Settings, Save, RotateCcw, Cpu, ShieldCheck, Truck } from 'lucide-react';
 import {
   callFunction,
@@ -31,6 +31,7 @@ interface SfConfigResult {
   source?: 'database' | 'env';
   updatedAt?: string;
   updatedBy?: string;
+  pluginPrintEnabledByEnv?: Record<SfEnv, boolean>;
   errMsg?: string;
 }
 
@@ -45,6 +46,11 @@ export function SettingsPage() {
   const [sfEnvSource, setSfEnvSource] = useState<'database' | 'env'>('env');
   const [sfConfigLoading, setSfConfigLoading] = useState(false);
   const [savingSfEnv, setSavingSfEnv] = useState(false);
+  const [sfPluginEnabledByEnv, setSfPluginEnabledByEnv] = useState<Record<SfEnv, boolean>>({
+    sandbox: false,
+    production: false,
+  });
+  const [savingSfPluginEnv, setSavingSfPluginEnv] = useState<SfEnv | null>(null);
   const [initializingPermission, setInitializingPermission] = useState(false);
   const [aiModel, setAiModel] = useState<AIModelConfig>(getAIModelConfig);
   const [activeTab, setActiveTab] = useState('general');
@@ -118,6 +124,10 @@ export function SettingsPage() {
         setSfEnv(nextEnv);
         setSavedSfEnv(nextEnv);
         setSfEnvSource(result.source || 'env');
+        setSfPluginEnabledByEnv({
+          sandbox: result.pluginPrintEnabledByEnv?.sandbox === true,
+          production: result.pluginPrintEnabledByEnv?.production === true,
+        });
       } else {
         MessagePlugin.error('获取顺丰环境失败: ' + (result.errMsg || '未知错误'));
       }
@@ -181,6 +191,33 @@ export function SettingsPage() {
       MessagePlugin.error('保存失败: ' + String(err));
     } finally {
       setSavingSfEnv(false);
+    }
+  };
+
+  /** 按环境启停 Windows 顺丰云打印插件 */
+  const handleSfPluginPrintChange = async (env: SfEnv, enabled: boolean) => {
+    if (env === 'production' && enabled && !window.confirm('确认开启生产环境顺丰插件打印？开启后会打印真实运单面单。')) {
+      return;
+    }
+
+    setSavingSfPluginEnv(env);
+    try {
+      const result = await callFunction<SfConfigResult>('manageSfConfig', {
+        data: { action: 'setPluginPrint', env, enabled },
+      });
+      if (!result.success || !result.pluginPrintEnabledByEnv) {
+        MessagePlugin.error('保存失败: ' + (result.errMsg || '未知错误'));
+        return;
+      }
+      setSfPluginEnabledByEnv({
+        sandbox: result.pluginPrintEnabledByEnv.sandbox === true,
+        production: result.pluginPrintEnabledByEnv.production === true,
+      });
+      MessagePlugin.success(`${env === 'production' ? '生产环境' : '沙箱环境'}插件打印已${enabled ? '开启' : '关闭'}`);
+    } catch (err) {
+      MessagePlugin.error('保存失败: ' + String(err));
+    } finally {
+      setSavingSfPluginEnv(null);
     }
   };
 
@@ -361,10 +398,32 @@ export function SettingsPage() {
                     </div>
                   </div>
 
+                  <div className="grid gap-3 md:grid-cols-2">
+                    {(['sandbox', 'production'] as SfEnv[]).map(env => (
+                      <div key={env} className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-4 py-3">
+                        <div>
+                          <div className="text-sm font-medium text-gray-800">
+                            {env === 'production' ? '生产环境插件打印' : '沙箱环境插件打印'}
+                          </div>
+                          <div className="mt-1 text-xs text-gray-400">
+                            仅影响 Windows 顺丰云打印插件，PDF 打印不受影响
+                          </div>
+                        </div>
+                        <Switch
+                          value={sfPluginEnabledByEnv[env]}
+                          loading={savingSfPluginEnv === env}
+                          disabled={!canUpdateSettings || sfConfigLoading}
+                          onChange={value => handleSfPluginPrintChange(env, value)}
+                        />
+                      </div>
+                    ))}
+                  </div>
+
                   <div className="text-xs text-gray-400 space-y-1">
                     <p>• 保存后云函数每次调用都会读取最新环境，无需重新部署</p>
                     <p>• 切换到生产环境前，请确认生产客户编码、校验码、月结卡号和寄件人配置已在云函数环境变量中配置完成</p>
                     <p>• 生产环境会调用顺丰正式接口并生成真实运单</p>
+                    <p>• 插件打印开关按沙箱、生产环境分别保存；切换环境后如已加载插件 SDK，请刷新页面</p>
                   </div>
                 </div>
               </div>
