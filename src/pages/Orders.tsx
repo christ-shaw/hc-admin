@@ -584,7 +584,9 @@ export function Orders() {
   const FILTER_SALESPERSON_OPTIONS = useMemo(() => [{ label: '全部', value: '' }, ...SALESPERSONS.map(v => ({ label: dictionaries.getLabel(DICT_CODES.salesperson, v), value: v }))], [SALESPERSONS, dictionaries]);
   const FILTER_ORDER_STATUS_OPTIONS = useMemo(() => [{ label: '全部', value: '' }, ...dictToOptions(ORDER_STATUS_MAP)], [ORDER_STATUS_MAP]);
   const SHIP_CONFIRM_SHIPPING_FEE_OPTIONS = useMemo(
-    () => dictToOptions(SHIPPING_FEE_MAP).filter(option => option.value === 'prepaid' || option.value === 'cod'),
+    () => dictToOptions(SHIPPING_FEE_MAP).filter(option => (
+      option.value === 'prepaid' || option.value === 'cod' || option.value === 'pickup'
+    )),
     [SHIPPING_FEE_MAP]
   );
 

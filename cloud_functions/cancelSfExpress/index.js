@@ -44,6 +44,14 @@ function trimString(value) {
   return String(value || '').trim();
 }
 
+function isSharedShipment(record) {
+  return new Set(
+    (Array.isArray(record && record.linkedOrderIds) ? record.linkedOrderIds : [])
+      .map(trimString)
+      .filter(Boolean)
+  ).size > 1;
+}
+
 function planPendingOutboundTrackingClear(outbound, waybillNo) {
   if (!outbound) return { action: 'not_linked' };
   const outboundStatus = trimString(outbound.outboundStatus);
@@ -323,6 +331,9 @@ exports.main = async (event) => {
     const record = await getDoc(SF_ORDERS_COLLECTION, trimString(sfExpressOrderId));
     if (!record) throw new Error('顺丰记录不存在');
     if (record.isCurrent !== true) throw new Error('该顺丰记录已不是当前记录');
+    if (isSharedShipment(record)) {
+      throw new Error('该顺丰单已关联多张订单，不能直接取消；请先完成或解除共享运单关联');
+    }
     if (normalizeSfEnv(record.env) !== config.env) {
       throw new Error('顺丰记录环境与当前系统环境不一致，请切换环境后重试');
     }
@@ -413,6 +424,12 @@ exports.main = async (event) => {
       await transaction.collection(SF_ORDERS_COLLECTION).doc(record._id).update({
         data: {
           status: 'cancelled',
+          ...(trimString(record.shipmentStatus)
+            ? {
+                shipmentStatus: 'cancelled',
+                shipmentVersion: Math.max(1, Number(record.shipmentVersion || 1)) + 1,
+              }
+            : {}),
           sfOrderId: parsed.sfOrderId || sfOrderId,
           cancelRequestId: requestID,
           cancelRequestTime: cancelledAt,
@@ -479,4 +496,5 @@ exports.main = async (event) => {
 
 exports.__test__ = {
   planPendingOutboundTrackingClear,
+  isSharedShipment,
 };

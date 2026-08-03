@@ -399,6 +399,33 @@ function buildOrderProductsRemark(order) {
   return summary ? `客户下单：${summary}` : '';
 }
 
+function buildPrintProductLabel(item) {
+  const productName = trimString(item && item.productName);
+  const specification = trimString(item && item.specification);
+  const parts = [productName];
+  if (specification && specification !== '默认') parts.push(specification);
+  return parts.filter(Boolean).join(' / ');
+}
+
+function buildPrintProductsRemark(order) {
+  return getOrderProducts(order)
+    .map(item => {
+      const label = buildPrintProductLabel(item);
+      if (!label) return '';
+      const quantity = Number(item && item.quantity);
+      return `${label}×${Number.isFinite(quantity) && quantity > 0 ? quantity : 0}`;
+    })
+    .filter(Boolean)
+    .join('，');
+}
+
+function buildPrintOrderLine(productRemark, customerRemark, index = 0) {
+  const orderNo = Math.max(1, Number(index) + 1);
+  const products = trimString(productRemark) || '无商品明细';
+  const remark = trimString(customerRemark);
+  return `订单${orderNo}：${products}${remark ? `；备注：${remark}` : ''}`;
+}
+
 function mergeRemarkParts(parts, limit) {
   const merged = [];
   for (const value of parts || []) {
@@ -423,6 +450,15 @@ function buildOrderRemark(order, limit = 500) {
   ], limit);
 }
 
+function buildPrintOrderRemark(order, limit = 100) {
+  const remark = buildPrintOrderLine(
+    buildPrintProductsRemark(order),
+    order && order.customerRemark,
+    0,
+  );
+  return limit ? remark.slice(0, limit) : remark;
+}
+
 function buildMsgData(order, sfOrderId, sender, config) {
   const payment = getOrderPaymentConfig(order, config);
   const msgData = {
@@ -433,7 +469,7 @@ function buildMsgData(order, sfOrderId, sender, config) {
     payMethod: payment.payMethod,
     expressTypeId: config.expressTypeId,
     parcelQty: config.parcelQty,
-    remark: buildOrderRemark(order, 100),
+    remark: buildPrintOrderRemark(order, 100),
   };
 
   if (payment.monthlyCard) {
@@ -578,6 +614,7 @@ function toLimitedJson(value) {
 function buildOrderSnapshot(order) {
   const rawCustomerRemark = trimString(order.customerRemark).slice(0, 500);
   const productRemark = buildOrderProductsRemark(order).slice(0, 500);
+  const printProductRemark = buildPrintProductsRemark(order).slice(0, 500);
   return {
     serialNumber: Number(order.serialNumber || 0),
     onlineOrderNumber: trimString(order.onlineOrderNumber),
@@ -592,6 +629,7 @@ function buildOrderSnapshot(order) {
     customerRemark: buildOrderRemark(order, 500),
     rawCustomerRemark,
     productRemark,
+    printProductRemark,
     products: getOrderProducts(order).map(item => ({
       brand: trimString(item.brand),
       productName: trimString(item.productName),
@@ -599,6 +637,51 @@ function buildOrderSnapshot(order) {
       quantity: Number(item.quantity || 0),
     })),
   };
+}
+
+function buildShipmentRemarkEntry(order, role = 'primary', attachedAt = '') {
+  const snapshot = buildOrderSnapshot(order);
+  return {
+    orderId: trimString(order && order._id),
+    orderNumber: trimString(snapshot.onlineOrderNumber)
+      || (snapshot.serialNumber ? `序号 ${snapshot.serialNumber}` : ''),
+    role: role === 'primary' ? 'primary' : 'appended',
+    productRemark: trimString(snapshot.productRemark),
+    printProductRemark: trimString(snapshot.printProductRemark),
+    customerRemark: trimString(snapshot.rawCustomerRemark),
+    attachedAt: trimString(attachedAt),
+  };
+}
+
+function mergeShipmentRemarkParts(parts) {
+  return mergeRemarkParts(parts, 0);
+}
+
+function buildShipmentRemarkFull(entries) {
+  return (Array.isArray(entries) ? entries : [])
+    .map(entry => {
+      const roleLabel = entry && entry.role === 'primary' ? '主单' : '追加单';
+      const orderLabel = trimString(entry && entry.orderNumber)
+        || trimString(entry && entry.orderId)
+        || '未标记订单';
+      const remark = mergeShipmentRemarkParts([
+        entry && entry.productRemark,
+        entry && entry.customerRemark,
+      ]);
+      return `${roleLabel} ${orderLabel}：${remark || '无备注'}`;
+    })
+    .join('\n');
+}
+
+function buildShipmentPrintRemark(entries) {
+  return (Array.isArray(entries) ? entries : [])
+    .map((entry, index) => buildPrintOrderLine(
+      entry && (entry.printProductRemark || entry.productRemark),
+      entry && entry.customerRemark,
+      index,
+    ))
+    .join('\n')
+    .slice(0, 100);
 }
 
 function getOperatorId() {
@@ -610,9 +693,28 @@ function getOperatorId() {
   }
 }
 
+function buildInitialShipmentFields(order) {
+  const sourceOrderId = trimString(order && order._id);
+  const outboundRecordId = trimString(order && order.outboundRecordId);
+  return {
+    linkedOrderIds: sourceOrderId ? [sourceOrderId] : [],
+    linkedOutboundIds: outboundRecordId ? [outboundRecordId] : [],
+    shipmentStatus: 'packing',
+    shipmentVersion: 1,
+    reuseEnabled: false,
+    reuseEnabledAt: '',
+    reuseDisabledAt: '',
+    finalPackagePhotos: [],
+    handedOverAt: '',
+    shipmentHistory: [],
+  };
+}
+
 async function createSfRecord({ order, env, attemptNo, sfOrderId, sender, requestID, msgData }) {
   const recordId = buildSfRecordId(env, order._id, attemptNo);
   const createdAt = new Date().toISOString();
+  const orderSnapshot = buildOrderSnapshot(order);
+  const shipmentRemarkEntries = [buildShipmentRemarkEntry(order, 'primary', createdAt)];
   const data = {
     _id: recordId,
     sourceOrderId: order._id,
@@ -626,6 +728,7 @@ async function createSfRecord({ order, env, attemptNo, sfOrderId, sender, reques
     status: 'applying',
     waybillNo: '',
     waybillNoInfoList: [],
+    ...buildInitialShipmentFields(order),
     applyRequestId: requestID,
     applyRequestTime: createdAt,
     searchRequestId: '',
@@ -636,7 +739,10 @@ async function createSfRecord({ order, env, attemptNo, sfOrderId, sender, reques
     cancelTime: '',
     errorCode: '',
     errorMessage: '',
-    orderSnapshot: buildOrderSnapshot(order),
+    orderSnapshot,
+    shipmentRemarkEntries,
+    shipmentRemarkFull: buildShipmentRemarkFull(shipmentRemarkEntries),
+    shipmentPrintRemark: buildShipmentPrintRemark(shipmentRemarkEntries),
     senderSnapshot: {
       contact: sender.contact,
       tel: maskPhone(sender.tel),
@@ -840,13 +946,16 @@ async function markSfApplied({ sfRecord, order, parsed, requestID }) {
       data: {
         trackingNumber: parsed.waybillNo,
         expressProvider: 'sf',
+        sfExpressOrderRecordId: sfRecord._id,
+        sharedWaybill: false,
         updateTime: db.serverDate(),
       },
     });
-    if (outboundRecordId && outboundSync.action === 'update') {
+    if (outboundRecordId && outboundSync.action !== 'conflict') {
       await transaction.collection(OUTBOUND_COLLECTION).doc(outboundRecordId).update({
         data: {
-          trackingNumber: outboundSync.trackingNumber,
+          ...(outboundSync.action === 'update' ? { trackingNumber: outboundSync.trackingNumber } : {}),
+          sfExpressOrderRecordId: sfRecord._id,
         },
       });
     }
@@ -1204,8 +1313,14 @@ exports.__test__ = {
   findSenderMapEntry,
   buildCargoDetails,
   buildOrderProductsRemark,
+  buildPrintProductsRemark,
   buildOrderRemark,
+  buildPrintOrderRemark,
   buildMsgData,
   buildOrderSnapshot,
+  buildShipmentRemarkEntry,
+  buildShipmentRemarkFull,
+  buildShipmentPrintRemark,
   planPendingOutboundTrackingSync,
+  buildInitialShipmentFields,
 };

@@ -16,6 +16,7 @@ import { UserRoleTab } from '../components/UserRoleTab';
 import { LoginLogTab } from '../components/LoginLogTab';
 import { DictionaryManageTab } from '../components/DictionaryManageTab';
 import { SupplierManageTab } from '../components/SupplierManageTab';
+import { AnnouncementManageTab } from '../components/AnnouncementManageTab';
 import { useTabDirty } from '../contexts/TabWorkspaceContext';
 
 interface InitializePermissionResult {
@@ -232,8 +233,10 @@ export function SettingsPage() {
   const canManageDictionaries = can('settings:dict_manage') || can('settings:update');
   const canManageSuppliers = can('settings:supplier_manage') || can('settings:update');
   const canViewSuppliers = can('settings:read') || canManageSuppliers;
+  const canManageAnnouncements = can('announcements:manage') || can('settings:update');
   const tabList = [
     { value: 'general', label: '全部设置' },
+    ...(canManageAnnouncements ? [{ value: 'announcements', label: '新功能通知' }] : []),
     ...(canViewSuppliers ? [{ value: 'suppliers', label: '供应商配置' }] : []),
     ...(canViewLoginLogs ? [{ value: 'dictionaries', label: '数据字典' }] : []),
     ...(canManageRoles ? [{ value: 'roles', label: '角色管理' }] : []),
@@ -496,6 +499,10 @@ export function SettingsPage() {
 
           {activeTab === 'roles' && canManageRoles && (
             <RoleManageTab onChanged={refreshPermissions} />
+          )}
+
+          {activeTab === 'announcements' && canManageAnnouncements && (
+            <AnnouncementManageTab />
           )}
 
           {activeTab === 'dictionaries' && canViewLoginLogs && (

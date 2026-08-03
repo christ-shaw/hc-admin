@@ -20,6 +20,7 @@ const db = cloud.database();
 
 const ORDERS = 'orders';
 const OUTBOUND = 'outbound_records';
+const SF_ORDERS = 'sf_express_orders';
 const ROLE_COLLECTION = 'roles';
 const USER_ROLE_COLLECTION = 'user_roles';
 
@@ -132,6 +133,43 @@ function planOutboundCompletionTracking(outbound, submittedTrackingNumber) {
   };
 }
 
+function uniqueStrings(values) {
+  return Array.from(new Set(
+    (Array.isArray(values) ? values : [])
+      .map(value => String(value || '').trim())
+      .filter(Boolean)
+  ));
+}
+
+function planSfShipmentAfterOutboundCompleted(record, completedOutboundId, linkedOutbounds) {
+  if (!record || record.status !== 'applied' || record.isCurrent !== true) {
+    return { action: 'skip' };
+  }
+  if (!Array.isArray(record.linkedOutboundIds) || !String(record.shipmentStatus || '').trim()) {
+    return { action: 'skip' };
+  }
+  if (!['packing', 'sealed'].includes(String(record.shipmentStatus || '').trim())) {
+    return { action: 'skip' };
+  }
+
+  const linkedOutboundIds = uniqueStrings(record.linkedOutboundIds);
+  if (!linkedOutboundIds.includes(String(completedOutboundId || '').trim())) {
+    return { action: 'skip' };
+  }
+  const outboundById = new Map(
+    (Array.isArray(linkedOutbounds) ? linkedOutbounds : [])
+      .filter(Boolean)
+      .map(outbound => [String(outbound._id || '').trim(), outbound])
+  );
+  const allCompleted = linkedOutboundIds.every(outboundId => {
+    if (outboundId === String(completedOutboundId || '').trim()) return true;
+    return String(outboundById.get(outboundId)?.outboundStatus || '').trim() === 'completed';
+  });
+  return allCompleted
+    ? { action: 'seal', linkedOutboundIds }
+    : { action: 'wait', linkedOutboundIds };
+}
+
 exports.main = async (event) => {
   const payload = (event && event.data) || event || {};
 
@@ -212,8 +250,62 @@ exports.main = async (event) => {
       backfilled.push(oid);
     }
 
+    // 4. 顺丰包裹的全部关联出库单完成后自动标记为已封箱。
+    // 普通包裹无需人工确认交接，但仍可在顺丰实际揽收前主动“开放追加”。
+    const sfExpressOrderRecordId = String(outbound.sfExpressOrderRecordId || '').trim();
+    let sfShipmentSync = 'not_linked';
+    if (sfExpressOrderRecordId) {
+      let sfRes = null;
+      try {
+        sfRes = await transaction.collection(SF_ORDERS).doc(sfExpressOrderRecordId).get();
+      } catch (_) {
+        sfRes = null;
+      }
+      const sfRecord = sfRes && sfRes.data;
+      if (sfRecord) {
+        const linkedOutbounds = [];
+        for (const linkedOutboundId of uniqueStrings(sfRecord.linkedOutboundIds)) {
+          if (linkedOutboundId === outboundId) {
+            linkedOutbounds.push({ ...outbound, ...outboundUpdate, _id: outboundId });
+            continue;
+          }
+          let linkedRes = null;
+          try {
+            linkedRes = await transaction.collection(OUTBOUND).doc(linkedOutboundId).get();
+          } catch (_) {
+            linkedRes = null;
+          }
+          if (linkedRes && linkedRes.data) linkedOutbounds.push(linkedRes.data);
+        }
+        const shipmentPlan = planSfShipmentAfterOutboundCompleted(
+          sfRecord,
+          outboundId,
+          linkedOutbounds,
+        );
+        sfShipmentSync = shipmentPlan.action;
+        if (shipmentPlan.action === 'seal') {
+          const now = new Date().toISOString();
+          const history = Array.isArray(sfRecord.shipmentHistory)
+            ? sfRecord.shipmentHistory.slice(-49)
+            : [];
+          await transaction.collection(SF_ORDERS).doc(sfExpressOrderRecordId).update({
+            data: {
+              shipmentStatus: 'sealed',
+              shipmentVersion: Math.max(1, Number(sfRecord.shipmentVersion || 1)) + 1,
+              shipmentHistory: [...history, {
+                action: 'all_outbounds_completed',
+                outboundRecordId: outboundId,
+                time: now,
+              }],
+              updatedAt: now,
+            },
+          });
+        }
+      }
+    }
+
     await transaction.commit();
-    return { success: true, outboundId, backfilled, skipped };
+    return { success: true, outboundId, backfilled, skipped, sfShipmentSync };
   } catch (err) {
     try { await transaction.rollback(); } catch (_) {}
     console.error('[completeOutbound] 失败:', err);
@@ -224,4 +316,5 @@ exports.main = async (event) => {
 exports.__test__ = {
   planOrderShipmentUpdate,
   planOutboundCompletionTracking,
+  planSfShipmentAfterOutboundCompleted,
 };

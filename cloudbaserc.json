@@ -39,6 +39,10 @@
       "runtime": "Nodejs18.15",
       "timeout": 30,
       "envVariables": {
+        "SF_PROD_CLIENT_CODE": "HCSMKBNA9WWC",
+        "SF_PROD_SERVICE_URL": "https://bspgw.sf-express.com/std/service",
+        "SF_PROD_PRINT_TEMPLATE_CODE": "fm_76130_standard_HCSMKBNA9WWC",
+        "SF_PROD_CUSTOM_TEMPLATE_CODE": "fm_76130_standard_custom_10057208710_3",
         "SF_SANDBOX_CLIENT_CODE": "HCSMKBNA9WWC",
         "SF_ENV": "sandbox",
         "SF_SANDBOX_PRINT_TEMPLATE_CODE": "fm_76130_standard_HCSMKBNA9WWC",
@@ -51,6 +55,10 @@
       "runtime": "Nodejs18.15",
       "timeout": 30,
       "envVariables": {
+        "SF_PROD_CLIENT_CODE": "HCSMKBNA9WWC",
+        "SF_PROD_SERVICE_URL": "https://bspgw.sf-express.com/std/service",
+        "SF_PROD_PRINT_TEMPLATE_CODE": "fm_76130_standard_HCSMKBNA9WWC",
+        "SF_PROD_CUSTOM_TEMPLATE_CODE": "fm_76130_standard_custom_10057208710_3",
         "SF_SANDBOX_CLIENT_CODE": "HCSMKBNA9WWC",
         "SF_ENV": "sandbox",
         "SF_SANDBOX_PRINT_TEMPLATE_CODE": "fm_76130_standard_HCSMKBNA9WWC",
@@ -118,6 +126,11 @@
       "runtime": "Nodejs18.15"
     },
     {
+      "name": "manageAnnouncements",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
       "name": "managePurchases",
       "handler": "index.main",
       "runtime": "Nodejs18.15"
@@ -166,6 +179,11 @@
     },
     {
       "name": "querySfExpressOrders",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
+      "name": "manageSfShipment",
       "handler": "index.main",
       "runtime": "Nodejs18.15"
     },

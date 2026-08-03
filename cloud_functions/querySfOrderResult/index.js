@@ -296,13 +296,19 @@ async function markQueryApplied(record, order, requestID, parsed) {
       data: {
         trackingNumber: parsed.waybillNo,
         expressProvider: 'sf',
+        ...(Array.isArray(record.linkedOrderIds)
+          ? { sfExpressOrderRecordId: record._id, sharedWaybill: record.linkedOrderIds.length > 1 }
+          : {}),
         updateTime: db.serverDate(),
       },
     });
-    if (outboundRecordId && outboundSync.action === 'update') {
+    if (outboundRecordId && outboundSync.action !== 'conflict') {
       await transaction.collection(OUTBOUND_COLLECTION).doc(outboundRecordId).update({
         data: {
-          trackingNumber: outboundSync.trackingNumber,
+          ...(outboundSync.action === 'update' ? { trackingNumber: outboundSync.trackingNumber } : {}),
+          ...(Array.isArray(record.linkedOutboundIds)
+            ? { sfExpressOrderRecordId: record._id }
+            : {}),
         },
       });
     }

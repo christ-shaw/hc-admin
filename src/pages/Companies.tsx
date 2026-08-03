@@ -5,6 +5,7 @@ import { CompanyTemplate } from '../types';
 import { useTabDirty } from '../contexts/TabWorkspaceContext';
 import { useCompanies } from '../hooks/useCompanies';
 import { parseCompanyInfo } from '../lib/cloudbase';
+import { PAGE_SIZE } from '../utils/constants';
 
 const EMPTY_COMPANY: Omit<CompanyTemplate, '_id' | 'createTime'> = {
   companyName: '',
@@ -41,8 +42,29 @@ export function Companies() {
   );
 
   useEffect(() => {
-    companies.fetchRecords();
+    companies.fetchRecords(null);
   }, []);
+
+  const displayRecords = companies.getPageRecords(companies.currentPage);
+  const hasLoadedNextPage = companies.currentPage * PAGE_SIZE < companies.records.length;
+  const canGoNextPage = hasLoadedNextPage || companies.hasMore;
+
+  useEffect(() => {
+    const totalPages = Math.max(1, Math.ceil(companies.totalRecords / PAGE_SIZE));
+    if (companies.currentPage > totalPages) companies.setCurrentPage(totalPages);
+  }, [companies.currentPage, companies.setCurrentPage, companies.totalRecords]);
+
+  const handlePrevPage = () => {
+    companies.setCurrentPage(Math.max(1, companies.currentPage - 1));
+  };
+
+  const handleNextPage = () => {
+    if (hasLoadedNextPage) {
+      companies.setCurrentPage(companies.currentPage + 1);
+      return;
+    }
+    if (companies.cursor) companies.fetchRecords(companies.cursor);
+  };
 
   /** 新增 */
   const handleAddOpen = () => {
@@ -228,7 +250,7 @@ export function Companies() {
       {/* 表格 */}
       <div className="glass-card">
         <Table
-          data={companies.records}
+          data={displayRecords}
           columns={columns}
           loading={companies.loading}
           rowKey="_id"
@@ -236,6 +258,26 @@ export function Companies() {
           hover
           stripe
         />
+        <div className="flex items-center justify-center gap-2 border-t border-gray-100 py-4">
+          <Button
+            size="small"
+            variant="outline"
+            disabled={companies.currentPage <= 1}
+            onClick={handlePrevPage}
+          >
+            上一页
+          </Button>
+          <span className="text-sm text-gray-500">第 {companies.currentPage} 页</span>
+          <Button
+            size="small"
+            variant="outline"
+            disabled={!canGoNextPage || companies.loading}
+            onClick={handleNextPage}
+          >
+            下一页
+          </Button>
+          <span className="text-sm text-gray-400">共 {companies.totalRecords} 条</span>
+        </div>
       </div>
 
       {/* 新增弹窗 */}

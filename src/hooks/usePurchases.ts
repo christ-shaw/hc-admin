@@ -42,10 +42,13 @@ export interface PurchaseAdjustment {
   operatorName: string;
 }
 
+export type PurchaseType = 'purchase' | 'recycle';
+
 export interface PurchaseRecord {
   _id: string;
   purchaseNumber: string;
   date: string;
+  purchaseType: PurchaseType;
   brand: string;
   model: string;
   specification: string;
@@ -68,8 +71,10 @@ export interface PurchaseRecord {
 }
 
 export type PurchaseCreateInput = Pick<PurchaseRecord,
-  'date' | 'brand' | 'model' | 'specification' | 'quantity' | 'unitPrice' | 'supplier' | 'supplierId' | 'owner'
+  'date' | 'purchaseType' | 'brand' | 'model' | 'specification' | 'quantity' | 'unitPrice' | 'supplier' | 'supplierId' | 'owner'
 > & { operatorName?: string };
+
+export type PurchaseUpdateInput = PurchaseCreateInput;
 
 export interface ConfirmPaymentInput {
   paymentDate: string;
@@ -128,6 +133,22 @@ export function usePurchases() {
     }
   }, []);
 
+  const updatePurchase = useCallback(async (purchaseId: string, purchase: PurchaseUpdateInput) => {
+    try {
+      const result = await callFunction<PurchaseResult<PurchaseRecord>>('managePurchases', {
+        action: 'update',
+        purchaseId,
+        purchase,
+      });
+      if (result.success && result.data) {
+        setRecords(prev => prev.map(item => item._id === purchaseId ? result.data! : item));
+      }
+      return result;
+    } catch (error) {
+      return { success: false, errMsg: String(error) } as PurchaseResult<PurchaseRecord>;
+    }
+  }, []);
+
   const deletePurchase = useCallback(async (purchaseId: string) => {
     try {
       const result = await callFunction<PurchaseResult>('managePurchases', { action: 'delete', purchaseId });
@@ -179,6 +200,7 @@ export function usePurchases() {
     errorMessage,
     fetchPurchases,
     createPurchase,
+    updatePurchase,
     returnToSupplier,
     deletePurchase,
     confirmPayment,

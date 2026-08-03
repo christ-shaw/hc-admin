@@ -15,6 +15,7 @@ import { callFunction } from '../lib/cloudbase';
 import { OrderFilters, OrderRecord } from '../types';
 import { formatDate } from '../utils/format';
 import { getOrderTotalAmount, hasUnreceivedPayment } from '../utils/orderProducts';
+import { AnnouncementCenter } from '../components/AnnouncementCenter';
 
 interface QuickStat {
   title: string;
@@ -405,9 +406,12 @@ export function Dashboard() {
     <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_400px]">
       <div className="space-y-6">
         {/* 标题 */}
-        <div>
-          <h1 className="text-2xl font-semibold text-gray-800">首页</h1>
-          <p className="text-gray-500 mt-1">{statsRangeText}</p>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold text-gray-800">首页</h1>
+            <p className="text-gray-500 mt-1">{statsRangeText}</p>
+          </div>
+          <AnnouncementCenter />
         </div>
 
         {/* 统计卡片 */}

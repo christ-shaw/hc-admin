@@ -1,7 +1,7 @@
 /**
  * managePurchases - 采购订单及付款确认管理
  *
- * action: list | create | returnToSupplier | delete | confirmPayment
+ * action: list | create | update | returnToSupplier | delete | confirmPayment
  */
 
 const cloud = require('wx-server-sdk');
@@ -17,10 +17,12 @@ const CONFIG_ID = 'permission_system';
 const ROLE_COLLECTION = 'roles';
 const USER_ROLE_COLLECTION = 'user_roles';
 const MAX_RETRY = 3;
+const PURCHASE_TYPES = new Set(['purchase', 'recycle']);
 
 const PERMISSIONS = {
   list: ['purchases:read', 'purchases:create', 'purchases:update', 'purchases:delete', 'purchases:payment_confirm', 'orders:read', 'orders:create'],
   create: ['purchases:create', 'orders:create'],
+  update: ['purchases:update'],
   returnToSupplier: ['purchases:update'],
   delete: ['purchases:delete', 'orders:delete'],
   confirmPayment: ['purchases:payment_confirm'],
@@ -199,6 +201,7 @@ function buildOperation(action, content, currentUser, operatorName, timestamp = 
 function normalizePurchaseInput(purchase) {
   return {
     date: clean(purchase.date),
+    purchaseType: clean(purchase.purchaseType) || 'purchase',
     supplier: clean(purchase.supplier),
     supplierId: clean(purchase.supplierId),
     owner: clean(purchase.owner),
@@ -212,6 +215,7 @@ function normalizePurchaseInput(purchase) {
 
 function validatePurchase(data) {
   if (!data.date || !data.supplier || !data.owner || !data.brand || !data.model || !data.specification) return '采购单信息不完整';
+  if (!PURCHASE_TYPES.has(data.purchaseType)) return '采购属性无效';
   if (!(data.quantity > 0) || !(data.unitPrice > 0)) return '数量和采购单价必须大于 0';
   return '';
 }
@@ -253,6 +257,7 @@ function withFinancials(record) {
   const payableAmount = Math.round(payableQuantity * unitPrice * 100) / 100;
   return {
     ...record,
+    purchaseType: PURCHASE_TYPES.has(clean(record.purchaseType)) ? clean(record.purchaseType) : 'purchase',
     totalAmount: originalAmount,
     returnedQuantity,
     payableQuantity,
@@ -285,6 +290,7 @@ async function createPurchase(payload, currentUser) {
 
   const purchaseNumber = await nextPurchaseNumber();
   const timestamp = now();
+  const purchaseTypeLabel = normalized.purchaseType === 'recycle' ? '回收' : '采购';
   const data = {
     purchaseNumber,
     ...normalized,
@@ -300,10 +306,67 @@ async function createPurchase(payload, currentUser) {
     createdBy: currentUser.id,
     updatedAt: timestamp,
     updatedBy: currentUser.id,
-    operations: [buildOperation('created', '生成采购单', currentUser, purchase.operatorName, timestamp)],
+    operations: [buildOperation('created', `生成${purchaseTypeLabel}单`, currentUser, purchase.operatorName, timestamp)],
   };
   const result = await db.collection(PURCHASE_COLLECTION).add({ data });
   return { success: true, data: { _id: result._id, ...data } };
+}
+
+async function updatePurchase(payload, currentUser) {
+  const purchaseId = clean(payload.purchaseId || payload._id);
+  if (!purchaseId) return { success: false, errMsg: '缺少采购单ID' };
+
+  const existing = await getDocById(PURCHASE_COLLECTION, purchaseId);
+  if (!existing) return { success: false, errMsg: '采购单不存在' };
+  if (existing.paymentStatus === 'paid' || existing.paymentStatus === 'no_payment') {
+    return { success: false, errMsg: '该采购单已完成结算，不能修改' };
+  }
+
+  const purchase = payload.purchase || payload;
+  const normalized = normalizePurchaseInput(purchase);
+  const validationError = validatePurchase(normalized);
+  if (validationError) return { success: false, errMsg: validationError };
+
+  const financials = withFinancials(existing);
+  if (normalized.quantity < financials.returnedQuantity) {
+    return {
+      success: false,
+      errMsg: `采购数量不能小于已退数量 ${financials.returnedQuantity}`,
+    };
+  }
+
+  const timestamp = now();
+  const recalculated = withFinancials({
+    ...existing,
+    ...normalized,
+    returnedQuantity: financials.returnedQuantity,
+    paymentStatus: 'pending',
+  });
+  const operation = buildOperation(
+    'updated',
+    `修改${normalized.purchaseType === 'recycle' ? '回收' : '采购'}单`,
+    currentUser,
+    purchase.operatorName,
+    timestamp,
+  );
+  const data = {
+    ...normalized,
+    totalAmount: recalculated.totalAmount,
+    returnedQuantity: recalculated.returnedQuantity,
+    payableQuantity: recalculated.payableQuantity,
+    returnDeduction: recalculated.returnDeduction,
+    payableAmount: recalculated.payableAmount,
+    paymentStatus: recalculated.paymentStatus,
+    updatedAt: timestamp,
+    updatedBy: currentUser.id,
+    operations: [...normalizeOperations(existing), operation],
+  };
+
+  await db.collection(PURCHASE_COLLECTION).doc(purchaseId).update({ data });
+  return {
+    success: true,
+    data: withFinancials({ ...existing, ...data }),
+  };
 }
 
 async function returnToSupplier(payload, currentUser) {
@@ -444,6 +507,7 @@ exports.main = async (event) => {
 
     if (action === 'list') return listPurchases();
     if (action === 'create') return createPurchase(payload, auth.currentUser);
+    if (action === 'update') return updatePurchase(payload, auth.currentUser);
     if (action === 'returnToSupplier') return returnToSupplier(payload, auth.currentUser);
     if (action === 'delete') return deletePurchase(payload);
     if (action === 'confirmPayment') return confirmPayment(payload, auth.currentUser);
@@ -452,4 +516,10 @@ exports.main = async (event) => {
     console.error('采购订单操作失败:', error);
     return { success: false, code: 'PURCHASE_MANAGE_FAILED', errMsg: error.message || '采购订单操作失败' };
   }
+};
+
+exports.__test__ = {
+  normalizePurchaseInput,
+  validatePurchase,
+  withFinancials,
 };

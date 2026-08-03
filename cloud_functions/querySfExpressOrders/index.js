@@ -56,6 +56,44 @@ function trimString(value) {
   return String(value || '').trim();
 }
 
+function uniqueStrings(values) {
+  return Array.from(new Set(
+    (Array.isArray(values) ? values : []).map(trimString).filter(Boolean)
+  ));
+}
+
+function normalizeShipmentMeta(record) {
+  const sourceOrderId = trimString(record && record.sourceOrderId);
+  const hasShipmentFields = Array.isArray(record && record.linkedOrderIds)
+    && !!trimString(record && record.shipmentStatus);
+  const linkedOrderIds = uniqueStrings([
+    sourceOrderId,
+    ...(Array.isArray(record && record.linkedOrderIds) ? record.linkedOrderIds : []),
+  ]);
+  const linkedOutboundIds = uniqueStrings(record && record.linkedOutboundIds);
+  const rawStatus = trimString(record && record.shipmentStatus);
+  const supportedStatuses = new Set(['packing', 'sealed', 'handed_over', 'picked_up', 'cancelled']);
+
+  return {
+    linkedOrderIds,
+    linkedOutboundIds,
+    shipmentStatus: hasShipmentFields && supportedStatuses.has(rawStatus)
+      ? rawStatus
+      : 'legacy_locked',
+    shipmentVersion: hasShipmentFields
+      ? Math.max(1, Number(record && record.shipmentVersion || 1))
+      : 0,
+    isLegacyShipment: !hasShipmentFields,
+    finalPackagePhotos: Array.isArray(record && record.finalPackagePhotos)
+      ? record.finalPackagePhotos
+      : [],
+    handedOverAt: trimString(record && record.handedOverAt),
+    reuseEnabled: record && record.reuseEnabled === true,
+    reuseEnabledAt: trimString(record && record.reuseEnabledAt),
+    reuseDisabledAt: trimString(record && record.reuseDisabledAt),
+  };
+}
+
 function normalizeSfEnv(value = process.env.SF_ENV || 'sandbox') {
   const normalized = trimString(value).toLowerCase();
   if (!normalized || normalized === 'sandbox' || normalized === 'sbox') return 'sandbox';
@@ -193,6 +231,25 @@ async function fetchByIds(collectionName, sourceOrderIds, extraConditions = {}, 
   return rows;
 }
 
+async function fetchDocumentsByIds(collectionName, documentIds) {
+  const ids = uniqueStrings(documentIds);
+  if (ids.length === 0) return [];
+  const rows = [];
+  for (let index = 0; index < ids.length; index += 20) {
+    const chunk = ids.slice(index, index + 20);
+    try {
+      const result = await db.collection(collectionName)
+        .where({ _id: _.in(chunk) })
+        .limit(chunk.length)
+        .get();
+      rows.push(...(result.data || []));
+    } catch (error) {
+      if (!isNotFound(error)) throw error;
+    }
+  }
+  return rows;
+}
+
 async function enrichShippingFees(orders) {
   const outboundIds = Array.from(new Set(
     orders
@@ -246,8 +303,17 @@ function buildOtherEnvSummary(records, currentEnv) {
   return Object.values(summary);
 }
 
-function publicSfOrder(record) {
+function publicSfOrder(record, fallbackOrder) {
   if (!record) return null;
+  const shipmentMeta = normalizeShipmentMeta(record);
+  const fallbackOutboundRecordId = trimString(fallbackOrder && fallbackOrder.outboundRecordId);
+  if (
+    fallbackOutboundRecordId
+    && shipmentMeta.linkedOrderIds.length === 1
+    && shipmentMeta.linkedOutboundIds.length === 0
+  ) {
+    shipmentMeta.linkedOutboundIds = [fallbackOutboundRecordId];
+  }
   return {
     _id: record._id,
     sourceOrderId: record.sourceOrderId,
@@ -261,6 +327,7 @@ function publicSfOrder(record) {
     status: record.status,
     waybillNo: record.waybillNo || '',
     waybillNoInfoList: Array.isArray(record.waybillNoInfoList) ? record.waybillNoInfoList : [],
+    ...shipmentMeta,
     applyRequestId: record.applyRequestId || '',
     applyRequestTime: record.applyRequestTime || '',
     searchRequestId: record.searchRequestId || '',
@@ -271,6 +338,11 @@ function publicSfOrder(record) {
     cancelTime: record.cancelTime || '',
     errorCode: record.errorCode || '',
     errorMessage: record.errorMessage || '',
+    shipmentRemarkEntries: Array.isArray(record.shipmentRemarkEntries)
+      ? record.shipmentRemarkEntries
+      : [],
+    shipmentRemarkFull: trimString(record.shipmentRemarkFull),
+    shipmentPrintRemark: trimString(record.shipmentPrintRemark),
     printCount: Number(record.printCount || 0),
     lastPrintTime: record.lastPrintTime || '',
     lastPrintRequestId: record.lastPrintRequestId || '',
@@ -337,14 +409,25 @@ exports.main = async (event) => {
     const hasMore = matchingOrders.length > pageLimit;
     const pageOrders = matchingOrders.slice(0, pageLimit);
     const sourceOrderIds = pageOrders.map(order => trimString(order._id)).filter(Boolean);
-    const sfRecords = await fetchByIds(SF_ORDERS_COLLECTION, sourceOrderIds);
+    const referencedSfRecordIds = pageOrders
+      .map(order => trimString(order.sfExpressOrderRecordId))
+      .filter(Boolean);
+    const [sourceSfRecords, referencedSfRecords] = await Promise.all([
+      fetchByIds(SF_ORDERS_COLLECTION, sourceOrderIds),
+      fetchDocumentsByIds(SF_ORDERS_COLLECTION, referencedSfRecordIds),
+    ]);
+    const sfRecords = Array.from(new Map(
+      [...sourceSfRecords, ...referencedSfRecords].map(record => [record._id, record])
+    ).values());
     const exportLogs = await fetchByIds(SF_EXPORT_LOGS_COLLECTION, sourceOrderIds);
 
     const sfBySource = new Map();
     for (const record of sfRecords) {
-      const list = sfBySource.get(record.sourceOrderId) || [];
-      list.push(record);
-      sfBySource.set(record.sourceOrderId, list);
+      for (const linkedOrderId of normalizeShipmentMeta(record).linkedOrderIds) {
+        const list = sfBySource.get(linkedOrderId) || [];
+        list.push(record);
+        sfBySource.set(linkedOrderId, list);
+      }
     }
     const exportBySource = new Map();
     for (const log of exportLogs) {
@@ -364,7 +447,7 @@ exports.main = async (event) => {
       return {
         order,
         sfStatus: deriveSfStatus(order, currentSfOrder, config.dataModelCutoverDate),
-        currentSfOrder: publicSfOrder(currentSfOrder),
+        currentSfOrder: publicSfOrder(currentSfOrder, order),
         otherEnvSummary: buildOtherEnvSummary(related, config.env),
         exportSummary: exportBySource.get(order._id) || { count: 0, lastExportTime: '' },
       };
@@ -395,6 +478,7 @@ exports.main = async (event) => {
 
 exports.__test__ = {
   normalizeShippingFee,
+  normalizeShipmentMeta,
   stripLegacySfFields,
   deriveSfStatus,
   selectLatestCurrent,

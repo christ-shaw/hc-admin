@@ -1,18 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, ChevronUp, FileText, Plus, RotateCcw, Upload, X } from 'lucide-react';
-import { MessagePlugin } from 'tdesign-react';
+import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, FileDown, FileText, Plus, RotateCcw, Upload, X } from 'lucide-react';
+import { Button, Dialog, MessagePlugin } from 'tdesign-react';
 import { buildProductModelSeed } from '../data/productDict';
 import { getCloudFileURLs, getCurrentOperatorName, uploadToCloudStorage } from '../lib/cloudbase';
 import { usePhoneModels } from '../hooks/usePhoneModels';
 import { usePermission } from '../contexts/PermissionContext';
 import { useSuppliers } from '../hooks/useSuppliers';
-import { usePurchases, type PurchaseRecord } from '../hooks/usePurchases';
+import { usePurchases, type PurchaseRecord, type PurchaseType } from '../hooks/usePurchases';
 import { useDictionaries } from '../contexts/DictionaryContext';
 import { DICT_CODES } from '../data/dict';
 import { useTabDirty } from '../contexts/TabWorkspaceContext';
+import { exportPurchaseRecordsExcel } from '../utils/purchaseExcel';
 
 interface PurchaseForm {
   date: string;
+  purchaseType: PurchaseType;
   supplier: string;
   owner: string;
   brand: string;
@@ -54,6 +56,7 @@ function formatDateTime(value: string) {
 function emptyForm(owner: string): PurchaseForm {
   return {
     date: localDateValue(),
+    purchaseType: 'purchase',
     supplier: '',
     owner,
     brand: '',
@@ -85,6 +88,7 @@ export function Purchases() {
     errorMessage: purchasesError,
     fetchPurchases,
     createPurchase,
+    updatePurchase,
     returnToSupplier,
     deletePurchase,
     confirmPayment,
@@ -95,10 +99,12 @@ export function Purchases() {
   const [endDate, setEndDate] = useState('');
   const [brandFilter, setBrandFilter] = useState('');
   const [ownerFilter, setOwnerFilter] = useState('');
+  const [purchaseTypeFilter, setPurchaseTypeFilter] = useState('');
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [page, setPage] = useState(1);
   const [currentOwner, setCurrentOwner] = useState('');
   const [createOpen, setCreateOpen] = useState(false);
+  const [editingPurchase, setEditingPurchase] = useState<PurchaseRecord | null>(null);
   const [detail, setDetail] = useState<PurchaseRecord | null>(null);
   const [form, setForm] = useState<PurchaseForm>(() => emptyForm(''));
   const [saving, setSaving] = useState(false);
@@ -113,21 +119,38 @@ export function Purchases() {
   const [returnTarget, setReturnTarget] = useState<PurchaseRecord | null>(null);
   const [returnForm, setReturnForm] = useState({ quantity: 1, reason: '', remark: '' });
   const [returnSaving, setReturnSaving] = useState(false);
+  const [exportVisible, setExportVisible] = useState(false);
+  const [exportStep, setExportStep] = useState<1 | 2 | 3>(1);
+  const [exportDateStart, setExportDateStart] = useState('');
+  const [exportDateEnd, setExportDateEnd] = useState('');
+  const [exportSuppliers, setExportSuppliers] = useState<string[]>([]);
+  const [exportOwners, setExportOwners] = useState<string[]>([]);
+  const [exporting, setExporting] = useState(false);
   const voucherInputRef = useRef<HTMLInputElement>(null);
   const createInitialRef = useRef('');
   const paymentInitialRef = useRef('');
   const returnInitialRef = useRef('');
+  const exportInitialRef = useRef('');
+  const exportState = JSON.stringify({
+    startDate: exportDateStart,
+    endDate: exportDateEnd,
+    suppliers: exportSuppliers,
+    owners: exportOwners,
+    step: exportStep,
+  });
 
   useTabDirty(
     (createOpen && !!createInitialRef.current && JSON.stringify(form) !== createInitialRef.current)
       || (!!paymentTarget && !!paymentInitialRef.current && (
         JSON.stringify(paymentForm) !== paymentInitialRef.current || voucherFiles.length > 0
       ))
-      || (!!returnTarget && !!returnInitialRef.current && JSON.stringify(returnForm) !== returnInitialRef.current),
+      || (!!returnTarget && !!returnInitialRef.current && JSON.stringify(returnForm) !== returnInitialRef.current)
+      || (exportVisible && !!exportInitialRef.current && exportState !== exportInitialRef.current),
     '采购管理',
   );
 
   const canCreate = can('purchases:create') || can('orders:create');
+  const canEdit = can('purchases:update');
   const canReturn = can('purchases:update');
   const canDelete = can('purchases:delete') || can('orders:delete');
   const canConfirmPayment = can('purchases:payment_confirm');
@@ -155,6 +178,13 @@ export function Purchases() {
     () => Array.from(new Set([currentOwner, ...records.map(record => record.owner)]).values()).filter(Boolean),
     [currentOwner, records],
   );
+  const exportSupplierOptions = useMemo(
+    () => Array.from(new Set([
+      ...records.map(record => record.supplier),
+      ...suppliers.map(supplier => supplier.name),
+    ])).filter(Boolean).sort((a, b) => a.localeCompare(b, 'zh-CN')),
+    [records, suppliers],
+  );
   const selectedBrand = catalog.find(item => item.brand === form.brand);
   const productOptions = (selectedBrand?.products || []).filter(item => item.enabled !== false);
   const selectedProduct = productOptions.find(item => item.name === form.model);
@@ -166,15 +196,16 @@ export function Purchases() {
       if (keyword && !`${record.purchaseNumber} ${record.supplier}`.toLowerCase().includes(keyword)) return false;
       if (startDate && record.date < startDate) return false;
       if (endDate && record.date > endDate) return false;
+      if (purchaseTypeFilter && record.purchaseType !== purchaseTypeFilter) return false;
       if (brandFilter && record.brand !== brandFilter) return false;
       if (ownerFilter && record.owner !== ownerFilter) return false;
       return true;
     });
-  }, [records, search, startDate, endDate, brandFilter, ownerFilter]);
+  }, [records, search, startDate, endDate, purchaseTypeFilter, brandFilter, ownerFilter]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const pageRows = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
-  const hasFilters = !!(search || startDate || endDate || brandFilter || ownerFilter);
+  const hasFilters = !!(search || startDate || endDate || purchaseTypeFilter || brandFilter || ownerFilter);
 
   useEffect(() => {
     if (page > totalPages) setPage(totalPages);
@@ -189,6 +220,7 @@ export function Purchases() {
     setSearch('');
     setStartDate('');
     setEndDate('');
+    setPurchaseTypeFilter('');
     setBrandFilter('');
     setOwnerFilter('');
     setPage(1);
@@ -196,9 +228,39 @@ export function Purchases() {
 
   const openCreate = () => {
     const nextForm = emptyForm(currentOwner);
+    setEditingPurchase(null);
     setForm(nextForm);
     createInitialRef.current = JSON.stringify(nextForm);
     setCreateOpen(true);
+  };
+
+  const openEdit = (record: PurchaseRecord) => {
+    if (record.paymentStatus !== 'pending') {
+      MessagePlugin.warning('该采购单已完成结算，不能修改');
+      return;
+    }
+    const nextForm: PurchaseForm = {
+      date: record.date,
+      purchaseType: record.purchaseType || 'purchase',
+      supplier: record.supplier,
+      owner: record.owner,
+      brand: record.brand,
+      model: record.model,
+      specification: record.specification,
+      quantity: record.quantity,
+      unitPrice: record.unitPrice,
+    };
+    setEditingPurchase(record);
+    setForm(nextForm);
+    createInitialRef.current = JSON.stringify(nextForm);
+    setDetail(null);
+    setCreateOpen(true);
+  };
+
+  const closePurchaseForm = () => {
+    setCreateOpen(false);
+    setEditingPurchase(null);
+    createInitialRef.current = '';
   };
 
   const openReturn = (record: PurchaseRecord) => {
@@ -231,6 +293,7 @@ export function Purchases() {
   const submitPurchase = async () => {
     const missing: string[] = [];
     if (!form.date) missing.push('采购日期');
+    if (!form.purchaseType) missing.push('采购属性');
     if (!form.supplier) missing.push('供货商名称');
     if (!form.owner) missing.push('采购责任人');
     if (!form.brand) missing.push('采购货品品牌');
@@ -242,18 +305,87 @@ export function Purchases() {
       MessagePlugin.warning(`请填写：${missing.join('、')}`);
       return;
     }
+    if (editingPurchase && form.quantity < (editingPurchase.returnedQuantity || 0)) {
+      MessagePlugin.warning(`采购数量不能小于已退数量 ${editingPurchase.returnedQuantity}`);
+      return;
+    }
     setSaving(true);
     const selectedSupplier = suppliers.find(item => item.name === form.supplier);
     const input = { ...form, supplierId: selectedSupplier?._id || '', operatorName: currentOwner };
-    const result = await createPurchase(input);
+    const result = editingPurchase
+      ? await updatePurchase(editingPurchase._id, input)
+      : await createPurchase(input);
     setSaving(false);
     if (!result.success) {
-      MessagePlugin.error(result.errMsg || '新增采购单失败');
+      MessagePlugin.error(result.errMsg || (editingPurchase ? '修改采购单失败' : '新增采购单失败'));
       return;
     }
-    setCreateOpen(false);
+    const purchaseNumber = result.data?.purchaseNumber || editingPurchase?.purchaseNumber || '';
+    closePurchaseForm();
     setPage(1);
-    MessagePlugin.success(`采购单 ${result.data?.purchaseNumber || ''} 已创建`);
+    MessagePlugin.success(editingPurchase
+      ? `采购单 ${purchaseNumber} 已修改`
+      : `采购单 ${purchaseNumber} 已创建`);
+  };
+
+  const openExport = () => {
+    const today = new Date();
+    const endDate = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    const sixMonthsAgo = new Date(today);
+    sixMonthsAgo.setDate(sixMonthsAgo.getDate() - 183);
+    const startDate = `${sixMonthsAgo.getFullYear()}-${String(sixMonthsAgo.getMonth() + 1).padStart(2, '0')}-${String(sixMonthsAgo.getDate()).padStart(2, '0')}`;
+    setExportDateStart(startDate);
+    setExportDateEnd(endDate);
+    setExportSuppliers([]);
+    setExportOwners([]);
+    setExportStep(1);
+    exportInitialRef.current = JSON.stringify({
+      startDate,
+      endDate,
+      suppliers: [],
+      owners: [],
+      step: 1,
+    });
+    setExportVisible(true);
+  };
+
+  const validateExportDate = (): string | null => {
+    if (!exportDateStart || !exportDateEnd) return '请选择完整的日期范围';
+    const start = new Date(`${exportDateStart}T00:00:00`);
+    const end = new Date(`${exportDateEnd}T00:00:00`);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return '日期格式不正确';
+    if (start > end) return '开始日期不能晚于结束日期';
+    if ((end.getTime() - start.getTime()) / 86_400_000 > 183) return '日期范围不能超过半年（183天）';
+    return null;
+  };
+
+  const exportPurchases = async () => {
+    const dateError = validateExportDate();
+    if (dateError) {
+      MessagePlugin.warning(dateError);
+      return;
+    }
+
+    setExporting(true);
+    try {
+      const exportRecords = records.filter(record => {
+        if (record.date < exportDateStart || record.date > exportDateEnd) return false;
+        if (exportSuppliers.length > 0 && !exportSuppliers.includes(record.supplier)) return false;
+        if (exportOwners.length > 0 && !exportOwners.includes(record.owner)) return false;
+        return true;
+      });
+      if (exportRecords.length === 0) {
+        MessagePlugin.warning('所选条件内暂无采购单数据');
+        return;
+      }
+      exportPurchaseRecordsExcel(exportRecords);
+      MessagePlugin.success(`已导出 ${exportRecords.length} 条采购单`);
+      setExportVisible(false);
+    } catch (error) {
+      MessagePlugin.error('导出失败: ' + String(error));
+    } finally {
+      setExporting(false);
+    }
   };
 
   const submitReturn = async () => {
@@ -407,14 +539,24 @@ export function Purchases() {
           <h1 className="text-xl font-semibold text-[#1F2733]">采购管理</h1>
           <p className="mt-0.5 text-[13px] text-[#8A94A6]">管理所有采购单，共 {filtered.length} 条</p>
         </div>
-        <button
-          type="button"
-          disabled={!canCreate}
-          onClick={openCreate}
-          className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-[#0052D9] px-4 text-[13px] font-medium text-white shadow-sm transition hover:bg-[#266FE8] disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          <Plus size={15} /> 新增采购单
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            disabled={records.length === 0}
+            onClick={openExport}
+            className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[#B8CDF5] bg-white px-3.5 text-[13px] font-medium text-[#0052D9] transition hover:bg-[#F0F4FE] disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <FileDown size={15} /> 导出 Excel
+          </button>
+          <button
+            type="button"
+            disabled={!canCreate}
+            onClick={openCreate}
+            className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-[#0052D9] px-4 text-[13px] font-medium text-white shadow-sm transition hover:bg-[#266FE8] disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Plus size={15} /> 新增采购单
+          </button>
+        </div>
       </div>
 
       <section className="rounded-2xl border border-[#EEF0F2] bg-white px-4 py-3.5 shadow-[0_1px_2px_rgba(16,24,40,0.03)]">
@@ -440,6 +582,11 @@ export function Purchases() {
         </div>
         {filtersOpen && (
           <div className="mt-2.5 flex flex-wrap gap-2.5 border-t border-dashed border-[#EEF0F2] pt-2.5">
+            <select aria-label="采购属性筛选" value={purchaseTypeFilter} onChange={event => setFilter(setPurchaseTypeFilter, event.target.value)} className={`${fieldClass} w-[150px]`}>
+              <option value="">全部采购属性</option>
+              <option value="purchase">采购</option>
+              <option value="recycle">回收</option>
+            </select>
             <select aria-label="品牌筛选" value={brandFilter} onChange={event => setFilter(setBrandFilter, event.target.value)} className={`${fieldClass} w-[150px]`}>
               <option value="">全部品牌</option>
               {catalog.map(item => <option key={item.brand} value={item.brand}>{item.brand}</option>)}
@@ -457,16 +604,23 @@ export function Purchases() {
           <div className="border-b border-[#F3C0C5] bg-[#FDECEE] px-4 py-2.5 text-[13px] text-[#C9353F]">{purchasesError}</div>
         )}
         <div className="max-w-full overflow-x-auto">
-          <div className="min-w-[1360px]">
-            <div className="grid grid-cols-[120px_100px_84px_140px_80px_60px_92px_104px_140px_80px_90px_230px] border-b border-[#EEF0F2] bg-[#FAFBFC] text-xs font-medium text-[#8A94A6]">
-              {['采购单号', '采购日期', '品牌', '型号', '规格', '数量', '采购单价', '采购总价', '供货商', '责任人', '付款状态', '操作'].map(label => (
+          <div className="min-w-[1472px]">
+            <div className="grid grid-cols-[120px_100px_72px_84px_140px_80px_60px_92px_104px_140px_80px_90px_270px] border-b border-[#EEF0F2] bg-[#FAFBFC] text-xs font-medium text-[#8A94A6]">
+              {['采购单号', '采购日期', '属性', '品牌', '型号', '规格', '数量', '采购单价', '采购总价', '供货商', '责任人', '付款状态', '操作'].map(label => (
                 <div key={label} className="px-3 py-[11px]">{label}</div>
               ))}
             </div>
             {pageRows.map(record => (
-              <div key={record._id} className="grid grid-cols-[120px_100px_84px_140px_80px_60px_92px_104px_140px_80px_90px_230px] border-b border-[#F0F1F3] bg-white text-[13px] transition hover:bg-[#F8FAFF]">
+              <div key={record._id} className="grid grid-cols-[120px_100px_72px_84px_140px_80px_60px_92px_104px_140px_80px_90px_270px] border-b border-[#F0F1F3] bg-white text-[13px] transition hover:bg-[#F8FAFF]">
                 <div className="px-3 py-3 font-medium text-[#1F2733]">{record.purchaseNumber}</div>
                 <div className="px-3 py-3 text-[#4B5563]">{record.date}</div>
+                <div className="px-3 py-3">
+                  <span className={`rounded-full px-2 py-1 text-[11.5px] ${
+                    record.purchaseType === 'recycle' ? 'bg-[#E8F8F2] text-[#168267]' : 'bg-[#EDF3FF] text-[#0052D9]'
+                  }`}>
+                    {record.purchaseType === 'recycle' ? '回收' : '采购'}
+                  </span>
+                </div>
                 <div className="px-3 py-3 text-[#4B5563]">{record.brand}</div>
                 <div className="truncate px-3 py-3 text-[#4B5563]" title={record.model}>{record.model}</div>
                 <div className="px-3 py-3 text-[#4B5563]">{record.specification}</div>
@@ -482,6 +636,7 @@ export function Purchases() {
                 </div>
                 <div className="flex items-center gap-0.5 px-2 py-2">
                   <button type="button" onClick={() => setDetail(record)} className="rounded px-1.5 py-1 text-[12.5px] text-[#0052D9] hover:bg-[#F0F4FE]">详情</button>
+                  <button type="button" disabled={!canEdit || record.paymentStatus !== 'pending'} onClick={() => openEdit(record)} className="rounded px-1.5 py-1 text-[12.5px] text-[#0052D9] hover:bg-[#F0F4FE] disabled:cursor-not-allowed disabled:opacity-40">编辑</button>
                   <button type="button" disabled={!canReturn || record.paymentStatus !== 'pending'} onClick={() => openReturn(record)} className="rounded px-1.5 py-1 text-[12.5px] text-[#6B7280] hover:bg-[#F0F1F3] disabled:cursor-not-allowed disabled:opacity-40">退货调整</button>
                   <button type="button" disabled={record.paymentStatus === 'pending' && !canConfirmPayment} onClick={() => openPayment(record)} className="rounded px-1.5 py-1 text-[12.5px] text-[#168267] hover:bg-[#E8F8F2] disabled:cursor-not-allowed disabled:opacity-40">
                     {record.paymentStatus === 'paid' ? '付款信息' : record.paymentStatus === 'no_payment' ? '应付清单' : '付款确认'}
@@ -494,38 +649,67 @@ export function Purchases() {
             {!purchasesLoading && pageRows.length === 0 && <div className="py-[60px] text-center text-[13px] text-[#B5BBC5]">没有匹配的采购单</div>}
           </div>
         </div>
-        <div className="flex flex-wrap items-center justify-center gap-1.5 border-t border-[#F3F4F6] p-3.5">
-          {Array.from({ length: totalPages }, (_, index) => index + 1).map(number => (
-            <button
-              key={number}
-              type="button"
-              onClick={() => setPage(number)}
-              aria-current={page === number ? 'page' : undefined}
-              className={`h-[30px] w-[30px] rounded-lg border text-[12.5px] ${page === number ? 'border-[#0052D9] bg-[#0052D9] text-white' : 'border-[#E1E4E8] bg-white text-[#6B7280] hover:border-[#8FB3F4] hover:text-[#0052D9]'}`}
-            >
-              {number}
-            </button>
-          ))}
-          <span className="ml-2 text-[12.5px] text-[#9AA3B2]">共 {filtered.length} 条</span>
+        <div className="flex items-center justify-center gap-2 border-t border-[#F3F4F6] py-4">
+          <Button
+            size="small"
+            variant="outline"
+            disabled={page <= 1}
+            onClick={() => setPage(previous => Math.max(1, previous - 1))}
+          >
+            上一页
+          </Button>
+          <span className="text-sm text-gray-500">第 {page} 页</span>
+          <Button
+            size="small"
+            variant="outline"
+            disabled={page >= totalPages || purchasesLoading}
+            onClick={() => setPage(previous => Math.min(totalPages, previous + 1))}
+          >
+            下一页
+          </Button>
+          <span className="text-sm text-gray-400">共 {filtered.length} 条</span>
         </div>
       </section>
 
       {createOpen && (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-[rgba(15,23,42,0.45)] p-4" role="presentation" onMouseDown={event => event.target === event.currentTarget && setCreateOpen(false)}>
-          <section role="dialog" aria-modal="true" aria-labelledby="purchase-create-title" className="flex max-h-[90vh] w-[640px] max-w-[94vw] flex-col overflow-hidden rounded-2xl bg-white shadow-[0_24px_64px_rgba(0,0,0,0.24)]">
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-[rgba(15,23,42,0.45)] p-4" role="presentation" onMouseDown={event => event.target === event.currentTarget && closePurchaseForm()}>
+          <section role="dialog" aria-modal="true" aria-labelledby="purchase-form-title" className="flex max-h-[90vh] w-[640px] max-w-[94vw] flex-col overflow-hidden rounded-2xl bg-white shadow-[0_24px_64px_rgba(0,0,0,0.24)]">
             <div className="flex flex-shrink-0 items-center justify-between border-b border-[#EEF0F2] px-5 py-4">
-              <h2 id="purchase-create-title" className="text-base font-semibold text-[#1F2733]">新增采购单</h2>
-              <button type="button" aria-label="关闭新增采购单" onClick={() => setCreateOpen(false)} className="flex h-7 w-7 items-center justify-center rounded-lg text-[#8A94A6] hover:bg-[#F0F1F3] hover:text-[#374151]"><X size={16} /></button>
+              <h2 id="purchase-form-title" className="text-base font-semibold text-[#1F2733]">{editingPurchase ? '修改采购单' : '新增采购单'}</h2>
+              <button type="button" aria-label="关闭采购单表单" onClick={closePurchaseForm} className="flex h-7 w-7 items-center justify-center rounded-lg text-[#8A94A6] hover:bg-[#F0F1F3] hover:text-[#374151]"><X size={16} /></button>
             </div>
             <div className="flex-1 overflow-auto px-6 py-4">
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div>
-                  <FieldLabel>采购单号（自动）</FieldLabel>
-                  <div className="flex h-9 items-center rounded-lg border border-[#EEF0F2] bg-[#FAFBFC] px-2.5 text-[13px] text-[#6B7280]">保存后自动生成</div>
+                  <FieldLabel>采购单号</FieldLabel>
+                  <div className="flex h-9 items-center rounded-lg border border-[#EEF0F2] bg-[#FAFBFC] px-2.5 text-[13px] text-[#6B7280]">{editingPurchase?.purchaseNumber || '保存后自动生成'}</div>
                 </div>
                 <div>
                   <FieldLabel required>采购日期</FieldLabel>
                   <input type="date" value={form.date} onChange={event => setForm(prev => ({ ...prev, date: event.target.value }))} className={fieldClass} />
+                </div>
+                <div>
+                  <FieldLabel required>采购属性</FieldLabel>
+                  <div className="grid h-9 grid-cols-2 rounded-lg bg-[#F0F1F3] p-0.5">
+                    {([
+                      { value: 'purchase', label: '采购' },
+                      { value: 'recycle', label: '回收' },
+                    ] as const).map(option => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        aria-pressed={form.purchaseType === option.value}
+                        onClick={() => setForm(previous => ({ ...previous, purchaseType: option.value }))}
+                        className={`rounded-md text-[13px] font-medium transition ${
+                          form.purchaseType === option.value
+                            ? 'bg-white text-[#0052D9] shadow-sm'
+                            : 'text-[#6B7280] hover:text-[#374151]'
+                        }`}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
                 <div>
                   <FieldLabel required>供货商名称</FieldLabel>
@@ -554,6 +738,7 @@ export function Purchases() {
                   <FieldLabel required>采购货品品牌</FieldLabel>
                   <select value={form.brand} onChange={event => updateBrand(event.target.value)} className={fieldClass}>
                     <option value="">请选择品牌</option>
+                    {form.brand && !catalog.some(item => item.brand === form.brand) && <option value={form.brand}>{form.brand}（历史品牌）</option>}
                     {catalog.map(item => <option key={item.brand} value={item.brand}>{item.brand}</option>)}
                   </select>
                 </div>
@@ -561,6 +746,7 @@ export function Purchases() {
                   <FieldLabel required>采购型号</FieldLabel>
                   <select value={form.model} disabled={!form.brand} onChange={event => updateModel(event.target.value)} className={fieldClass}>
                     <option value="">{form.brand ? '请选择型号' : '请先选择品牌'}</option>
+                    {form.model && !productOptions.some(item => item.name === form.model) && <option value={form.model}>{form.model}（历史型号）</option>}
                     {productOptions.map(item => <option key={item.name} value={item.name}>{item.name}</option>)}
                   </select>
                 </div>
@@ -568,12 +754,14 @@ export function Purchases() {
                   <FieldLabel required>规格</FieldLabel>
                   <select value={form.specification} disabled={!form.model} onChange={event => setForm(prev => ({ ...prev, specification: event.target.value }))} className={fieldClass}>
                     <option value="">{form.model ? '请选择规格' : '请先选择型号'}</option>
+                    {form.specification && !specOptions.some(item => item.name === form.specification) && <option value={form.specification}>{form.specification}（历史规格）</option>}
                     {specOptions.map(item => <option key={item.name} value={item.name}>{item.name}</option>)}
                   </select>
                 </div>
                 <div>
                   <FieldLabel required>数量</FieldLabel>
-                  <input type="number" min={1} value={form.quantity} onChange={event => setForm(prev => ({ ...prev, quantity: Number(event.target.value) }))} className={fieldClass} />
+                  <input type="number" min={Math.max(1, editingPurchase?.returnedQuantity || 0)} value={form.quantity} onChange={event => setForm(prev => ({ ...prev, quantity: Number(event.target.value) }))} className={fieldClass} />
+                  {!!editingPurchase?.returnedQuantity && <p className="mt-1 text-[11px] text-[#8A94A6]">已退 {editingPurchase.returnedQuantity} 台，修改后数量不能低于已退数量</p>}
                 </div>
                 <div>
                   <FieldLabel required>采购单价</FieldLabel>
@@ -586,8 +774,8 @@ export function Purchases() {
               </div>
             </div>
             <div className="flex flex-shrink-0 items-center justify-end gap-2 border-t border-[#EEF0F2] bg-[#FAFBFC] px-5 py-3.5">
-              <button type="button" onClick={() => setCreateOpen(false)} className="h-9 rounded-lg border border-[#E1E4E8] bg-white px-4 text-[13px] text-[#6B7280] hover:text-[#374151]">取消</button>
-              <button type="button" disabled={saving} onClick={submitPurchase} className="h-9 rounded-lg bg-[#0052D9] px-5 text-[13px] font-medium text-white hover:bg-[#266FE8] disabled:cursor-wait disabled:opacity-60">{saving ? '保存中...' : '保存采购单'}</button>
+              <button type="button" onClick={closePurchaseForm} className="h-9 rounded-lg border border-[#E1E4E8] bg-white px-4 text-[13px] text-[#6B7280] hover:text-[#374151]">取消</button>
+              <button type="button" disabled={saving} onClick={submitPurchase} className="h-9 rounded-lg bg-[#0052D9] px-5 text-[13px] font-medium text-white hover:bg-[#266FE8] disabled:cursor-wait disabled:opacity-60">{saving ? '保存中...' : editingPurchase ? '保存修改' : '保存采购单'}</button>
             </div>
           </section>
         </div>
@@ -609,7 +797,7 @@ export function Purchases() {
                 <span className="text-[22px] font-semibold text-[#0052D9]">{formatMoney(detail.payableAmount ?? detail.quantity * detail.unitPrice)}</span>
               </div>
               {[
-                { title: '基础信息', items: [['采购单号', detail.purchaseNumber], ['采购日期', detail.date], ['供货商名称', detail.supplier], ['采购责任人', detail.owner]] },
+                { title: '基础信息', items: [['采购单号', detail.purchaseNumber], ['采购日期', detail.date], ['采购属性', detail.purchaseType === 'recycle' ? '回收' : '采购'], ['供货商名称', detail.supplier], ['采购责任人', detail.owner]] },
                 { title: '货品信息', items: [['品牌', detail.brand], ['型号', detail.model], ['规格', detail.specification], ['数量', String(detail.quantity)]] },
                 { title: '应付清单', items: [
                   ['采购单价', formatMoney(detail.unitPrice)],
@@ -678,6 +866,7 @@ export function Purchases() {
             </div>
             <div className="flex flex-shrink-0 flex-wrap items-center justify-end gap-2 border-t border-[#EEF0F2] bg-[#FAFBFC] px-5 py-3.5">
               <button type="button" disabled={!canDelete || detail.paymentStatus !== 'pending'} onClick={() => removePurchase(detail)} className="h-9 rounded-lg border border-[#F3C0C5] bg-white px-4 text-[13px] text-[#E34D59] hover:bg-[#FDECEE] disabled:cursor-not-allowed disabled:opacity-40">删除</button>
+              <button type="button" disabled={!canEdit || detail.paymentStatus !== 'pending'} onClick={() => openEdit(detail)} className="h-9 rounded-lg border border-[#B8CDF5] bg-white px-4 text-[13px] text-[#0052D9] hover:bg-[#F0F4FE] disabled:cursor-not-allowed disabled:opacity-40">编辑</button>
               <button type="button" disabled={!canReturn || detail.paymentStatus !== 'pending'} onClick={() => openReturn(detail)} className="h-9 rounded-lg border border-[#D5D9E0] bg-white px-4 text-[13px] text-[#6B7280] hover:bg-[#F0F1F3] disabled:cursor-not-allowed disabled:opacity-40">退货调整</button>
               <button type="button" disabled={detail.paymentStatus === 'pending' && !canConfirmPayment} onClick={() => openPayment(detail)} className="h-9 rounded-lg border border-[#A7DCCB] bg-white px-4 text-[13px] text-[#168267] hover:bg-[#E8F8F2] disabled:cursor-not-allowed disabled:opacity-40">
                 {detail.paymentStatus === 'paid' ? '查看付款信息' : '查看应付清单'}
@@ -825,6 +1014,179 @@ export function Purchases() {
           </section>
         </div>
       )}
+
+      <Dialog
+        header="导出采购单"
+        visible={exportVisible}
+        onClose={() => setExportVisible(false)}
+        width="560px"
+        footer={null}
+      >
+        <div className="space-y-4">
+          <div className="mb-2 flex items-center justify-center gap-0">
+            {[1, 2, 3].map(step => (
+              <div key={step} className="flex items-center">
+                <div className={`flex h-8 w-8 items-center justify-center rounded-full text-sm font-medium ${
+                  step <= exportStep ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-500'
+                }`}>
+                  {step < exportStep ? '✓' : step}
+                </div>
+                {step < 3 && <div className={`mx-1 h-0.5 w-16 ${step < exportStep ? 'bg-blue-500' : 'bg-gray-200'}`} />}
+              </div>
+            ))}
+          </div>
+          <div className="mb-4 text-center text-xs text-gray-400">
+            {['选择日期范围', '选择供货商', '选择责任人'][exportStep - 1]}
+          </div>
+
+          {exportStep === 1 && (
+            <div className="space-y-3">
+              <p className="text-sm text-gray-500">选择需要导出的采购日期范围，最多支持半年的数据导出。</p>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="mb-1 block text-xs text-gray-500">开始日期 <span className="text-red-500">*</span></label>
+                  <input
+                    type="date"
+                    value={exportDateStart}
+                    onChange={event => setExportDateStart(event.target.value)}
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-gray-500">结束日期 <span className="text-red-500">*</span></label>
+                  <input
+                    type="date"
+                    value={exportDateEnd}
+                    onChange={event => setExportDateEnd(event.target.value)}
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                  />
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {([
+                  { label: '近1个月', days: 30 },
+                  { label: '近3个月', days: 90 },
+                  { label: '近半年', days: 183 },
+                ] as const).map(option => (
+                  <Button
+                    key={option.days}
+                    size="small"
+                    variant="outline"
+                    onClick={() => {
+                      const today = new Date();
+                      const end = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+                      const start = new Date(today);
+                      start.setDate(start.getDate() - option.days);
+                      setExportDateEnd(end);
+                      setExportDateStart(`${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}-${String(start.getDate()).padStart(2, '0')}`);
+                    }}
+                  >
+                    {option.label}
+                  </Button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {exportStep === 2 && (
+            <div className="space-y-3">
+              <p className="text-sm text-gray-500">选择需要导出的供货商，不选择则导出全部供货商。</p>
+              <div className="grid max-h-[240px] grid-cols-2 gap-2 overflow-y-auto pr-1 sm:grid-cols-3">
+                {exportSupplierOptions.map(supplier => {
+                  const selected = exportSuppliers.includes(supplier);
+                  return (
+                    <button
+                      key={supplier}
+                      type="button"
+                      title={supplier}
+                      className={`truncate rounded-lg border px-3 py-2 text-sm ${
+                        selected ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-200 bg-white text-gray-700 hover:border-gray-300'
+                      }`}
+                      onClick={() => setExportSuppliers(previous =>
+                        selected ? previous.filter(item => item !== supplier) : [...previous, supplier]
+                      )}
+                    >
+                      {supplier}
+                    </button>
+                  );
+                })}
+              </div>
+              {exportSupplierOptions.length === 0 && <div className="py-8 text-center text-sm text-gray-400">暂无供货商</div>}
+            </div>
+          )}
+
+          {exportStep === 3 && (
+            <div className="space-y-3">
+              <p className="text-sm text-gray-500">选择需要导出的责任人，不选择则导出全部责任人。</p>
+              <div className="grid max-h-[240px] grid-cols-2 gap-2 overflow-y-auto pr-1 sm:grid-cols-4">
+                {ownerOptions.map(owner => {
+                  const selected = exportOwners.includes(owner);
+                  return (
+                    <button
+                      key={owner}
+                      type="button"
+                      title={owner}
+                      className={`truncate rounded-lg border px-3 py-2 text-sm ${
+                        selected ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-200 bg-white text-gray-700 hover:border-gray-300'
+                      }`}
+                      onClick={() => setExportOwners(previous =>
+                        selected ? previous.filter(item => item !== owner) : [...previous, owner]
+                      )}
+                    >
+                      {owner}
+                    </button>
+                  );
+                })}
+              </div>
+              {ownerOptions.length === 0 && <div className="py-8 text-center text-sm text-gray-400">暂无责任人</div>}
+            </div>
+          )}
+
+          <div className="flex items-center justify-between border-t border-gray-100 pt-4">
+            <div>
+              {exportStep > 1 && (
+                <Button
+                  variant="outline"
+                  icon={<ChevronLeft size={14} />}
+                  onClick={() => setExportStep(previous => (previous - 1) as 1 | 2)}
+                >
+                  上一步
+                </Button>
+              )}
+            </div>
+            <div className="flex gap-2">
+              <Button onClick={() => setExportVisible(false)}>取消</Button>
+              {exportStep < 3 ? (
+                <Button
+                  theme="primary"
+                  icon={<ChevronRight size={14} />}
+                  onClick={() => {
+                    if (exportStep === 1) {
+                      const error = validateExportDate();
+                      if (error) {
+                        MessagePlugin.warning(error);
+                        return;
+                      }
+                    }
+                    setExportStep(previous => (previous + 1) as 2 | 3);
+                  }}
+                >
+                  下一步
+                </Button>
+              ) : (
+                <Button
+                  theme="primary"
+                  icon={<FileDown size={14} />}
+                  loading={exporting}
+                  onClick={exportPurchases}
+                >
+                  导出 Excel
+                </Button>
+              )}
+            </div>
+          </div>
+        </div>
+      </Dialog>
 
       {voucherPreview && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-[rgba(15,23,42,0.62)] p-4" role="presentation" onMouseDown={event => event.target === event.currentTarget && setVoucherPreview(null)}>

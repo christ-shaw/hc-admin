@@ -230,6 +230,23 @@ function buildSnapshotProductsRemark(products) {
   return summary ? `客户下单：${summary}` : '';
 }
 
+function buildSnapshotPrintProductsRemark(products) {
+  if (!Array.isArray(products)) return '';
+  return products
+    .map(item => {
+      const productName = trimString(item && item.productName);
+      const specification = trimString(item && item.specification);
+      const parts = [productName];
+      if (specification && specification !== '默认') parts.push(specification);
+      const label = parts.filter(Boolean).join(' / ');
+      if (!label) return '';
+      const quantity = Number(item && item.quantity || 0);
+      return `${label}×${Number.isFinite(quantity) && quantity > 0 ? quantity : 0}`;
+    })
+    .filter(Boolean)
+    .join('，');
+}
+
 function mergePrintRemarkParts(parts) {
   const merged = [];
   for (const value of parts || []) {
@@ -246,12 +263,65 @@ function mergePrintRemarkParts(parts) {
   return merged.join('；');
 }
 
+function buildPrintOrderLine(productRemark, customerRemark, index = 0) {
+  const orderNo = Math.max(1, Number(index) + 1);
+  const products = trimString(productRemark) || '无商品明细';
+  const remark = trimString(customerRemark);
+  return `订单${orderNo}：${products}${remark ? `；备注：${remark}` : ''}`;
+}
+
+function getSnapshotCustomerRemark(snapshot) {
+  const rawCustomerRemark = trimString(snapshot && snapshot.rawCustomerRemark);
+  if (rawCustomerRemark) return rawCustomerRemark;
+  const legacyRemark = trimString(snapshot && snapshot.customerRemark);
+  if (!legacyRemark.startsWith('客户下单：')) return legacyRemark;
+  const separatorIndex = legacyRemark.indexOf('；');
+  return separatorIndex >= 0 ? legacyRemark.slice(separatorIndex + 1).trim() : '';
+}
+
+function buildShipmentRemarkFull(entries) {
+  return (Array.isArray(entries) ? entries : [])
+    .map(entry => {
+      const roleLabel = entry && entry.role === 'primary' ? '主单' : '追加单';
+      const orderLabel = trimString(entry && entry.orderNumber)
+        || trimString(entry && entry.orderId)
+        || '未标记订单';
+      const remark = mergePrintRemarkParts([
+        entry && entry.productRemark,
+        entry && entry.customerRemark,
+      ]);
+      return `${roleLabel} ${orderLabel}：${remark || '无备注'}`;
+    })
+    .join('；');
+}
+
+function buildShipmentPrintRemark(entries) {
+  return (Array.isArray(entries) ? entries : [])
+    .map((entry, index) => buildPrintOrderLine(
+      entry && (entry.printProductRemark || entry.productRemark),
+      entry && entry.customerRemark,
+      index,
+    ))
+    .join('\n')
+    .slice(0, 100);
+}
+
 function getPrintRemark(record) {
+  const shipmentRemarkEntries = Array.isArray(record && record.shipmentRemarkEntries)
+    ? record.shipmentRemarkEntries
+    : [];
+  if (shipmentRemarkEntries.length > 0) {
+    return buildShipmentPrintRemark(shipmentRemarkEntries);
+  }
+
+  const shipmentPrintRemark = trimString(record && record.shipmentPrintRemark);
+  if (shipmentPrintRemark) return shipmentPrintRemark.slice(0, 100);
+
   const snapshot = record && record.orderSnapshot || {};
-  return mergePrintRemarkParts([
-    buildSnapshotProductsRemark(snapshot.products),
-    snapshot.customerRemark || snapshot.rawCustomerRemark,
-  ]).slice(0, 100);
+  const products = snapshot.printProductRemark || buildSnapshotPrintProductsRemark(snapshot.products);
+  const customerRemark = getSnapshotCustomerRemark(snapshot);
+  if (!products && !customerRemark) return '';
+  return buildPrintOrderLine(products, customerRemark, 0).slice(0, 100);
 }
 
 function buildPrintDocument(waybillNo, remark) {
@@ -626,6 +696,9 @@ exports.__test__ = {
   getWaybillNo,
   getPrintRemark,
   buildSnapshotProductsRemark,
+  buildSnapshotPrintProductsRemark,
+  buildShipmentRemarkFull,
+  buildShipmentPrintRemark,
   buildPrintDocument,
   isPrivateIp,
   buildFileName,

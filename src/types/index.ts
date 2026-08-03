@@ -69,6 +69,7 @@ export interface OutboundRecord {
   consignee?: string;                         // 收货人（取自订单）
   consigneePhone?: string;                    // 收货人电话
   consigneeAddress?: string;                  // 收货人地址
+  sfExpressOrderRecordId?: string;             // 关联的顺丰实际包裹记录（第一阶段只读）
   createTime?: { $date: string };
 }
 
@@ -171,6 +172,13 @@ export interface SfWaybillNoInfo {
 }
 
 export type SfExpressApplyStatus = 'applying' | 'applied' | 'failed' | 'cancelled';
+export type SfShipmentStatus =
+  | 'packing'
+  | 'sealed'
+  | 'handed_over'
+  | 'picked_up'
+  | 'cancelled'
+  | 'legacy_locked';
 
 export interface SfExpressOrderRecord {
   _id: string;
@@ -185,6 +193,16 @@ export interface SfExpressOrderRecord {
   status: SfExpressApplyStatus;
   waybillNo: string;
   waybillNoInfoList: SfWaybillNoInfo[];
+  linkedOrderIds: string[];
+  linkedOutboundIds: string[];
+  shipmentStatus: SfShipmentStatus;
+  shipmentVersion: number;
+  isLegacyShipment: boolean;
+  reuseEnabled: boolean;
+  reuseEnabledAt?: string;
+  reuseDisabledAt?: string;
+  finalPackagePhotos?: string[];
+  handedOverAt?: string;
   applyRequestId?: string;
   applyRequestTime?: string;
   searchRequestId?: string;
@@ -199,6 +217,7 @@ export interface SfExpressOrderRecord {
     customerRemark?: string;
     rawCustomerRemark?: string;
     productRemark?: string;
+    printProductRemark?: string;
     products?: Array<{
       brand?: string;
       productName?: string;
@@ -206,6 +225,17 @@ export interface SfExpressOrderRecord {
       quantity?: number;
     }>;
   };
+  shipmentRemarkEntries?: Array<{
+    orderId: string;
+    orderNumber: string;
+    role: 'primary' | 'appended';
+    productRemark: string;
+    printProductRemark?: string;
+    customerRemark: string;
+    attachedAt: string;
+  }>;
+  shipmentRemarkFull?: string;
+  shipmentPrintRemark?: string;
   printCount: number;
   lastPrintTime?: string | { $date: string };
   lastPrintRequestId?: string;
@@ -296,6 +326,8 @@ export interface OrderRecord {
   returnTrackingNumbers?: string;   // 归还物流单号（多个逗号分隔，归还状态=运输途中时必填）
   needsOutbound?: boolean;          // 是否需要出库（默认按订单类型判定，见出库单关联设计文档）
   outboundRecordId?: string;        // 关联的出库单 _id（生成出库单后回写，防重复生成+完成发货回填）
+  sfExpressOrderRecordId?: string;  // 关联的顺丰实际包裹记录（第一阶段只读）
+  sharedWaybill?: boolean;          // 是否与其他订单共享同一顺丰运单
   createTime?: { $date: string };
 }
 

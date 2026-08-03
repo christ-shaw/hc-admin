@@ -6,7 +6,6 @@ import {
   PanelLeftOpen,
   LogOut,
   User,
-  Bell,
   ChevronDown,
   ChevronRight,
   X,
@@ -14,26 +13,10 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { getCurrentUser, signOut, callFunction } from '../lib/cloudbase';
 import { usePermission } from '../contexts/PermissionContext';
-import { hasUnreceivedPayment, OrderProductSource } from '../utils/orderProducts';
 import { appNavigation, isAppNavGroup, type AppNavItem } from '../routes/appRoutes';
 import { useTabWorkspace } from '../contexts/TabWorkspaceContext';
 
 const { Header, Content, Aside } = TLayout;
-
-interface OrderMessageRecord extends OrderProductSource {
-  salesperson?: string;
-  orderType?: string;
-  returnStatus?: string;
-}
-
-interface QueryOrdersResult {
-  data?: OrderMessageRecord[];
-  cursor?: string | null;
-  hasMore?: boolean;
-}
-
-const ORDER_MESSAGE_PAGE_SIZE = 100;
-const ORDER_MESSAGE_MAX_SCAN = 10000;
 
 function getUserDisplayName(user: { id?: string; user_metadata?: { username?: string; nickName?: string } } | null) {
   return user?.user_metadata?.nickName || user?.user_metadata?.username || user?.id?.slice(0, 8) || '';
@@ -57,7 +40,6 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
   const [expandedMenus, setExpandedMenus] = useState<string[]>(['发票']);
   const [currentUser, setCurrentUser] = useState<{ id?: string; user_metadata?: { username?: string; nickName?: string } } | null>(null);
   const [pendingCount, setPendingCount] = useState(0);
-  const [hasUserMessages, setHasUserMessages] = useState(false);
   const [tabMenu, setTabMenu] = useState<{ path: string; x: number; y: number } | null>(null);
   const currentUserName = getUserDisplayName(currentUser);
 
@@ -84,49 +66,6 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
     const timer = setInterval(fetchPendingCount, 60000);
     return () => clearInterval(timer);
   }, [fetchPendingCount]);
-
-  /** 获取当前登录人的订单消息提示 */
-  const fetchUserMessageStatus = useCallback(async () => {
-    const username = getUserDisplayName(currentUser);
-    if (!username) {
-      setHasUserMessages(false);
-      return;
-    }
-
-    try {
-      let cursor: string | null = null;
-      let hasMore = true;
-      let scanned = 0;
-      let nextHasMessages = false;
-
-      while (hasMore && scanned < ORDER_MESSAGE_MAX_SCAN && !nextHasMessages) {
-        const result: QueryOrdersResult = await callFunction<QueryOrdersResult>('queryOrders', {
-          data: { limit: ORDER_MESSAGE_PAGE_SIZE, cursor },
-        });
-        const orders = result.data || [];
-        scanned += orders.length;
-        nextHasMessages = orders.some((order: OrderMessageRecord) => {
-          if (order.salesperson !== username) return false;
-          const needReturn = ['postRentalShip', 'postRentalReturn'].includes(order.orderType || '') && order.returnStatus !== 'returned';
-          const needPayment = hasUnreceivedPayment(order);
-          return needReturn || needPayment;
-        });
-        cursor = result.cursor || null;
-        hasMore = !!result.hasMore && !!cursor && orders.length > 0;
-      }
-
-      setHasUserMessages(nextHasMessages);
-    } catch {
-      // 静默失败，不影响主界面
-      setHasUserMessages(false);
-    }
-  }, [currentUser]);
-
-  useEffect(() => {
-    fetchUserMessageStatus();
-    const timer = setInterval(fetchUserMessageStatus, 60000);
-    return () => clearInterval(timer);
-  }, [fetchUserMessageStatus]);
 
   const toggleMenu = (label: string) => {
     setExpandedMenus(prev =>
@@ -293,17 +232,6 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
 
           {/* 用户信息 + 退出 */}
           <div className="flex items-center gap-3">
-            <button
-              onClick={() => openTab('/')}
-              className="relative flex h-8 w-8 items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 hover:text-primary"
-              title="消息提醒"
-              aria-label="消息提醒"
-            >
-              <Bell size={17} />
-              {hasUserMessages && (
-                <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500" />
-              )}
-            </button>
             <div className="flex items-center gap-2 text-sm text-gray-600">
               <User size={16} className="text-gray-400" />
               <span className="text-gray-500">用户名:</span>

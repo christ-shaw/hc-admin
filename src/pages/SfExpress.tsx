@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Button, Dialog, Input, MessagePlugin, Select, Switch, Table, Tag } from 'tdesign-react';
-import { FileDown, Printer, RotateCcw, Search, Truck } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { Button, Dialog, Input, MessagePlugin, Select, Table, Tag } from 'tdesign-react';
+import { Link2, LoaderCircle, PackageCheck, Printer, RotateCcw, Search, Truck, Unlink, Unlock } from 'lucide-react';
+import { useLocation } from 'react-router-dom';
 import type {
   OrderRecord,
   SfExpressWorkbenchRow,
+  SfShipmentStatus,
   SfWorkbenchStatus,
 } from '../types';
 import { callFunction } from '../lib/cloudbase';
@@ -11,16 +13,9 @@ import { useDictionaries, DICT_CODES } from '../contexts/DictionaryContext';
 import { formatDate } from '../utils/format';
 import { getOrderProducts } from '../utils/orderProducts';
 import { getBrandLabel, getProductLabel } from '../data/dict';
-import {
-  exportSfOfflineOrders,
-  buildSfExportGroups,
-  loadSfExportConfig,
-  saveSfExportConfig,
-  type SfExportConfig,
-} from '../utils/sfOrderExcel';
-import { useTabDirty } from '../contexts/TabWorkspaceContext';
 import { usePermission } from '../hooks/usePermission';
 import { SfPrintDialog } from '../components/SfPrintDialog';
+import { useTabWorkspace } from '../contexts/TabWorkspaceContext';
 
 interface SfFilters {
   date: string;
@@ -29,6 +24,10 @@ interface SfFilters {
   consignee?: string;
   salesperson?: string;
   shippingFee?: string;
+}
+
+interface SfRouteState {
+  filter?: Partial<SfFilters>;
 }
 
 type TableRow = SfExpressWorkbenchRow & { _id: string };
@@ -60,6 +59,11 @@ interface SfActionResult {
   errMsg?: string;
 }
 
+interface SfBatchApplyResult extends SfActionResult {
+  sourceOrderId: string;
+  orderLabel: string;
+}
+
 interface SfPrintResult extends SfActionResult {
   fileName?: string;
   mimeType?: string;
@@ -67,11 +71,36 @@ interface SfPrintResult extends SfActionResult {
   printedAt?: string;
 }
 
-interface SfExportRecordResult {
+interface ReusableShipmentCandidate {
+  _id: string;
+  waybillNo: string;
+  sfOrderId: string;
+  shipmentStatus: 'packing' | 'sealed';
+  shipmentVersion: number;
+  sourceOrderId: string;
+  sourceSerialNumber: number;
+  sourceOnlineOrderNumber: string;
+  salesperson: string;
+  consignee: string;
+  consigneePhone: string;
+  consigneeAddress: string;
+  shippingFee: string;
+  linkedOrderCount: number;
+  linkedOutboundCount: number;
+  applyTime: string;
+  reuseEnabledAt: string;
+}
+
+interface ShipmentActionResult {
   success: boolean;
-  insertedCount?: number;
-  duplicatedCount?: number;
-  exportedAt?: string;
+  data?: ReusableShipmentCandidate[];
+  waybillNo?: string;
+  shipmentStatus?: SfShipmentStatus;
+  shipmentVersion?: number;
+  reuseEnabled?: boolean;
+  linkedOrderCount?: number;
+  linkedOutboundCount?: number;
+  duplicated?: boolean;
   errMsg?: string;
 }
 
@@ -91,6 +120,18 @@ const STATUS_META: Record<SfWorkbenchStatus, {
   legacy_unmanaged: { label: '历史未纳入', theme: 'warning' },
 };
 
+const SHIPMENT_STATUS_META: Record<SfShipmentStatus, {
+  label: string;
+  theme: 'default' | 'primary' | 'warning' | 'success' | 'danger';
+}> = {
+  packing: { label: '打包中', theme: 'primary' },
+  sealed: { label: '已封箱', theme: 'warning' },
+  handed_over: { label: '已交顺丰', theme: 'success' },
+  picked_up: { label: '已揽收', theme: 'success' },
+  cancelled: { label: '已取消', theme: 'default' },
+  legacy_locked: { label: '历史锁定', theme: 'default' },
+};
+
 function today(): string {
   const date = new Date();
   const year = date.getFullYear();
@@ -99,9 +140,9 @@ function today(): string {
   return `${year}-${month}-${day}`;
 }
 
-function createExportBatchId(): string {
+function createShipmentRequestId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
-  return `sf-export-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+  return `sf-shipment-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
 function normalizeShippingFee(value: unknown): 'prepaid' | 'cod' | 'pickup' | '' {
@@ -141,9 +182,19 @@ function getProductSummary(record: OrderRecord) {
   }).join('、') || '-';
 }
 
-function canExport(row: SfExpressWorkbenchRow) {
+function getOrderLabel(record: OrderRecord) {
+  return record.onlineOrderNumber || `序号 ${record.serialNumber}`;
+}
+
+function canBatchApply(row: SfExpressWorkbenchRow) {
   return ['not_created', 'failed', 'cancelled'].includes(row.sfStatus)
     && getMissingFields(row.order).length === 0;
+}
+
+function canBatchPrint(row: SfExpressWorkbenchRow) {
+  return row.sfStatus === 'applied'
+    && !!row.currentSfOrder?.waybillNo
+    && row.currentSfOrder.sourceOrderId === row.order._id;
 }
 
 function createPdfBlob(base64: string, mimeType = 'application/pdf') {
@@ -155,8 +206,11 @@ function createPdfBlob(base64: string, mimeType = 'application/pdf') {
 
 export function SfExpress() {
   const dictionaries = useDictionaries();
+  const location = useLocation();
   const { can } = usePermission();
+  const { openTab } = useTabWorkspace();
   const canPrintWaybill = can('sf:print');
+  const canReuseWaybill = can('orders:create') || can('orders:update');
   const [filters, setFilters] = useState<SfFilters>({ date: today() });
   const [rows, setRows] = useState<TableRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -164,35 +218,42 @@ export function SfExpress() {
   const [pageCursors, setPageCursors] = useState<Array<string | null>>([null]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
-  const [selectedOrders, setSelectedOrders] = useState<Record<string, OrderRecord>>({});
-  const selectedList = useMemo(() => Object.values(selectedOrders), [selectedOrders]);
+  const [selectedRows, setSelectedRows] = useState<Record<string, TableRow>>({});
+  const selectedApplyOrders = useMemo(
+    () => Object.values(selectedRows).filter(canBatchApply).map(row => row.order),
+    [selectedRows],
+  );
+  const selectedPrintRows = useMemo(
+    () => Object.values(selectedRows).filter(canBatchPrint),
+    [selectedRows],
+  );
   const [sfEnv, setSfEnv] = useState<'sandbox' | 'production' | ''>('');
   const [dataModelVersion, setDataModelVersion] = useState(1);
   const [cutoverDate, setCutoverDate] = useState('');
 
   const [applyTarget, setApplyTarget] = useState<TableRow | null>(null);
   const [applying, setApplying] = useState(false);
+  const [batchApplyVisible, setBatchApplyVisible] = useState(false);
+  const [batchApplyTargets, setBatchApplyTargets] = useState<OrderRecord[]>([]);
+  const [batchApplying, setBatchApplying] = useState(false);
+  const [batchApplyProgress, setBatchApplyProgress] = useState(0);
+  const [batchApplyingOrderId, setBatchApplyingOrderId] = useState('');
+  const [batchApplyResults, setBatchApplyResults] = useState<SfBatchApplyResult[]>([]);
   const [queryingId, setQueryingId] = useState('');
   const [printingId, setPrintingId] = useState('');
   const [printTarget, setPrintTarget] = useState<TableRow | null>(null);
+  const [batchPrintTargets, setBatchPrintTargets] = useState<TableRow[]>([]);
   const [cancelTarget, setCancelTarget] = useState<TableRow | null>(null);
   const [cancelling, setCancelling] = useState(false);
-
-  const [exportVisible, setExportVisible] = useState(false);
-  const [exporting, setExporting] = useState(false);
-  const [exportConfig, setExportConfig] = useState<SfExportConfig>(loadSfExportConfig);
-  const [mergeSameRecipient, setMergeSameRecipient] = useState(true);
-  const exportInitialRef = useRef('');
-  const exportGroups = useMemo(
-    () => buildSfExportGroups(selectedList, mergeSameRecipient),
-    [selectedList, mergeSameRecipient],
-  );
-  useTabDirty(
-    exportVisible
-      && !!exportInitialRef.current
-      && JSON.stringify({ exportConfig, mergeSameRecipient }) !== exportInitialRef.current,
-    '顺丰快递',
-  );
+  const [reuseTarget, setReuseTarget] = useState<TableRow | null>(null);
+  const [reuseCandidates, setReuseCandidates] = useState<ReusableShipmentCandidate[]>([]);
+  const [reuseLoading, setReuseLoading] = useState(false);
+  const [attachingShipmentId, setAttachingShipmentId] = useState('');
+  const [shipmentConfirm, setShipmentConfirm] = useState<{
+    row: TableRow;
+    action: 'enableReuse' | 'disableReuse' | 'detach' | 'confirmHandover';
+  } | null>(null);
+  const [shipmentActionLoading, setShipmentActionLoading] = useState(false);
 
   const salespersonOptions = useMemo(() => [
     { label: '全部人员', value: '' },
@@ -224,11 +285,22 @@ export function SfExpress() {
   };
 
   useEffect(() => {
-    void loadRows({ date: today() }, null, 0);
-  }, []);
+    const routeFilter = (location.state as SfRouteState | null)?.filter;
+    const routeDate = String(routeFilter?.date || '');
+    const next: SfFilters = {
+      date: /^\d{4}-\d{2}-\d{2}$/.test(routeDate) ? routeDate : today(),
+    };
+    if (routeFilter?.onlineOrderNumber) next.onlineOrderNumber = String(routeFilter.onlineOrderNumber);
+    if (routeFilter?.serialNumber) next.serialNumber = String(routeFilter.serialNumber);
+
+    setFilters(next);
+    setSelectedRows({});
+    setPageCursors([null]);
+    void loadRows(next, null, 0);
+  }, [location.key]);
 
   const resetPaginationAndLoad = (targetFilters: SfFilters) => {
-    setSelectedOrders({});
+    setSelectedRows({});
     setPageCursors([null]);
     void loadRows(targetFilters, null, 0);
   };
@@ -249,6 +321,20 @@ export function SfExpress() {
 
   const reloadCurrentPage = () => loadRows(filters, pageCursors[pageIndex] || null, pageIndex);
 
+  const handleOpenMasterShipment = (shipment: NonNullable<TableRow['currentSfOrder']>) => {
+    const masterFilters: SfFilters = {
+      date: /^\d{4}-\d{2}-\d{2}$/.test(shipment.sourceOrderDate || '')
+        ? shipment.sourceOrderDate
+        : filters.date,
+    };
+    if (shipment.sourceOnlineOrderNumber) {
+      masterFilters.onlineOrderNumber = shipment.sourceOnlineOrderNumber;
+    } else if (shipment.sourceSerialNumber) {
+      masterFilters.serialNumber = String(shipment.sourceSerialNumber);
+    }
+    openTab('/sf-express', { state: { filter: masterFilters } });
+  };
+
   const handleNextPage = () => {
     if (!hasMore || !nextCursor) return;
     const cursors = [...pageCursors.slice(0, pageIndex + 1), nextCursor];
@@ -263,10 +349,10 @@ export function SfExpress() {
 
   const handleSelectionChange = (keys: Array<string | number>) => {
     const selectedKeys = new Set(keys.map(String));
-    setSelectedOrders(previous => {
+    setSelectedRows(previous => {
       const next = { ...previous };
       for (const row of rows) {
-        if (selectedKeys.has(row._id) && canExport(row)) next[row._id] = row.order;
+        if (selectedKeys.has(row._id) && (canBatchApply(row) || canBatchPrint(row))) next[row._id] = row;
         else delete next[row._id];
       }
       return next;
@@ -315,6 +401,98 @@ export function SfExpress() {
     }
   };
 
+  const handleOpenBatchApply = () => {
+    if (selectedApplyOrders.length < 2) {
+      MessagePlugin.warning('请至少勾选 2 条可申请订单');
+      return;
+    }
+    if (!sfEnv) {
+      MessagePlugin.error('无法确认当前顺丰环境');
+      return;
+    }
+    if (dataModelVersion !== 2) {
+      MessagePlugin.error('顺丰独立订单模型尚未启用');
+      return;
+    }
+    const invalidOrder = selectedApplyOrders.find(order => getMissingFields(order).length > 0);
+    if (invalidOrder) {
+      MessagePlugin.warning(
+        `${getOrderLabel(invalidOrder)} 请先补全：${getMissingFields(invalidOrder).join('、')}`
+      );
+      return;
+    }
+    setBatchApplyTargets([...selectedApplyOrders]);
+    setBatchApplyProgress(0);
+    setBatchApplyResults([]);
+    setBatchApplyVisible(true);
+  };
+
+  const closeBatchApply = () => {
+    if (batchApplying) return;
+    setBatchApplyVisible(false);
+    setBatchApplyTargets([]);
+    setBatchApplyProgress(0);
+    setBatchApplyingOrderId('');
+    setBatchApplyResults([]);
+  };
+
+  const handleBatchApply = async () => {
+    if (!batchApplyTargets.length || batchApplying) return;
+    setBatchApplying(true);
+    setBatchApplyProgress(0);
+    setBatchApplyingOrderId('');
+    setBatchApplyResults([]);
+
+    const results = new Array<SfBatchApplyResult>(batchApplyTargets.length);
+    try {
+      for (let index = 0; index < batchApplyTargets.length; index += 1) {
+        const order = batchApplyTargets[index];
+        setBatchApplyingOrderId(order._id);
+        try {
+          const result = await callFunction<SfActionResult>('applySfExpress', {
+            data: { sourceOrderId: order._id },
+          });
+          results[index] = {
+            ...result,
+            sourceOrderId: order._id,
+            orderLabel: getOrderLabel(order),
+          };
+        } catch (error) {
+          results[index] = {
+            success: false,
+            sourceOrderId: order._id,
+            orderLabel: getOrderLabel(order),
+            errMsg: error instanceof Error ? error.message : String(error),
+          };
+        } finally {
+          setBatchApplyProgress(index + 1);
+          setBatchApplyResults(results.filter((result): result is SfBatchApplyResult => !!result));
+        }
+      }
+      setBatchApplyingOrderId('');
+
+      const succeeded = results.filter(result => result.success);
+      const failed = results.filter(result => !result.success);
+      const conflicts = succeeded.filter(result => result.outboundSync?.action === 'conflict');
+      const succeededIds = new Set(succeeded.map(result => result.sourceOrderId));
+      setSelectedRows(previous => Object.fromEntries(
+        Object.entries(previous).filter(([orderId]) => !succeededIds.has(orderId))
+      ));
+
+      if (failed.length > 0) {
+        MessagePlugin.warning(`批量申请完成：成功 ${succeeded.length} 条，失败 ${failed.length} 条`);
+      } else if (conflicts.length > 0) {
+        MessagePlugin.warning(`已生成 ${succeeded.length} 个运单，其中 ${conflicts.length} 条出库单号存在冲突`);
+      } else {
+        MessagePlugin.success(`已成功生成 ${succeeded.length} 个顺丰运单号`);
+      }
+      await reloadCurrentPage();
+    } finally {
+      setBatchApplyingOrderId('');
+      setBatchApplying(false);
+    }
+  };
+
   const handleQuery = async (row: TableRow) => {
     if (!row.currentSfOrder || queryingId) return;
     setQueryingId(row._id);
@@ -357,8 +535,103 @@ export function SfExpress() {
     }
   };
 
+  const handleOpenReuse = async (row: TableRow) => {
+    if (!canReuseWaybill) {
+      MessagePlugin.warning('当前角色没有复用顺丰运单的权限');
+      return;
+    }
+    if (!row.order.outboundRecordId) {
+      MessagePlugin.warning('请先为该订单生成待出库单');
+      return;
+    }
+    setReuseTarget(row);
+    setReuseCandidates([]);
+    setReuseLoading(true);
+    try {
+      const result = await callFunction<ShipmentActionResult>('manageSfShipment', {
+        data: { action: 'listReusable', sourceOrderId: row.order._id },
+      });
+      if (!result.success) throw new Error(result.errMsg || '查询可复用运单失败');
+      setReuseCandidates(result.data || []);
+      if (!result.data?.length) {
+        MessagePlugin.warning('没有找到已开放追加且收件信息完全一致的顺丰包裹');
+      }
+    } catch (error) {
+      setReuseTarget(null);
+      MessagePlugin.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setReuseLoading(false);
+    }
+  };
+
+  const handleAttachShipment = async (candidate: ReusableShipmentCandidate) => {
+    if (!reuseTarget || attachingShipmentId) return;
+    setAttachingShipmentId(candidate._id);
+    try {
+      const result = await callFunction<ShipmentActionResult>('manageSfShipment', {
+        data: {
+          action: 'attach',
+          sourceOrderId: reuseTarget.order._id,
+          sfExpressOrderId: candidate._id,
+          shipmentVersion: candidate.shipmentVersion,
+          requestId: createShipmentRequestId(),
+        },
+      });
+      if (!result.success) throw new Error(result.errMsg || '复用顺丰运单失败');
+      MessagePlugin.success(
+        `订单已关联顺丰运单 ${result.waybillNo || candidate.waybillNo}，请完成新增出库单拍照`
+      );
+      setReuseTarget(null);
+      setReuseCandidates([]);
+      await reloadCurrentPage();
+    } catch (error) {
+      MessagePlugin.error(error instanceof Error ? error.message : String(error));
+      if (reuseTarget) await handleOpenReuse(reuseTarget);
+    } finally {
+      setAttachingShipmentId('');
+    }
+  };
+
+  const handleShipmentAction = async () => {
+    if (!shipmentConfirm) return;
+    const { row, action } = shipmentConfirm;
+    const sfOrder = row.currentSfOrder;
+    if (!sfOrder) return;
+    setShipmentActionLoading(true);
+    try {
+      const result = await callFunction<ShipmentActionResult>('manageSfShipment', {
+        data: {
+          action,
+          sfExpressOrderId: sfOrder._id,
+          ...(action === 'detach'
+            ? { sourceOrderId: row.order._id, requestId: createShipmentRequestId() }
+            : {}),
+        },
+      });
+      if (!result.success) throw new Error(result.errMsg || '包裹操作失败');
+      const message = action === 'enableReuse'
+        ? '该顺丰包裹已开放一次订单追加'
+        : action === 'disableReuse'
+          ? '已关闭该顺丰包裹的订单追加'
+          : action === 'detach'
+            ? '已解除该订单的共享运单，请重新安排物流'
+            : '已确认包裹交接顺丰，后续不能再追加订单';
+      MessagePlugin.success(message);
+      setShipmentConfirm(null);
+      await reloadCurrentPage();
+    } catch (error) {
+      MessagePlugin.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setShipmentActionLoading(false);
+    }
+  };
+
   const handlePdfPrint = async (row: SfExpressWorkbenchRow) => {
     if (!row.currentSfOrder || printingId) return;
+    if (row.currentSfOrder.sourceOrderId !== row.order._id) {
+      MessagePlugin.warning('子订单不单独打印面单，请在主顺丰单上打印');
+      return;
+    }
     const printWindow = window.open('', '_blank');
     if (!printWindow) {
       MessagePlugin.warning('浏览器已拦截打印窗口，请允许本站弹出窗口后重试');
@@ -394,57 +667,16 @@ export function SfExpress() {
     void reloadCurrentPage();
   };
 
-  const handleOpenExport = () => {
-    if (selectedList.length === 0) {
-      MessagePlugin.warning('请先勾选需要导入顺丰模板的订单');
-      return;
-    }
-    const config = loadSfExportConfig();
-    setExportConfig(config);
-    setMergeSameRecipient(true);
-    exportInitialRef.current = JSON.stringify({ exportConfig: config, mergeSameRecipient: true });
-    setExportVisible(true);
-  };
-
-  const handleExport = async () => {
-    if (!exportConfig.senderName.trim()) return void MessagePlugin.warning('请填写寄件人');
-    if (!exportConfig.senderMobile.trim() && !exportConfig.senderPhone.trim()) return void MessagePlugin.warning('请填写寄件人手机或电话');
-    if (!exportConfig.senderAddress.trim()) return void MessagePlugin.warning('请填写寄件人详细地址');
-
-    setExporting(true);
-    try {
-      saveSfExportConfig(exportConfig);
-      const result = await exportSfOfflineOrders(selectedList, exportConfig, { mergeSameRecipient });
-      const recordResult = await callFunction<SfExportRecordResult>('recordSfExport', {
-        data: {
-          orderIds: selectedList.map(record => record._id),
-          exportBatchId: createExportBatchId(),
-        },
-      });
-      if (!recordResult.success) {
-        MessagePlugin.warning(`Excel 已生成，但导出记录失败：${recordResult.errMsg || '未知错误'}`);
-      }
-      MessagePlugin.success(result.rowCount === result.sourceOrderCount
-        ? `已生成 ${result.rowCount} 条顺丰待发货数据`
-        : `已将 ${result.sourceOrderCount} 条订单合并为 ${result.rowCount} 条顺丰待发货数据`);
-      setExportVisible(false);
-      setSelectedOrders({});
-      await reloadCurrentPage();
-    } catch (error) {
-      MessagePlugin.error('顺丰模板导出失败：' + (error instanceof Error ? error.message : String(error)));
-    } finally {
-      setExporting(false);
-    }
-  };
-
   const columns = [
     {
       colKey: 'row-select',
       type: 'multiple' as const,
       width: 46,
       checkProps: ({ row }: { row: TableRow }) => ({
-        disabled: !canExport(row),
-        title: !canExport(row) ? '仅未下单、申请失败或已取消且资料完整的订单可导出' : '',
+        disabled: batchApplying || (!canBatchApply(row) && !canBatchPrint(row)),
+        title: !canBatchApply(row) && !canBatchPrint(row)
+          ? '仅资料完整的待申请订单或已生成运单的订单可以勾选'
+          : '',
       }),
     },
     { colKey: 'serialNumber', title: '序号', width: 70, cell: ({ row }: { row: TableRow }) => row.order.serialNumber },
@@ -472,15 +704,63 @@ export function SfExpress() {
         );
       },
     },
-    { colKey: 'sfOrderId', title: '顺丰客户订单号', width: 175, ellipsis: true, cell: ({ row }: { row: TableRow }) => row.currentSfOrder?.sfOrderId || '-' },
-    { colKey: 'waybillNo', title: '顺丰运单号', width: 145, cell: ({ row }: { row: TableRow }) => row.currentSfOrder?.waybillNo || '-' },
+    { colKey: 'waybillNo', title: '顺丰运单号', width: 205, cell: ({ row }: { row: TableRow }) => row.currentSfOrder?.waybillNo || '-' },
+    {
+      colKey: 'shipment',
+      title: '包裹关联',
+      width: 225,
+      cell: ({ row }: { row: TableRow }) => {
+        const shipment = row.currentSfOrder;
+        if (!shipment) return '-';
+        const meta = SHIPMENT_STATUS_META[shipment.shipmentStatus];
+        const isSharedShipment = shipment.linkedOrderIds.length > 1;
+        const isPrimaryOrder = shipment.sourceOrderId === row.order._id;
+        const masterShipmentLabel = shipment.sourceOnlineOrderNumber
+          || (shipment.sourceSerialNumber ? `序号 ${shipment.sourceSerialNumber}` : '主顺丰单');
+        return (
+          <div className="text-xs text-gray-500">
+            <Tag theme={meta.theme} variant="light">{meta.label}</Tag>
+            {shipment.reuseEnabled && (
+              <Tag className="ml-1" theme="success" variant="light">可追加</Tag>
+            )}
+            <div className="mt-1">
+              {shipment.linkedOrderIds.length} 张订单 / {shipment.linkedOutboundIds.length} 张出库单
+            </div>
+            {isSharedShipment && (
+              isPrimaryOrder ? (
+                <div className="mt-1 text-primary">主顺丰单：当前订单</div>
+              ) : (
+                <button
+                  type="button"
+                  className="mt-1 inline-flex max-w-full items-center gap-1 truncate text-left text-primary hover:underline"
+                  title={`点击查看主顺丰单：${masterShipmentLabel}`}
+                  onClick={() => handleOpenMasterShipment(shipment)}
+                >
+                  <Link2 size={12} className="flex-shrink-0" />
+                  <span className="truncate">主顺丰单：{masterShipmentLabel}</span>
+                </button>
+              )
+            )}
+            {shipment.isLegacyShipment && (
+              <div className="mt-1 text-gray-400" title="历史顺丰记录默认禁止追加订单">
+                默认不可追加
+              </div>
+            )}
+          </div>
+        );
+      },
+    },
     {
       colKey: 'records',
       title: '记录',
       width: 155,
       cell: ({ row }: { row: TableRow }) => (
         <div className="text-xs text-gray-500">
-          <div>导出 {row.exportSummary.count} 次 / 打印 {row.currentSfOrder?.printCount || 0} 次</div>
+          {row.currentSfOrder?.sourceOrderId === row.order._id ? (
+            <div>导出 {row.exportSummary.count} 次 / 打印 {row.currentSfOrder?.printCount || 0} 次</div>
+          ) : (
+            <div>面单：由主顺丰单打印</div>
+          )}
           {row.currentSfOrder?.errorMessage && (
             <div className="mt-1 truncate text-rose-600" title={row.currentSfOrder.errorMessage}>
               {row.currentSfOrder.errorMessage}
@@ -492,14 +772,35 @@ export function SfExpress() {
     {
       colKey: 'actions',
       title: '操作',
-      width: 280,
+      width: 410,
       fixed: 'right' as const,
       cell: ({ row }: { row: TableRow }) => {
         const canApply = ['not_created', 'cancelled'].includes(row.sfStatus);
         const canRetry = row.sfStatus === 'failed';
         const canQuery = ['applying', 'failed', 'applied'].includes(row.sfStatus) && !!row.currentSfOrder;
-        const canPrint = row.sfStatus === 'applied' && !!row.currentSfOrder?.waybillNo;
-        const canCancel = row.sfStatus === 'applied';
+        const isPrimaryShipmentOrder = row.currentSfOrder?.sourceOrderId === row.order._id;
+        const canPrint = row.sfStatus === 'applied'
+          && !!row.currentSfOrder?.waybillNo
+          && isPrimaryShipmentOrder;
+        const canManageShipment = row.sfStatus === 'applied'
+          && !!row.currentSfOrder
+          && !row.currentSfOrder.isLegacyShipment
+          && ['packing', 'sealed'].includes(row.currentSfOrder.shipmentStatus);
+        const canManageReuse = canManageShipment && isPrimaryShipmentOrder;
+        const canDetachShipment = canManageShipment
+          && !isPrimaryShipmentOrder
+          && row.order.sharedWaybill === true;
+        const canOpenMasterOrder = !!row.currentSfOrder
+          && !isPrimaryShipmentOrder
+          && row.currentSfOrder.linkedOrderIds.length > 1
+          && !!row.currentSfOrder.sourceOrderId;
+        const needsHandoverConfirmation = canManageShipment
+          && (
+            !!row.currentSfOrder?.reuseEnabledAt
+            || (row.currentSfOrder?.linkedOrderIds.length || 0) > 1
+          );
+        const canCancel = row.sfStatus === 'applied'
+          && (row.currentSfOrder?.linkedOrderIds.length || 0) <= 1;
         return (
           <div className="flex flex-wrap items-center gap-1">
             {(canApply || canRetry) && (
@@ -507,10 +808,22 @@ export function SfExpress() {
                 size="small"
                 theme="primary"
                 icon={<Truck size={14} />}
-                disabled={applying || dataModelVersion !== 2}
+                disabled={applying || batchApplying || dataModelVersion !== 2}
                 onClick={() => handleOpenApply(row)}
               >
                 {canRetry ? '重试' : row.sfStatus === 'cancelled' ? '重新生成' : '生成顺丰单'}
+              </Button>
+            )}
+            {row.sfStatus === 'not_created' && (
+              <Button
+                size="small"
+                variant="outline"
+                icon={<Link2 size={14} />}
+                disabled={!canReuseWaybill || !row.order.outboundRecordId}
+                title={!row.order.outboundRecordId ? '请先生成待出库单' : ''}
+                onClick={() => handleOpenReuse(row)}
+              >
+                复用运单
               </Button>
             )}
             {canQuery && (
@@ -541,6 +854,57 @@ export function SfExpress() {
                 取消
               </Button>
             )}
+            {canOpenMasterOrder && row.currentSfOrder && (
+              <Button
+                size="small"
+                theme="primary"
+                variant="outline"
+                icon={<Link2 size={14} />}
+                title={`查看主顺丰单：${row.currentSfOrder.sourceOnlineOrderNumber || `序号 ${row.currentSfOrder.sourceSerialNumber}`}`}
+                onClick={() => handleOpenMasterShipment(row.currentSfOrder!)}
+              >
+                主顺丰单
+              </Button>
+            )}
+            {canManageShipment && (
+              <>
+                {canManageReuse && (
+                  <Button
+                    size="small"
+                    variant="outline"
+                    icon={<Unlock size={14} />}
+                    onClick={() => setShipmentConfirm({
+                      row,
+                      action: row.currentSfOrder?.reuseEnabled ? 'disableReuse' : 'enableReuse',
+                    })}
+                  >
+                    {row.currentSfOrder?.reuseEnabled ? '关闭追加' : '开放追加'}
+                  </Button>
+                )}
+                {needsHandoverConfirmation && isPrimaryShipmentOrder && (
+                  <Button
+                    size="small"
+                    theme="success"
+                    variant="outline"
+                    icon={<PackageCheck size={14} />}
+                    onClick={() => setShipmentConfirm({ row, action: 'confirmHandover' })}
+                  >
+                    确认交接
+                  </Button>
+                )}
+                {canDetachShipment && (
+                  <Button
+                    size="small"
+                    theme="danger"
+                    variant="outline"
+                    icon={<Unlink size={14} />}
+                    onClick={() => setShipmentConfirm({ row, action: 'detach' })}
+                  >
+                    解除共享
+                  </Button>
+                )}
+              </>
+            )}
           </div>
         );
       },
@@ -562,8 +926,23 @@ export function SfExpress() {
           </Tag>
           {cutoverDate && <Tag variant="light">V2 切换日：{cutoverDate}</Tag>}
           {dataModelVersion !== 2 && <Tag theme="warning" variant="light">V2 尚未启用</Tag>}
-          <Button theme="primary" icon={<FileDown size={16} />} disabled={!selectedList.length} onClick={handleOpenExport}>
-            导出顺丰模板（{selectedList.length}）
+          <Tag theme="primary" variant="light">包裹关联：只读</Tag>
+          <Button
+            theme="primary"
+            icon={<Truck size={16} />}
+            disabled={selectedApplyOrders.length < 2 || applying || batchApplying || dataModelVersion !== 2}
+            onClick={handleOpenBatchApply}
+          >
+            批量申请单号（{selectedApplyOrders.length}）
+          </Button>
+          <Button
+            variant="outline"
+            icon={<Printer size={16} />}
+            disabled={!canPrintWaybill || selectedPrintRows.length < 2 || batchApplying}
+            title={!canPrintWaybill ? '当前角色没有顺丰面单打印权限' : ''}
+            onClick={() => setBatchPrintTargets([...selectedPrintRows])}
+          >
+            串行打印面单（{selectedPrintRows.length}）
           </Button>
         </div>
       </div>
@@ -602,7 +981,7 @@ export function SfExpress() {
             loading={loading}
             rowKey="_id"
             tableLayout="fixed"
-            selectedRowKeys={Object.keys(selectedOrders)}
+            selectedRowKeys={Object.keys(selectedRows)}
             onSelectChange={handleSelectionChange}
             hover
             stripe
@@ -636,9 +1015,112 @@ export function SfExpress() {
         )}
       </Dialog>
 
+      <Dialog
+        header={batchApplyResults.length > 0 ? '批量申请结果' : '确认批量申请顺丰单号'}
+        visible={batchApplyVisible}
+        width="760px"
+        onClose={closeBatchApply}
+        onConfirm={batchApplyResults.length > 0 ? closeBatchApply : handleBatchApply}
+        confirmBtn={{
+          content: batchApplyResults.length > 0 ? '关闭' : `确认申请（${batchApplyTargets.length}）`,
+          loading: batchApplying,
+        }}
+        cancelBtn={{
+          content: '取消',
+          disabled: batchApplying,
+          style: batchApplyResults.length > 0 ? { display: 'none' } : undefined,
+        }}
+      >
+        <div className="space-y-4 text-sm">
+          <div className={`rounded-lg border px-3 py-2 ${sfEnv === 'production' ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
+            本次将在<strong>{sfEnv === 'production' ? '生产环境（将生成真实运单）' : '沙箱测试环境'}</strong>
+            为 {batchApplyTargets.length} 条订单申请单号，系统将按勾选顺序逐条处理。
+          </div>
+          {batchApplying && (
+            <div className="space-y-2 rounded-lg border border-blue-100 bg-blue-50 px-3 py-3 text-blue-700">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-2">
+                  <LoaderCircle className="shrink-0 animate-spin" size={16} />
+                  <span className="truncate">
+                    正在处理：{getOrderLabel(
+                      batchApplyTargets.find(order => order._id === batchApplyingOrderId)
+                        || batchApplyTargets[Math.min(batchApplyProgress, batchApplyTargets.length - 1)]
+                    )}
+                  </span>
+                </div>
+                <span className="shrink-0 font-medium">
+                  {batchApplyProgress} / {batchApplyTargets.length}
+                </span>
+              </div>
+              <div className="h-2 overflow-hidden rounded bg-blue-100">
+                <div
+                  className="h-full rounded bg-blue-500 transition-[width] duration-300 ease-out"
+                  style={{
+                    width: `${batchApplyTargets.length
+                      ? Math.round((batchApplyProgress / batchApplyTargets.length) * 100)
+                      : 0}%`,
+                  }}
+                />
+              </div>
+            </div>
+          )}
+          <div className="max-h-[48vh] space-y-2 overflow-auto pr-1">
+            {batchApplyTargets.map(order => {
+              const result = batchApplyResults.find(item => item.sourceOrderId === order._id);
+              const isApplying = batchApplying && batchApplyingOrderId === order._id;
+              return (
+                <div
+                  key={order._id}
+                  className={`flex items-start justify-between gap-3 rounded-lg border px-3 py-2 transition-colors ${
+                    isApplying ? 'border-blue-300 bg-blue-50/70' : 'border-gray-200'
+                  }`}
+                >
+                  <div className="min-w-0">
+                    <div className="font-medium text-gray-800">
+                      {result?.orderLabel || getOrderLabel(order)}
+                    </div>
+                    <div className="mt-1 truncate text-xs text-gray-500">
+                      {order.consignee || '-'}，{order.consigneePhone || '-'}
+                    </div>
+                    {result && !result.success && (
+                      <div className="mt-1 text-xs text-rose-600">{result.errMsg || '申请失败'}</div>
+                    )}
+                    {result?.outboundSync?.action === 'conflict' && (
+                      <div className="mt-1 text-xs text-amber-600">
+                        待出库记录已有单号 {result.outboundSync.existingTrackingNumber || '-'}，请人工核对
+                      </div>
+                    )}
+                  </div>
+                  {isApplying ? (
+                    <Tag theme="warning" variant="light">
+                      <span className="inline-flex items-center gap-1">
+                        <LoaderCircle className="animate-spin" size={13} />申请中
+                      </span>
+                    </Tag>
+                  ) : result ? (
+                    <div className="shrink-0 text-right">
+                      <Tag theme={result.success ? 'success' : 'danger'} variant="light">
+                        {result.success ? '成功' : '失败'}
+                      </Tag>
+                      {result.success && <div className="mt-1 text-xs text-gray-600">{result.waybillNo || '-'}</div>}
+                    </div>
+                  ) : (
+                    <Tag theme="default" variant="light">待申请</Tag>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </Dialog>
+
       <SfPrintDialog
         record={printTarget}
-        onClose={() => setPrintTarget(null)}
+        batchRecords={batchPrintTargets}
+        onClose={() => {
+          setPrintTarget(null);
+          setBatchPrintTargets([]);
+        }}
         onPdfPrint={handlePdfPrint}
         onPluginPrinted={handlePluginPrinted}
       />
@@ -659,39 +1141,103 @@ export function SfExpress() {
       </Dialog>
 
       <Dialog
-        header="导出顺丰待发货模板"
-        visible={exportVisible}
-        onClose={() => !exporting && setExportVisible(false)}
+        header="选择需要复用的顺丰运单"
+        visible={!!reuseTarget}
+        onClose={() => {
+          if (attachingShipmentId) return;
+          setReuseTarget(null);
+          setReuseCandidates([]);
+        }}
         width="780px"
-        footer={(
-          <div className="flex justify-end gap-2">
-            <Button disabled={exporting} onClick={() => setExportVisible(false)}>取消</Button>
-            <Button theme="primary" icon={<FileDown size={16} />} loading={exporting} onClick={handleExport}>生成顺丰 Excel</Button>
-          </div>
-        )}
+        footer={null}
       >
-        <div className="max-h-[68vh] space-y-5 overflow-auto pr-1">
-          <div className="rounded-lg border border-blue-100 bg-blue-50/60 px-4 py-3 text-sm text-blue-700">
-            已选择 <strong>{selectedList.length}</strong> 条订单，将生成 <strong>{exportGroups.length}</strong> 条顺丰订单数据。
+        <div className="space-y-4">
+          <div className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-700">
+            仅显示已由原订单明确“开放追加”，且收件人、电话、地址、付款方式和人员完全一致的包裹。
+            关联成功后，新出库单仍需独立完成拍照。
           </div>
-          <div className="flex items-start justify-between gap-4 rounded-lg border border-gray-200 px-4 py-3">
-            <div>
-              <div className="text-sm font-medium text-gray-800">合并相同收件人的订单</div>
-              <div className="mt-1 text-xs text-gray-500">姓名、电话、地址和付款方式完全一致时合并。</div>
+          {reuseTarget && (
+            <div className="text-sm text-gray-600">
+              目标订单：{reuseTarget.order.onlineOrderNumber || `序号 ${reuseTarget.order.serialNumber}`}
+              <span className="ml-3">收件人：{reuseTarget.order.consignee}</span>
             </div>
-            <Switch value={mergeSameRecipient} onChange={value => setMergeSameRecipient(!!value)} />
-          </div>
-          <section>
-            <h3 className="mb-3 text-sm font-medium text-gray-800">寄件信息</h3>
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-              <Input label="寄件人" value={exportConfig.senderName} maxlength={100} onChange={value => setExportConfig(previous => ({ ...previous, senderName: value as string }))} />
-              <Input label="寄件人手机" value={exportConfig.senderMobile} maxlength={20} onChange={value => setExportConfig(previous => ({ ...previous, senderMobile: value as string }))} />
-              <Input label="寄件人电话" value={exportConfig.senderPhone} maxlength={20} onChange={value => setExportConfig(previous => ({ ...previous, senderPhone: value as string }))} />
-              <Input label="寄件人详细地址" value={exportConfig.senderAddress} maxlength={200} onChange={value => setExportConfig(previous => ({ ...previous, senderAddress: value as string }))} />
+          )}
+          {reuseLoading ? (
+            <div className="py-8 text-center text-gray-400">正在查询可复用顺丰包裹...</div>
+          ) : reuseCandidates.length === 0 ? (
+            <div className="py-8 text-center text-gray-400">
+              暂无可复用包裹，请先在原顺丰订单上点击“开放追加”
             </div>
-          </section>
+          ) : (
+            <div className="max-h-[52vh] space-y-3 overflow-auto pr-1">
+              {reuseCandidates.map(candidate => (
+                <div key={candidate._id} className="rounded-lg border border-gray-200 p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <div className="font-medium text-gray-900">顺丰运单：{candidate.waybillNo}</div>
+                      <div className="mt-1 text-sm text-gray-500">
+                        原订单：{candidate.sourceOnlineOrderNumber || `序号 ${candidate.sourceSerialNumber}`}
+                        <span className="ml-3">人员：{candidate.salesperson || '-'}</span>
+                      </div>
+                    </div>
+                    <Button
+                      theme="primary"
+                      icon={<Link2 size={14} />}
+                      loading={attachingShipmentId === candidate._id}
+                      disabled={!!attachingShipmentId && attachingShipmentId !== candidate._id}
+                      onClick={() => handleAttachShipment(candidate)}
+                    >
+                      使用此运单
+                    </Button>
+                  </div>
+                  <div className="mt-3 grid grid-cols-1 gap-2 text-sm text-gray-600 sm:grid-cols-2">
+                    <div>收件人：{candidate.consignee}，{candidate.consigneePhone}</div>
+                    <div>付款方式：{getPaymentLabel(candidate.shippingFee)}</div>
+                    <div className="sm:col-span-2">地址：{candidate.consigneeAddress}</div>
+                    <div>已关联：{candidate.linkedOrderCount} 张订单</div>
+                    <div>出库单：{candidate.linkedOutboundCount} 张</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </Dialog>
+
+      <Dialog
+        header={shipmentConfirm?.action === 'confirmHandover'
+          ? '确认包裹已交顺丰'
+          : shipmentConfirm?.action === 'detach'
+            ? '解除共享顺丰运单'
+          : shipmentConfirm?.action === 'disableReuse'
+            ? '关闭订单追加'
+            : '开放订单追加'}
+        visible={!!shipmentConfirm}
+        onClose={() => !shipmentActionLoading && setShipmentConfirm(null)}
+        onConfirm={handleShipmentAction}
+        confirmBtn={{
+          content: shipmentConfirm?.action === 'confirmHandover' ? '确认交接' : '确认',
+          theme: ['confirmHandover', 'detach'].includes(shipmentConfirm?.action || '') ? 'danger' : 'primary',
+          loading: shipmentActionLoading,
+        }}
+        cancelBtn={{ content: '取消', disabled: shipmentActionLoading }}
+      >
+        <div className="space-y-2 text-sm">
+          <p>
+            {shipmentConfirm?.action === 'confirmHandover'
+              ? '系统会检查全部关联出库单均已完成。确认后该运单永久禁止追加订单。'
+              : shipmentConfirm?.action === 'detach'
+                ? '仅尚未完成拍照出库的追加订单可以解除。解除后订单和出库单的物流单号将被清空。'
+              : shipmentConfirm?.action === 'disableReuse'
+                ? '关闭后，新订单将无法再选择此顺丰运单。'
+                : '开放后，无需先完成现有出库单拍照；仅收件信息、付款方式和人员完全一致的订单可以选择此运单。'}
+          </p>
+          <p className="text-gray-500">
+            运单号：{shipmentConfirm?.row.currentSfOrder?.waybillNo || '-'}
+          </p>
+        </div>
+      </Dialog>
+
     </div>
   );
 }

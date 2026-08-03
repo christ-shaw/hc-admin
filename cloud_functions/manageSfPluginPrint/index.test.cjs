@@ -58,10 +58,25 @@ test('普通单票优先使用结构化主运单号', () => {
     waybillNo: 'SF_PRIMARY',
     documents: [{
       masterWaybillNo: 'SF_PRIMARY',
-      remark: '请放前台',
-      customData: { hc_text: '请放前台' },
+      remark: '订单1：无商品明细；备注：请放前台',
+      customData: { hc_text: '订单1：无商品明细；备注：请放前台' },
     }],
   });
+});
+
+test('插件打印使用合包后的顺丰单备注', () => {
+  assert.equal(helpers.getPrintRemark({
+    shipmentPrintRemark: 'iPhone 15 / 256G×1；主单备注；Find X8×2；追加单备注',
+    orderSnapshot: { customerRemark: '旧备注' },
+  }), 'iPhone 15 / 256G×1；主单备注；Find X8×2；追加单备注');
+
+  assert.equal(helpers.getPrintRemark({
+    shipmentPrintRemark: '旧的合并备注',
+    shipmentRemarkEntries: [
+      { printProductRemark: 'OPPOA72×22', customerRemark: '壳 线' },
+      { printProductRemark: 'OPPOA72×2', customerRemark: '壳 售后' },
+    ],
+  }), '订单1：OPPOA72×22；备注：壳 线\n订单2：OPPOA72×2；备注：壳 售后');
 });
 
 test('拒绝子单和签回单结构', () => {

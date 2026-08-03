@@ -50,6 +50,7 @@ const generateOutbound = loadHelpers('generateOutboundFromOrders/index.js');
 const querySfOrder = loadHelpers('querySfOrderResult/index.js');
 const cancelSfOrder = loadHelpers('cancelSfExpress/index.js');
 const records = loadHelpers('queryRecords/index.js');
+const shipment = loadHelpers('manageSfShipment/index.js');
 
 test('首次下单使用第一版客户订单号和确定性记录 ID', () => {
   const plan = apply.planSfAttempt([], 'order-123');
@@ -63,6 +64,139 @@ test('首次下单使用第一版客户订单号和确定性记录 ID', () => {
   assert.notEqual(
     apply.buildSfRecordId('sandbox', 'order-123', 1),
     apply.buildSfRecordId('production', 'order-123', 1),
+  );
+});
+
+test('新顺丰记录初始化为单订单包裹关系', () => {
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(apply.buildInitialShipmentFields({
+      _id: 'order-123',
+      outboundRecordId: 'outbound-456',
+    }))),
+    {
+      linkedOrderIds: ['order-123'],
+      linkedOutboundIds: ['outbound-456'],
+      shipmentStatus: 'packing',
+      shipmentVersion: 1,
+      reuseEnabled: false,
+      reuseEnabledAt: '',
+      reuseDisabledAt: '',
+      finalPackagePhotos: [],
+      handedOverAt: '',
+      shipmentHistory: [],
+    },
+  );
+});
+
+test('历史顺丰记录只读映射为历史锁定且不要求迁移', () => {
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(workbench.normalizeShipmentMeta({
+      sourceOrderId: 'order-old',
+      status: 'applied',
+      waybillNo: 'SF-OLD',
+    }))),
+    {
+      linkedOrderIds: ['order-old'],
+      linkedOutboundIds: [],
+      shipmentStatus: 'legacy_locked',
+      shipmentVersion: 0,
+      isLegacyShipment: true,
+      finalPackagePhotos: [],
+      handedOverAt: '',
+      reuseEnabled: false,
+      reuseEnabledAt: '',
+      reuseDisabledAt: '',
+    },
+  );
+});
+
+test('新包裹关系兼容主订单并去重关联记录', () => {
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(workbench.normalizeShipmentMeta({
+      sourceOrderId: 'order-1',
+      linkedOrderIds: ['order-1', 'order-2', 'order-2'],
+      linkedOutboundIds: ['outbound-1', 'outbound-2', 'outbound-2'],
+      shipmentStatus: 'sealed',
+      shipmentVersion: 3,
+      finalPackagePhotos: ['cloud://photo'],
+      handedOverAt: '',
+    }))),
+    {
+      linkedOrderIds: ['order-1', 'order-2'],
+      linkedOutboundIds: ['outbound-1', 'outbound-2'],
+      shipmentStatus: 'sealed',
+      shipmentVersion: 3,
+      isLegacyShipment: false,
+      finalPackagePhotos: ['cloud://photo'],
+      handedOverAt: '',
+      reuseEnabled: false,
+      reuseEnabledAt: '',
+      reuseDisabledAt: '',
+    },
+  );
+});
+
+test('复用候选必须严格匹配收件信息、付款方式和人员', () => {
+  const base = {
+    consignee: ' 张 三 ',
+    consigneePhone: '138-0013-8000',
+    consigneeAddress: '深圳市 南山区 科技园',
+    shippingFee: 'prepaid',
+    salesperson: 'XX',
+  };
+  assert.equal(
+    shipment.buildRecipientMatchKey(base),
+    shipment.buildRecipientMatchKey({
+      consignee: '张三',
+      consigneePhone: '13800138000',
+      consigneeAddress: '深圳市南山区科技园',
+      shippingFee: '包邮',
+      salesperson: 'xx',
+    }),
+  );
+  assert.notEqual(
+    shipment.buildRecipientMatchKey(base),
+    shipment.buildRecipientMatchKey({ ...base, shippingFee: 'cod' }),
+  );
+  assert.notEqual(
+    shipment.buildRecipientMatchKey(base),
+    shipment.buildRecipientMatchKey({ ...base, consigneeAddress: '深圳市福田区' }),
+  );
+});
+
+test('历史顺丰记录不能开放共享运单', () => {
+  assert.throws(
+    () => shipment.validateManagedShipment({
+      isCurrent: true,
+      status: 'applied',
+      env: 'sandbox',
+      waybillNo: 'SF123',
+    }, 'sandbox'),
+    /历史顺丰单默认锁定/,
+  );
+});
+
+test('开放追加只校验顺丰包裹状态，不依赖出库是否完成', () => {
+  assert.doesNotThrow(() => shipment.validateReuseToggle({
+    isCurrent: true,
+    status: 'applied',
+    env: 'sandbox',
+    waybillNo: 'SF123',
+    linkedOrderIds: ['order-1'],
+    linkedOutboundIds: ['outbound-pending'],
+    shipmentStatus: 'packing',
+  }, 'sandbox'));
+  assert.throws(
+    () => shipment.validateReuseToggle({
+      isCurrent: true,
+      status: 'applied',
+      env: 'sandbox',
+      waybillNo: 'SF123',
+      linkedOrderIds: ['order-1'],
+      linkedOutboundIds: ['outbound-completed'],
+      shipmentStatus: 'handed_over',
+    }, 'sandbox'),
+    /已经交接或取消/,
   );
 });
 
@@ -142,7 +276,9 @@ test('顺丰备注和快照备注包含客户下单型号数量', () => {
   const expected = '客户下单：Apple / iPhone 15 / 256G×2，OPPO / Reno12×1；客户备注';
 
   assert.equal(apply.buildOrderProductsRemark(order), '客户下单：Apple / iPhone 15 / 256G×2，OPPO / Reno12×1');
+  assert.equal(apply.buildPrintProductsRemark(order), 'iPhone 15 / 256G×2，Reno12×1');
   assert.equal(apply.buildOrderRemark(order, 500), expected);
+  assert.equal(apply.buildPrintOrderRemark(order), '订单1：iPhone 15 / 256G×2，Reno12×1；备注：客户备注');
   assert.equal(apply.buildOrderSnapshot(order).customerRemark, expected);
   assert.equal(apply.buildOrderSnapshot(order).rawCustomerRemark, '客户备注');
   assert.equal(
@@ -152,7 +288,94 @@ test('顺丰备注和快照备注包含客户下单型号数量', () => {
       { contact: '寄件人', tel: '075512345678', country: 'CN', address: '深圳市福田区' },
       { expressTypeId: 2, parcelQty: 1 },
     ).remark,
-    expected,
+    '订单1：iPhone 15 / 256G×2，Reno12×1；备注：客户备注',
+  );
+});
+
+test('合包备注按订单保存快照，追加和解除时重新汇总', () => {
+  const primary = {
+    _id: 'order-primary',
+    onlineOrderNumber: 'ME-PRIMARY',
+    customerRemark: '主单客户备注',
+    products: [{ brand: 'Apple', productName: 'iPhone 15', quantity: 1 }],
+  };
+  const appended = {
+    _id: 'order-appended',
+    onlineOrderNumber: 'ME-APPENDED',
+    customerRemark: '追加单客户备注',
+    products: [{ brand: 'OPPO', productName: 'Find X8', quantity: 2 }],
+  };
+  const primaryEntry = apply.buildShipmentRemarkEntry(primary, 'primary', '2026-08-02T00:00:00.000Z');
+  const appendedEntry = shipment.buildShipmentRemarkEntry(appended, 'appended', '2026-08-02T01:00:00.000Z');
+  const record = {
+    sourceOrderId: primary._id,
+    sourceOnlineOrderNumber: primary.onlineOrderNumber,
+    orderSnapshot: apply.buildOrderSnapshot(primary),
+    shipmentRemarkEntries: [primaryEntry],
+  };
+  const merged = shipment.buildShipmentRemarkData(record, { appendEntry: appendedEntry });
+
+  assert.equal(merged.shipmentRemarkEntries.length, 2);
+  assert.match(merged.shipmentRemarkFull, /主单 ME-PRIMARY：客户下单：Apple \/ iPhone 15×1；主单客户备注/);
+  assert.match(merged.shipmentRemarkFull, /追加单 ME-APPENDED：客户下单：OPPO \/ Find X8×2；追加单客户备注/);
+  assert.equal(merged.shipmentPrintRemark, '订单1：iPhone 15×1；备注：主单客户备注\n订单2：Find X8×2；备注：追加单客户备注');
+
+  const detached = shipment.buildShipmentRemarkData({ ...record, ...merged }, { removeOrderId: appended._id });
+  assert.equal(detached.shipmentRemarkEntries.length, 1);
+  assert.doesNotMatch(detached.shipmentRemarkFull, /追加单客户备注/);
+  assert.equal(detached.shipmentPrintRemark, '订单1：iPhone 15×1；备注：主单客户备注');
+});
+
+test('解除后重新追加会补齐旧备注条目的新版打印字段', () => {
+  const primary = {
+    _id: 'order-primary',
+    onlineOrderNumber: 'ME-PRIMARY',
+    customerRemark: '主单客户备注',
+    products: [{ brand: 'Apple', productName: 'iPhone 15', specification: '256G', quantity: 1 }],
+  };
+  const appended = {
+    _id: 'order-appended',
+    onlineOrderNumber: 'ME-APPENDED',
+    customerRemark: '追加单客户备注',
+    products: [{ brand: 'OPPO', productName: 'Find X8', quantity: 2 }],
+  };
+  const legacyPrimaryEntry = apply.buildShipmentRemarkEntry(primary, 'primary');
+  delete legacyPrimaryEntry.printProductRemark;
+  const record = {
+    sourceOrderId: primary._id,
+    shipmentRemarkEntries: [legacyPrimaryEntry],
+  };
+  const refreshed = shipment.buildShipmentRemarkData(record, {
+    ensureEntries: shipment.buildMissingRemarkEntries([primary], primary._id, ''),
+  });
+  const reattached = shipment.buildShipmentRemarkData({ ...record, ...refreshed }, {
+    ensureEntries: shipment.buildMissingRemarkEntries([primary], primary._id, ''),
+    appendEntry: shipment.buildShipmentRemarkEntry(appended, 'appended'),
+  });
+
+  assert.equal(refreshed.shipmentRemarkEntries[0].printProductRemark, 'iPhone 15 / 256G×1');
+  assert.equal(reattached.shipmentPrintRemark, '订单1：iPhone 15 / 256G×1；备注：主单客户备注\n订单2：Find X8×2；备注：追加单客户备注');
+});
+
+test('同型号不同数量按订单分行保留，不做包含去重', () => {
+  const primary = {
+    _id: 'order-liufei-primary',
+    customerRemark: '壳 线',
+    products: [{ productName: 'OPPOA72', quantity: 22 }],
+  };
+  const appended = {
+    _id: 'order-liufei-appended',
+    customerRemark: '壳 售后 和他的租赁订单一起发',
+    products: [{ productName: 'OPPOA72', quantity: 2 }],
+  };
+  const entries = [
+    apply.buildShipmentRemarkEntry(primary, 'primary'),
+    apply.buildShipmentRemarkEntry(appended, 'appended'),
+  ];
+
+  assert.equal(
+    apply.buildShipmentPrintRemark(entries),
+    '订单1：OPPOA72×22；备注：壳 线\n订单2：OPPOA72×2；备注：壳 售后 和他的租赁订单一起发',
   );
 });
 
@@ -293,6 +516,13 @@ test('取消顺丰单只清除匹配的待出库单号', () => {
   );
 });
 
+test('共享顺丰单禁止沿用单订单取消流程', () => {
+  assert.equal(cancelSfOrder.isSharedShipment({ linkedOrderIds: ['order-1'] }), false);
+  assert.equal(cancelSfOrder.isSharedShipment({
+    linkedOrderIds: ['order-1', 'order-2', 'order-2'],
+  }), true);
+});
+
 test('出库记录已有顺丰单号时无需再次提交或扫码', () => {
   assert.deepEqual(
     JSON.parse(JSON.stringify(outbound.planOutboundCompletionTracking(
@@ -313,6 +543,55 @@ test('出库记录已有顺丰单号时无需再次提交或扫码', () => {
     outbound.planOutboundCompletionTracking({ trackingNumber: 'SF123' }, 'SF456').action,
     'conflict',
   );
+});
+
+test('全部关联出库完成后顺丰包裹自动封箱但不自动永久交接', () => {
+  const record = {
+    status: 'applied',
+    isCurrent: true,
+    shipmentStatus: 'packing',
+    linkedOutboundIds: ['outbound-1', 'outbound-2'],
+  };
+  assert.equal(
+    outbound.planSfShipmentAfterOutboundCompleted(
+      record,
+      'outbound-2',
+      [
+        { _id: 'outbound-1', outboundStatus: 'completed' },
+        { _id: 'outbound-2', outboundStatus: 'pending' },
+      ],
+    ).action,
+    'seal',
+  );
+  assert.equal(
+    outbound.planSfShipmentAfterOutboundCompleted(
+      record,
+      'outbound-2',
+      [
+        { _id: 'outbound-1', outboundStatus: 'pending' },
+        { _id: 'outbound-2', outboundStatus: 'pending' },
+      ],
+    ).action,
+    'wait',
+  );
+});
+
+test('只有开放过追加或已经共享的包裹需要确认交接', () => {
+  assert.equal(shipment.requiresHandoverConfirmation({
+    sourceOrderId: 'order-1',
+    linkedOrderIds: ['order-1'],
+    reuseEnabledAt: '',
+  }), false);
+  assert.equal(shipment.requiresHandoverConfirmation({
+    sourceOrderId: 'order-1',
+    linkedOrderIds: ['order-1'],
+    reuseEnabledAt: '2026-07-28T12:00:00.000Z',
+  }), true);
+  assert.equal(shipment.requiresHandoverConfirmation({
+    sourceOrderId: 'order-1',
+    linkedOrderIds: ['order-1', 'order-2'],
+    reuseEnabledAt: '',
+  }), true);
 });
 
 test('待出库查询不再因已有快递单号排除订单出库记录', () => {

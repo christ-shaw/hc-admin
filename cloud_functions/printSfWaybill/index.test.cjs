@@ -110,7 +110,7 @@ test('普通单票优先使用结构化主运单号并生成安全文件名', ()
 test('面单备注读取顺丰下单时保存的订单备注快照', () => {
   assert.equal(helpers.getPrintRemark({
     orderSnapshot: { customerRemark: '  测试订单备注  ' },
-  }), '测试订单备注');
+  }), '订单1：无商品明细；备注：测试订单备注');
   assert.equal(helpers.getPrintRemark({
     orderSnapshot: {
       customerRemark: '客户备注',
@@ -119,19 +119,34 @@ test('面单备注读取顺丰下单时保存的订单备注快照', () => {
         { brand: 'OPPO', productName: 'Reno12', specification: '默认', quantity: 1 },
       ],
     },
-  }), '客户下单：Apple / iPhone 15 / 256G×2，OPPO / Reno12×1；客户备注');
+  }), '订单1：iPhone 15 / 256G×2，Reno12×1；备注：客户备注');
   assert.equal(helpers.getPrintRemark({
     orderSnapshot: {
-      customerRemark: '客户下单：Apple / iPhone 15×1；客户备注',
+      rawCustomerRemark: '客户备注',
       products: [
         { brand: 'Apple', productName: 'iPhone 15', quantity: 1 },
       ],
     },
-  }), '客户下单：Apple / iPhone 15×1；客户备注');
+  }), '订单1：iPhone 15×1；备注：客户备注');
   assert.equal(helpers.getPrintRemark({}), '');
   assert.equal(helpers.getPrintRemark({
     orderSnapshot: { customerRemark: '备'.repeat(120) },
   }).length, 100);
+});
+
+test('合包面单优先使用主顺丰单保存的合并备注', () => {
+  const record = {
+    shipmentPrintRemark: 'iPhone 15 / 256G×1；主单备注；Find X8×2；追加单备注',
+    shipmentRemarkEntries: [
+      { orderId: 'order-1', orderNumber: 'ME-1', role: 'primary', printProductRemark: 'iPhone 15 / 256G×1', customerRemark: '主单备注' },
+      { orderId: 'order-2', orderNumber: 'ME-2', role: 'appended', printProductRemark: 'Find X8×2', customerRemark: '追加单备注' },
+    ],
+    orderSnapshot: { customerRemark: '不应回退到这里' },
+  };
+  assert.equal(helpers.getPrintRemark(record), '订单1：iPhone 15 / 256G×1；备注：主单备注\n订单2：Find X8×2；备注：追加单备注');
+  assert.equal(helpers.getPrintRemark({
+    shipmentRemarkEntries: record.shipmentRemarkEntries,
+  }), '订单1：iPhone 15 / 256G×1；备注：主单备注\n订单2：Find X8×2；备注：追加单备注');
 });
 
 test('自定义模板字段 hc_text 动态使用订单备注', () => {

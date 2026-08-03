@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Button, Dialog, MessagePlugin, Select, Tag } from 'tdesign-react';
-import { Download, Eye, FileText, Printer, RefreshCw } from 'lucide-react';
+import { Download, Eye, FileText, LoaderCircle, Printer, RefreshCw } from 'lucide-react';
 import type { SfExpressWorkbenchRow } from '../types';
 import { callFunction } from '../lib/cloudbase';
 import {
@@ -48,9 +48,18 @@ interface RecordResult {
 
 interface SfPrintDialogProps {
   record: SfExpressWorkbenchRow | null;
+  batchRecords?: SfExpressWorkbenchRow[];
   onClose: () => void;
   onPdfPrint: (record: SfExpressWorkbenchRow) => Promise<void>;
-  onPluginPrinted: (record: SfExpressWorkbenchRow) => void;
+  onPluginPrinted: () => void;
+}
+
+interface BatchPrintResult {
+  sourceOrderId: string;
+  orderLabel: string;
+  waybillNo: string;
+  success: boolean;
+  errMsg?: string;
 }
 
 const platform = detectSfPrintPlatform();
@@ -62,7 +71,24 @@ function resultMessage(result: SfSdkResult) {
   return result.msg || `打印插件返回代码 ${result.code}`;
 }
 
-export function SfPrintDialog({ record, onClose, onPdfPrint, onPluginPrinted }: SfPrintDialogProps) {
+function getOrderLabel(record: SfExpressWorkbenchRow) {
+  return record.order.onlineOrderNumber || `序号 ${record.order.serialNumber || '-'}`;
+}
+
+export function SfPrintDialog({
+  record,
+  batchRecords = [],
+  onClose,
+  onPdfPrint,
+  onPluginPrinted,
+}: SfPrintDialogProps) {
+  const records = useMemo(
+    () => batchRecords.length > 0 ? batchRecords : record ? [record] : [],
+    [batchRecords, record],
+  );
+  const primaryRecord = records[0] || null;
+  const recordsKey = records.map(item => item.currentSfOrder?._id || item.order._id).join('|');
+  const isBatch = records.length > 1;
   const [bootstrap, setBootstrap] = useState<BootstrapResult | null>(null);
   const [bootstrapError, setBootstrapError] = useState('');
   const [pluginResult, setPluginResult] = useState<SfSdkResult | null>(null);
@@ -70,7 +96,10 @@ export function SfPrintDialog({ record, onClose, onPdfPrint, onPluginPrinted }: 
   const [printerName, setPrinterName] = useState('');
   const [initializing, setInitializing] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [working, setWorking] = useState<'print' | 'preview' | 'pdf' | ''>('');
+  const [working, setWorking] = useState<'print' | 'preview' | 'pdf' | 'batch' | ''>('');
+  const [batchProgress, setBatchProgress] = useState(0);
+  const [batchPrintingOrderId, setBatchPrintingOrderId] = useState('');
+  const [batchResults, setBatchResults] = useState<BatchPrintResult[]>([]);
 
   const pluginUsable = platform === 'windows'
     && bootstrap?.pluginPrintEnabled === true
@@ -107,13 +136,16 @@ export function SfPrintDialog({ record, onClose, onPdfPrint, onPluginPrinted }: 
   };
 
   useEffect(() => {
-    if (!record) return;
+    if (!primaryRecord) return;
     let active = true;
     setBootstrap(null);
     setBootstrapError('');
     setPluginResult(null);
     setPrinters([]);
     setPrinterName('');
+    setBatchProgress(0);
+    setBatchPrintingOrderId('');
+    setBatchResults([]);
 
     if (platform !== 'windows') return;
     setInitializing(true);
@@ -152,7 +184,7 @@ export function SfPrintDialog({ record, onClose, onPdfPrint, onPluginPrinted }: 
     return () => {
       active = false;
     };
-  }, [record?.currentSfOrder?._id]);
+  }, [recordsKey]);
 
   const handlePrinterChange = async (value: unknown) => {
     if (!bootstrap?.partnerID || !bootstrap.env) return;
@@ -163,13 +195,16 @@ export function SfPrintDialog({ record, onClose, onPdfPrint, onPluginPrinted }: 
     localStorage.setItem(`sf.print.printer.${bootstrap.env}`, nextName);
   };
 
-  const prepare = (operation: 'print' | 'preview', retryOfRequestID = '') => {
-    if (!record) throw new Error('未选择打印订单');
-    if (!record.currentSfOrder) throw new Error('顺丰记录不存在');
+  const prepare = (
+    target: SfExpressWorkbenchRow,
+    operation: 'print' | 'preview',
+    retryOfRequestID = '',
+  ) => {
+    if (!target.currentSfOrder) throw new Error('顺丰记录不存在');
     return callFunction<PrepareResult>('manageSfPluginPrint', {
       data: {
         action: 'prepare',
-        sfExpressOrderId: record.currentSfOrder._id,
+        sfExpressOrderId: target.currentSfOrder._id,
         operation,
         ...(retryOfRequestID ? { retryOfRequestID } : {}),
       },
@@ -191,9 +226,13 @@ export function SfPrintDialog({ record, onClose, onPdfPrint, onPluginPrinted }: 
     })
   );
 
-  const executeOnce = async (operation: 'print' | 'preview', retryOfRequestID = '') => {
+  const executeOnce = async (
+    target: SfExpressWorkbenchRow,
+    operation: 'print' | 'preview',
+    retryOfRequestID = '',
+  ) => {
     if (!bootstrap?.partnerID || !bootstrap.env) throw new Error('插件打印配置尚未加载');
-    const prepared = await prepare(operation, retryOfRequestID);
+    const prepared = await prepare(target, operation, retryOfRequestID);
     if (!prepared.success) throw new Error(prepared.errMsg || '准备打印数据失败');
     if (prepared.env !== bootstrap.env) throw new Error('顺丰打印环境已变化，请刷新页面后重试');
 
@@ -214,16 +253,16 @@ export function SfPrintDialog({ record, onClose, onPdfPrint, onPluginPrinted }: 
   };
 
   const handlePluginOperation = async (operation: 'print' | 'preview') => {
-    if (!record || !pluginUsable || working) return;
+    if (!primaryRecord || !pluginUsable || working) return;
     setWorking(operation);
     try {
-      let result = await executeOnce(operation);
+      let result = await executeOnce(primaryRecord, operation);
       if (result.callback.code === 12 && result.callback.apiResultCode === 'A1011') {
-        result = await executeOnce(operation, result.prepared.requestID);
+        result = await executeOnce(primaryRecord, operation, result.prepared.requestID);
       }
       if (!result.recorded.success) throw new Error(result.recorded.errMsg || '打印结果记录失败');
       if (result.recorded.status === 'succeeded' && result.recorded.counted) {
-        onPluginPrinted(record);
+        onPluginPrinted();
         MessagePlugin.success('顺丰丰密面单已发送到打印机');
         onClose();
         return;
@@ -241,12 +280,67 @@ export function SfPrintDialog({ record, onClose, onPdfPrint, onPluginPrinted }: 
   };
 
   const handlePdf = async () => {
-    if (!record || working) return;
+    if (!primaryRecord || working) return;
     setWorking('pdf');
     try {
-      await onPdfPrint(record);
+      await onPdfPrint(primaryRecord);
       onClose();
     } finally {
+      setWorking('');
+    }
+  };
+
+  const handleBatchPluginPrint = async () => {
+    if (!isBatch || !pluginUsable || !printerName || working) return;
+    setWorking('batch');
+    setBatchProgress(0);
+    setBatchPrintingOrderId('');
+    setBatchResults([]);
+
+    const results: BatchPrintResult[] = [];
+    try {
+      for (let index = 0; index < records.length; index += 1) {
+        const target = records[index];
+        const sourceOrderId = target.order._id;
+        setBatchPrintingOrderId(sourceOrderId);
+        try {
+          let result = await executeOnce(target, 'print');
+          if (result.callback.code === 12 && result.callback.apiResultCode === 'A1011') {
+            result = await executeOnce(target, 'print', result.prepared.requestID);
+          }
+          if (!result.recorded.success) throw new Error(result.recorded.errMsg || '打印结果记录失败');
+          if (result.recorded.status !== 'succeeded') throw new Error(resultMessage(result.callback));
+          results.push({
+            sourceOrderId,
+            orderLabel: getOrderLabel(target),
+            waybillNo: target.currentSfOrder?.waybillNo || '',
+            success: true,
+          });
+        } catch (error) {
+          results.push({
+            sourceOrderId,
+            orderLabel: getOrderLabel(target),
+            waybillNo: target.currentSfOrder?.waybillNo || '',
+            success: false,
+            errMsg: error instanceof Error ? error.message : String(error),
+          });
+        } finally {
+          setBatchProgress(index + 1);
+          setBatchResults([...results]);
+        }
+      }
+
+      setBatchPrintingOrderId('');
+      const succeeded = results.filter(result => result.success).length;
+      const failed = results.length - succeeded;
+      if (succeeded > 0) onPluginPrinted();
+      if (failed > 0) {
+        MessagePlugin.warning(`串行打印完成：成功 ${succeeded} 张，失败 ${failed} 张`);
+      } else {
+        MessagePlugin.success(`已依次发送 ${succeeded} 张面单到打印机`);
+      }
+    } finally {
+      setBatchPrintingOrderId('');
       setWorking('');
     }
   };
@@ -254,44 +348,111 @@ export function SfPrintDialog({ record, onClose, onPdfPrint, onPluginPrinted }: 
   const installerUrl = pluginResult?.downloadUrl && isTrustedSfDownloadUrl(pluginResult.downloadUrl)
     ? pluginResult.downloadUrl
     : '';
+  const currentBatchRecord = records.find(item => item.order._id === batchPrintingOrderId)
+    || records[Math.min(batchProgress, Math.max(records.length - 1, 0))];
 
   return (
     <Dialog
-      header="打印顺丰丰密面单"
-      visible={!!record}
+      header={isBatch ? `串行打印顺丰面单（${records.length}）` : '打印顺丰丰密面单'}
+      visible={records.length > 0}
       onClose={() => !working && onClose()}
-      width="620px"
+      width={isBatch ? '760px' : '620px'}
       footer={false}
     >
-      {record && (
+      {primaryRecord && (
         <div className="space-y-4 text-sm">
-          <div className="rounded-lg bg-gray-50 px-4 py-3">
-            <div><span className="text-gray-500">订单：</span>{record.order.onlineOrderNumber || `序号 ${record.order.serialNumber || '-'}`}</div>
-            <div className="mt-1"><span className="text-gray-500">运单号：</span>{record.currentSfOrder?.waybillNo || '-'}</div>
-          </div>
-
-          <div className="flex items-center justify-between gap-4 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3">
-            <div>
-              <div className="font-medium text-blue-900">免插件打印（推荐）</div>
-              <div className="mt-1 text-xs text-blue-700">
-                调用顺丰云打印接口生成官方 PDF，无需安装顺丰插件；请在随后打开的系统打印窗口中选择打印机。
+          {isBatch ? (
+            <>
+              <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-blue-800">
+                已选择 {records.length} 张面单。系统会等待当前面单发送完成，再处理下一张。
               </div>
-            </div>
-            <Button
-              theme="primary"
-              icon={<FileText size={16} />}
-              loading={working === 'pdf'}
-              disabled={!!working}
-              onClick={handlePdf}
-            >
-              免插件打印
-            </Button>
-          </div>
+              {working === 'batch' && currentBatchRecord && (
+                <div className="space-y-2 rounded-lg border border-blue-100 bg-blue-50 px-3 py-3 text-blue-700">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <LoaderCircle className="shrink-0 animate-spin" size={16} />
+                      <span className="truncate">正在打印：{getOrderLabel(currentBatchRecord)}</span>
+                    </div>
+                    <span className="shrink-0 font-medium">{batchProgress} / {records.length}</span>
+                  </div>
+                  <div className="h-2 overflow-hidden rounded bg-blue-100">
+                    <div
+                      className="h-full rounded bg-blue-500 transition-[width] duration-300 ease-out"
+                      style={{ width: `${Math.round((batchProgress / records.length) * 100)}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+              <div className="max-h-[36vh] space-y-2 overflow-auto pr-1">
+                {records.map(item => {
+                  const result = batchResults.find(entry => entry.sourceOrderId === item.order._id);
+                  const isPrinting = working === 'batch' && batchPrintingOrderId === item.order._id;
+                  return (
+                    <div
+                      key={item.order._id}
+                      className={`flex items-start justify-between gap-3 rounded-lg border px-3 py-2 transition-colors ${
+                        isPrinting ? 'border-blue-300 bg-blue-50/70' : 'border-gray-200'
+                      }`}
+                    >
+                      <div className="min-w-0">
+                        <div className="font-medium text-gray-800">{getOrderLabel(item)}</div>
+                        <div className="mt-1 text-xs text-gray-500">
+                          运单号：{item.currentSfOrder?.waybillNo || '-'}
+                        </div>
+                        {result && !result.success && (
+                          <div className="mt-1 text-xs text-rose-600">{result.errMsg || '打印失败'}</div>
+                        )}
+                      </div>
+                      {isPrinting ? (
+                        <Tag theme="warning" variant="light">
+                          <span className="inline-flex items-center gap-1">
+                            <LoaderCircle className="animate-spin" size={13} />打印中
+                          </span>
+                        </Tag>
+                      ) : result ? (
+                        <Tag theme={result.success ? 'success' : 'danger'} variant="light">
+                          {result.success ? '已发送' : '失败'}
+                        </Tag>
+                      ) : (
+                        <Tag theme="default" variant="light">等待中</Tag>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="rounded-lg bg-gray-50 px-4 py-3">
+                <div><span className="text-gray-500">订单：</span>{getOrderLabel(primaryRecord)}</div>
+                <div className="mt-1"><span className="text-gray-500">运单号：</span>{primaryRecord.currentSfOrder?.waybillNo || '-'}</div>
+              </div>
+              <div className="flex items-center justify-between gap-4 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3">
+                <div>
+                  <div className="font-medium text-blue-900">免插件打印（推荐）</div>
+                  <div className="mt-1 text-xs text-blue-700">
+                    调用顺丰云打印接口生成官方 PDF，无需安装顺丰插件；请在随后打开的系统打印窗口中选择打印机。
+                  </div>
+                </div>
+                <Button
+                  theme="primary"
+                  icon={<FileText size={16} />}
+                  loading={working === 'pdf'}
+                  disabled={!!working}
+                  onClick={handlePdf}
+                >
+                  免插件打印
+                </Button>
+              </div>
+            </>
+          )}
 
           {platform === 'windows' ? (
             <div className="space-y-3 rounded-lg border border-gray-200 p-4">
               <div className="flex items-center justify-between">
-                <div className="font-medium text-gray-800">Windows 插件直接打印（可选）</div>
+                <div className="font-medium text-gray-800">
+                  {isBatch ? 'Windows 插件串行打印' : 'Windows 插件直接打印（可选）'}
+                </div>
                 <Tag theme={pluginUsable ? 'success' : 'warning'} variant="light">
                   {initializing ? '检测中' : pluginUsable ? '可用' : bootstrapError ? '初始化失败' : bootstrap?.pluginPrintEnabled === false ? '当前环境未开启' : '不可用'}
                 </Tag>
@@ -340,29 +501,50 @@ export function SfPrintDialog({ record, onClose, onPdfPrint, onPluginPrinted }: 
               </div>
 
               <div className="flex flex-wrap gap-2">
-                <Button
-                  theme="primary"
-                  icon={<Printer size={16} />}
-                  loading={working === 'print'}
-                  disabled={!pluginUsable || !printerName || !!working}
-                  onClick={() => handlePluginOperation('print')}
-                >
-                  直接打印
-                </Button>
-                <Button
-                  variant="outline"
-                  icon={<Eye size={16} />}
-                  loading={working === 'preview'}
-                  disabled={!pluginUsable || !printerName || !!working}
-                  onClick={() => handlePluginOperation('preview')}
-                >
-                  打印预览
-                </Button>
+                {isBatch ? (
+                  <Button
+                    theme="primary"
+                    icon={<Printer size={16} />}
+                    loading={working === 'batch'}
+                    disabled={!pluginUsable || !printerName || !!working || batchResults.length === records.length}
+                    onClick={handleBatchPluginPrint}
+                  >
+                    开始串行打印（{records.length}）
+                  </Button>
+                ) : (
+                  <>
+                    <Button
+                      theme="primary"
+                      icon={<Printer size={16} />}
+                      loading={working === 'print'}
+                      disabled={!pluginUsable || !printerName || !!working}
+                      onClick={() => handlePluginOperation('print')}
+                    >
+                      直接打印
+                    </Button>
+                    <Button
+                      variant="outline"
+                      icon={<Eye size={16} />}
+                      loading={working === 'preview'}
+                      disabled={!pluginUsable || !printerName || !!working}
+                      onClick={() => handlePluginOperation('preview')}
+                    >
+                      打印预览
+                    </Button>
+                  </>
+                )}
               </div>
             </div>
           ) : (
             <div className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3 text-blue-700">
-              {platform === 'macos' ? 'macOS' : '当前系统'}请使用上方免插件打印。
+              {isBatch
+                ? `批量串行打印需要 Windows 顺丰云打印插件，${platform === 'macos' ? 'macOS' : '当前系统'}可逐单使用免插件打印。`
+                : `${platform === 'macos' ? 'macOS' : '当前系统'}请使用上方免插件打印。`}
+            </div>
+          )}
+          {isBatch && batchResults.length === records.length && !working && (
+            <div className="flex justify-end">
+              <Button theme="primary" onClick={onClose}>关闭</Button>
             </div>
           )}
         </div>
