@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   callFunction,
   getCurrentPermissionUserPayload,
@@ -78,6 +78,7 @@ export function PermissionProvider({ children }: { children: React.ReactNode }) 
   const [pagePermissions, setPagePermissions] = useState<string[]>([]);
   const [actionPermissions, setActionPermissions] = useState<string[]>([]);
   const [errorMessage, setErrorMessage] = useState('');
+  const refreshRequestRef = useRef(0);
 
   const clearPermissions = useCallback(() => {
     setInitialized(false);
@@ -90,9 +91,11 @@ export function PermissionProvider({ children }: { children: React.ReactNode }) 
   }, []);
 
   const refreshPermissions = useCallback(async () => {
+    const requestId = ++refreshRequestRef.current;
     setStatus('loading');
     try {
       const currentUser = await getCurrentPermissionUserPayload().catch(() => null);
+      if (requestId !== refreshRequestRef.current) return;
       if (!currentUser) {
         clearPermissions();
         setErrorMessage('请先登录');
@@ -100,6 +103,7 @@ export function PermissionProvider({ children }: { children: React.ReactNode }) 
         return;
       }
       const result = await callFunction<GetUserRoleResult>('getUserRole', { currentUser });
+      if (requestId !== refreshRequestRef.current) return;
       const nextStatus = result.status || (result.success ? 'ready' : 'error');
       const data = result.data || null;
 
@@ -113,6 +117,7 @@ export function PermissionProvider({ children }: { children: React.ReactNode }) 
       setErrorMessage(getStatusMessage(nextStatus, result.errMsg));
       setStatus(nextStatus);
     } catch (error) {
+      if (requestId !== refreshRequestRef.current) return;
       clearPermissions();
       setErrorMessage(error instanceof Error ? error.message : '权限加载失败，请稍后重试');
       setStatus('error');
@@ -133,6 +138,14 @@ export function PermissionProvider({ children }: { children: React.ReactNode }) 
 
   const canAccessPage = useCallback((path: string) => {
     const normalizedPath = normalizePath(path);
+    // 采购页沿用订单域权限作为存量角色的兼容回退；新角色可单独配置 /purchases。
+    if (normalizedPath === '/purchases') {
+      return pagePermissions.includes('/purchases') || pagePermissions.includes('/orders');
+    }
+    // 顺丰工作台沿用订单域权限，避免存量角色需要重新配置。
+    if (normalizedPath === '/sf-express') {
+      return pagePermissions.includes('/orders');
+    }
     return pagePermissions.includes(normalizedPath);
   }, [pagePermissions]);
 

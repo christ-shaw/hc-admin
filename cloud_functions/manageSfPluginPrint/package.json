@@ -1,0 +1,10 @@
+{
+  "name": "manageSfPluginPrint",
+  "version": "1.0.0",
+  "description": "管理顺丰 Windows 云打印插件会话",
+  "main": "index.js",
+  "dependencies": {
+    "@cloudbase/node-sdk": "^3.16.0",
+    "wx-server-sdk": "~2.6.3"
+  }
+}

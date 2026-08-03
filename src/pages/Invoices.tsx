@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState, useRef } from 'react';
 import { Table, Button, Input, Select, Tag, Dialog, MessagePlugin } from 'tdesign-react';
 import { Search, RotateCcw, Plus, Eye, Download, Upload, X, ChevronRight, ChevronLeft, Check } from 'lucide-react';
-import { InvoiceRecord, InvoiceFilters, CompanyTemplate, InvoiceFile, dictToOptions, getDictLabel } from '../types';
+import { InvoiceRecord, InvoiceFilters, CompanyTemplate, InvoiceFile, InvoicePhoneProduct, dictToOptions, getDictLabel } from '../types';
 import { useInvoices } from '../hooks/useInvoices';
 import { callFunction, getCurrentOperatorName, uploadToCloudStorage, getCloudFileURLs } from '../lib/cloudbase';
 import { formatDate } from '../utils/format';
 import { DICT_CODES, useDictionaries } from '../contexts/DictionaryContext';
+import { useTabDirty } from '../contexts/TabWorkspaceContext';
 
 const STATUS_TAG_THEME: Record<string, 'success' | 'warning' | 'danger' | 'default'> = {
   paid: 'success',
@@ -27,7 +28,87 @@ function normalizeInvoiceStatus(status: string | undefined): InvoiceRecord['stat
   return (status || 'unpaid') as InvoiceRecord['status'];
 }
 
-const EMPTY_INVOICE: Omit<InvoiceRecord, '_id' | 'createTime'> = {
+type InvoiceForm = Omit<InvoiceRecord, '_id' | 'createTime'>;
+
+const EMPTY_PHONE_PRODUCT: InvoicePhoneProduct = {
+  model: '',
+  quantity: 0,
+  unitPrice: 0,
+  amount: 0,
+};
+
+function normalizePhoneProduct(product: Partial<InvoicePhoneProduct>): InvoicePhoneProduct {
+  const quantity = Number(product.quantity) || 0;
+  const unitPrice = Number(product.unitPrice) || 0;
+  return {
+    model: product.model || '',
+    quantity,
+    unitPrice,
+    amount: Math.round(quantity * unitPrice * 100) / 100,
+  };
+}
+
+/** 新数据读取 phoneProducts，旧数据回退为单条手机货品。 */
+function getInvoicePhoneProducts(invoice: Partial<InvoiceRecord>): InvoicePhoneProduct[] {
+  if (Array.isArray(invoice.phoneProducts) && invoice.phoneProducts.length > 0) {
+    return invoice.phoneProducts.map(normalizePhoneProduct);
+  }
+  if (invoice.phoneModel || invoice.phoneQuantity || invoice.unitPrice) {
+    return [normalizePhoneProduct({
+      model: invoice.phoneModel || '',
+      quantity: invoice.phoneQuantity || 0,
+      unitPrice: invoice.unitPrice || 0,
+    })];
+  }
+  return [];
+}
+
+/** 同步多货品、总金额以及兼容旧版本的单货品汇总字段。 */
+function syncPhoneProducts(form: InvoiceForm, products: InvoicePhoneProduct[]): InvoiceForm {
+  const normalizedProducts = products.map(normalizePhoneProduct);
+  const invoiceAmount = Math.round(normalizedProducts.reduce((sum, item) => sum + item.amount, 0) * 100) / 100;
+  const phoneQuantity = normalizedProducts.reduce((sum, item) => sum + item.quantity, 0);
+  return {
+    ...form,
+    phoneProducts: normalizedProducts,
+    invoiceAmount,
+    phoneModel: normalizedProducts.map(item => item.model.trim()).filter(Boolean).join('、'),
+    phoneQuantity,
+    unitPrice: normalizedProducts.length === 1 ? normalizedProducts[0].unitPrice : 0,
+  };
+}
+
+function changeInvoiceCategory(form: InvoiceForm, category: string): InvoiceForm {
+  if (category === '二手手机') {
+    const products = getInvoicePhoneProducts(form);
+    return syncPhoneProducts(
+      { ...form, invoiceCategory: category },
+      products.length > 0 ? products : [{ ...EMPTY_PHONE_PRODUCT }],
+    );
+  }
+  return {
+    ...form,
+    invoiceCategory: category,
+    invoiceAmount: 0,
+    phoneProducts: [],
+    phoneModel: '',
+    phoneQuantity: 0,
+    unitPrice: 0,
+  };
+}
+
+function validatePhoneProducts(invoice: Partial<InvoiceRecord>): string | null {
+  const products = getInvoicePhoneProducts(invoice);
+  if (products.length === 0) return '请至少添加一个手机货品';
+  const invalidIndex = products.findIndex(item => !item.model.trim() || item.quantity <= 0 || item.unitPrice <= 0);
+  if (invalidIndex < 0) return null;
+  const item = products[invalidIndex];
+  if (!item.model.trim()) return `请填写第 ${invalidIndex + 1} 个货品的手机型号`;
+  if (item.quantity <= 0) return `请填写第 ${invalidIndex + 1} 个货品的数量`;
+  return `请填写第 ${invalidIndex + 1} 个货品的单价`;
+}
+
+const EMPTY_INVOICE: InvoiceForm = {
   applyDate: '',
   companyName: '',
   applicant: '',
@@ -41,6 +122,7 @@ const EMPTY_INVOICE: Omit<InvoiceRecord, '_id' | 'createTime'> = {
   bankCode: '',
   invoiceCategory: '',
   invoiceAmount: 0,
+  phoneProducts: [],
   phoneModel: '',
   phoneQuantity: 0,
   unitPrice: 0,
@@ -96,6 +178,20 @@ export function Invoices() {
   const [previewRecord, setPreviewRecord] = useState<InvoiceRecord | null>(null);
   const [previewUrls, setPreviewUrls] = useState<Array<{ fileID: string; tempFileURL: string; fileName: string }>>([]);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const addInitialRef = useRef('');
+  const editInitialRef = useRef('');
+
+  useTabDirty(
+    (addVisible && !!addInitialRef.current && (
+      JSON.stringify(addForm) !== addInitialRef.current || addAttachFiles.length > 0
+    ))
+      || (editVisible && !!editInitialRef.current && (
+        JSON.stringify({ form: editForm, attachments: editExistingAttachments }) !== editInitialRef.current
+        || editAttachFiles.length > 0
+      ))
+      || (invoiceUploadVisible && uploadFiles.length > 0),
+    '开票管理',
+  );
 
   useEffect(() => {
     invoices.fetchRecords();
@@ -189,7 +285,9 @@ export function Invoices() {
     const today = new Date();
     const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
     const applicant = await getCurrentOperatorName();
-    setAddForm({ ...EMPTY_INVOICE, applyDate: dateStr, applicant });
+    const form = { ...EMPTY_INVOICE, applyDate: dateStr, applicant };
+    setAddForm(form);
+    addInitialRef.current = JSON.stringify(form);
     setAddStep(1);
     setAddAttachFiles([]);
     setAddVisible(true);
@@ -211,16 +309,9 @@ export function Invoices() {
         return;
       }
       if (addForm.invoiceCategory === '二手手机') {
-        if (!addForm.phoneModel?.trim()) {
-          MessagePlugin.warning('请输入手机型号');
-          return;
-        }
-        if (!addForm.phoneQuantity || addForm.phoneQuantity <= 0) {
-          MessagePlugin.warning('请输入手机数量');
-          return;
-        }
-        if (!addForm.unitPrice || addForm.unitPrice <= 0) {
-          MessagePlugin.warning('请输入单价');
+        const validationMessage = validatePhoneProducts(addForm);
+        if (validationMessage) {
+          MessagePlugin.warning(validationMessage);
           return;
         }
       }
@@ -324,10 +415,7 @@ export function Invoices() {
 
   /** 编辑 */
   const handleEditOpen = (record: InvoiceRecord) => {
-    setEditId(record._id);
-    setEditExistingAttachments(record.attachments || []);
-    setEditAttachFiles([]);
-    setEditForm({
+    const form = {
       applyDate: record.applyDate,
       companyName: record.companyName,
       applicant: record.applicant,
@@ -341,19 +429,36 @@ export function Invoices() {
       bankCode: record.bankCode,
       invoiceCategory: record.invoiceCategory,
       invoiceAmount: record.invoiceAmount,
+      phoneProducts: getInvoicePhoneProducts(record),
       phoneModel: record.phoneModel || '',
       phoneQuantity: record.phoneQuantity || 0,
       unitPrice: record.unitPrice || 0,
       invoiceFiles: record.invoiceFiles,
       attachments: record.attachments,
       completedTime: record.completedTime,
-    });
+    };
+    setEditId(record._id);
+    setEditExistingAttachments(record.attachments || []);
+    setEditAttachFiles([]);
+    setEditForm(form);
+    editInitialRef.current = JSON.stringify({ form, attachments: record.attachments || [] });
     setEditVisible(true);
   };
 
   const handleEditSave = async () => {
     if (!editForm.companyName.trim()) {
       MessagePlugin.warning('请填写单位名称');
+      return;
+    }
+    if (editForm.invoiceCategory === '二手手机') {
+      const validationMessage = validatePhoneProducts(editForm);
+      if (validationMessage) {
+        MessagePlugin.warning(validationMessage);
+        return;
+      }
+    }
+    if (!editForm.invoiceAmount || editForm.invoiceAmount <= 0) {
+      MessagePlugin.warning('请填写开票金额');
       return;
     }
     setSaving(true);
@@ -566,7 +671,7 @@ export function Invoices() {
   const canGoNextInvoicePage = invoices.currentPage < loadedInvoicePages || invoices.hasMore;
 
   return (
-    <div className="space-y-4">
+    <div className="min-w-0 space-y-4">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-gray-800">发票管理</h1>
@@ -605,16 +710,18 @@ export function Invoices() {
       </div>
 
       {/* 表格 */}
-      <div className="glass-card">
-        <Table
-          data={displayRecords}
-          columns={columns}
-          loading={invoices.loading}
-          rowKey="_id"
-          tableLayout="fixed"
-          hover
-          stripe
-        />
+      <div className="glass-card min-w-0 overflow-hidden">
+        <div className="max-w-full overflow-x-auto">
+          <Table
+            data={displayRecords}
+            columns={columns}
+            loading={invoices.loading}
+            rowKey="_id"
+            tableLayout="fixed"
+            hover
+            stripe
+          />
+        </div>
         {/* 分页 */}
         <div className="flex justify-center items-center gap-2 py-4 border-t border-gray-100">
           <Button size="small" variant="outline" disabled={invoices.currentPage <= 1}
@@ -652,11 +759,19 @@ export function Invoices() {
             <DetailRow label="开户行行号" value={currentRecord.bankCode} />
             <DetailRow label="开票类目" value={currentRecord.invoiceCategory} />
             {currentRecord.invoiceCategory === '二手手机' && (
-              <>
-                <DetailRow label="手机型号" value={currentRecord.phoneModel} />
-                <DetailRow label="手机数量" value={currentRecord.phoneQuantity} />
-                <DetailRow label="单价" value={currentRecord.unitPrice ? `¥${currentRecord.unitPrice}` : '-'} />
-              </>
+              <DetailRow label="手机货品" value={
+                <div className="space-y-2 w-full">
+                  {getInvoicePhoneProducts(currentRecord).map((item, index) => (
+                    <div key={`${item.model}-${index}`} className="flex items-center justify-between gap-4 rounded-lg bg-gray-50 px-3 py-2">
+                      <div className="min-w-0">
+                        <div className="font-medium text-gray-800 truncate">{index + 1}. {item.model || '-'}</div>
+                        <div className="text-xs text-gray-500 mt-0.5">{item.quantity} 台 × ¥{item.unitPrice}</div>
+                      </div>
+                      <span className="font-medium text-gray-800 whitespace-nowrap">¥{item.amount}</span>
+                    </div>
+                  ))}
+                </div>
+              } />
             )}
             <DetailRow label="开票金额" value={currentRecord.invoiceAmount ? `¥${currentRecord.invoiceAmount}` : '-'} />
             {currentRecord.attachments && currentRecord.attachments.length > 0 && (
@@ -823,12 +938,7 @@ export function Invoices() {
                 <div className="col-span-2">
                   <label className="block text-xs text-gray-500 mb-1">开票类目 <span className="text-red-500">*</span></label>
                   <Select placeholder="请选择开票类目" value={addForm.invoiceCategory || undefined}
-                    onChange={val => setAddForm(prev => ({
-                      ...prev,
-                      invoiceCategory: val as string,
-                      // 切换类目时重置相关字段
-                      ...(val !== '二手手机' ? { phoneModel: '', phoneQuantity: 0, unitPrice: 0, invoiceAmount: 0 } : {}),
-                    }))}
+                    onChange={val => setAddForm(prev => changeInvoiceCategory(prev, val as string))}
                     options={invoiceCategoryOptions}
                     popupProps={{ attach: 'body', zIndex: 6000 }}
                     size="large" />
@@ -836,43 +946,12 @@ export function Invoices() {
 
                 {/* 二手手机 - 动态字段 */}
                 {addForm.invoiceCategory === '二手手机' && (
-                  <>
-                    <div>
-                      <label className="block text-xs text-gray-500 mb-1">手机型号 <span className="text-red-500">*</span></label>
-                      <Input placeholder="请输入手机型号" value={addForm.phoneModel || ''}
-                        onChange={val => setAddForm(prev => ({ ...prev, phoneModel: val as string }))} />
-                    </div>
-                    <div>
-                      <label className="block text-xs text-gray-500 mb-1">手机数量 <span className="text-red-500">*</span></label>
-                      <Input type="number" placeholder="请输入数量" value={addForm.phoneQuantity ? String(addForm.phoneQuantity) : ''}
-                        onChange={val => {
-                          const qty = Number(val) || 0;
-                          setAddForm(prev => ({
-                            ...prev,
-                            phoneQuantity: qty,
-                            invoiceAmount: qty * (prev.unitPrice || 0),
-                          }));
-                        }} />
-                    </div>
-                    <div>
-                      <label className="block text-xs text-gray-500 mb-1">单价 <span className="text-red-500">*</span></label>
-                      <Input type="number" placeholder="请输入单价" value={addForm.unitPrice ? String(addForm.unitPrice) : ''}
-                        onChange={val => {
-                          const price = Number(val) || 0;
-                          setAddForm(prev => ({
-                            ...prev,
-                            unitPrice: price,
-                            invoiceAmount: (prev.phoneQuantity || 0) * price,
-                          }));
-                        }} />
-                    </div>
-                    <div>
-                      <label className="block text-xs text-gray-500 mb-1">开票金额</label>
-                      <Input type="number" placeholder="自动计算" value={addForm.invoiceAmount ? String(addForm.invoiceAmount) : ''}
-                        readonly disabled
-                        className="bg-gray-50" />
-                    </div>
-                  </>
+                  <div className="col-span-2">
+                    <PhoneProductEditor
+                      products={getInvoicePhoneProducts(addForm)}
+                      onChange={products => setAddForm(prev => syncPhoneProducts(prev, products))}
+                    />
+                  </div>
                 )}
 
                 {/* 租赁服务费 - 手动输入金额 */}
@@ -894,8 +973,8 @@ export function Invoices() {
                   <div><span className="text-gray-400">类目：</span><span className="text-gray-700">{addForm.invoiceCategory || '-'}</span></div>
                   {addForm.invoiceCategory === '二手手机' && (
                     <>
-                      <div><span className="text-gray-400">型号：</span><span className="text-gray-700">{addForm.phoneModel || '-'}</span></div>
-                      <div><span className="text-gray-400">数量×单价：</span><span className="text-gray-700">{addForm.phoneQuantity || 0} × {addForm.unitPrice || 0}</span></div>
+                      <div><span className="text-gray-400">货品：</span><span className="text-gray-700">{getInvoicePhoneProducts(addForm).length} 项</span></div>
+                      <div><span className="text-gray-400">总数量：</span><span className="text-gray-700">{addForm.phoneQuantity || 0} 台</span></div>
                     </>
                   )}
                   <div><span className="text-gray-400">金额：</span><span className="text-gray-700 font-medium">¥{addForm.invoiceAmount || 0}</span></div>
@@ -957,6 +1036,9 @@ export function Invoices() {
                   <div><span className="text-gray-400">单位：</span><span className="text-gray-700">{addForm.companyName || '-'}</span></div>
                   <div><span className="text-gray-400">申请人：</span><span className="text-gray-700">{addForm.applicant || '-'}</span></div>
                   <div><span className="text-gray-400">类目：</span><span className="text-gray-700">{addForm.invoiceCategory || '-'}</span></div>
+                  {addForm.invoiceCategory === '二手手机' && (
+                    <div><span className="text-gray-400">手机货品：</span><span className="text-gray-700">{getInvoicePhoneProducts(addForm).length} 项 / {addForm.phoneQuantity || 0} 台</span></div>
+                  )}
                   <div><span className="text-gray-400">金额：</span><span className="text-gray-700 font-medium">¥{addForm.invoiceAmount || 0}</span></div>
                   <div><span className="text-gray-400">附件：</span><span className="text-gray-700">{addAttachFiles.length}个文件</span></div>
                 </div>
@@ -1135,6 +1217,94 @@ export function Invoices() {
   );
 }
 
+function PhoneProductEditor({ products, onChange }: {
+  products: InvoicePhoneProduct[];
+  onChange: (products: InvoicePhoneProduct[]) => void;
+}) {
+  const currentProducts = products.length > 0 ? products : [{ ...EMPTY_PHONE_PRODUCT }];
+  const total = currentProducts.reduce((sum, item) => sum + item.amount, 0);
+
+  const updateProduct = (index: number, patch: Partial<InvoicePhoneProduct>) => {
+    onChange(currentProducts.map((item, itemIndex) => (
+      itemIndex === index ? normalizePhoneProduct({ ...item, ...patch }) : item
+    )));
+  };
+
+  return (
+    <div className="rounded-xl border border-gray-200 bg-gray-50/60 p-3">
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <div>
+          <div className="text-sm font-medium text-gray-700">手机货品</div>
+          <div className="text-xs text-gray-400 mt-0.5">支持添加多个型号，金额按货品自动汇总</div>
+        </div>
+        <Button
+          variant="outline"
+          size="small"
+          icon={<Plus size={14} />}
+          onClick={() => onChange([...currentProducts, { ...EMPTY_PHONE_PRODUCT }])}
+        >
+          添加货品
+        </Button>
+      </div>
+
+      <div className="space-y-3">
+        {currentProducts.map((item, index) => (
+          <div key={index} className="rounded-lg border border-gray-200 bg-white p-3">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-medium text-gray-500">货品 {index + 1}</span>
+              <button
+                type="button"
+                aria-label={`删除货品 ${index + 1}`}
+                disabled={currentProducts.length === 1}
+                className="w-6 h-6 flex items-center justify-center rounded text-gray-400 hover:text-red-500 hover:bg-red-50 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                onClick={() => onChange(currentProducts.filter((_, itemIndex) => itemIndex !== index))}
+              >
+                <X size={14} />
+              </button>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
+              <div className="sm:col-span-6">
+                <label className="block text-xs text-gray-500 mb-1">手机型号 <span className="text-red-500">*</span></label>
+                <Input
+                  placeholder="例如：iPhone 15 Pro 256G"
+                  value={item.model}
+                  onChange={val => updateProduct(index, { model: val as string })}
+                />
+              </div>
+              <div className="sm:col-span-3">
+                <label className="block text-xs text-gray-500 mb-1">数量 <span className="text-red-500">*</span></label>
+                <Input
+                  type="number"
+                  placeholder="数量"
+                  value={item.quantity > 0 ? String(item.quantity) : ''}
+                  onChange={val => updateProduct(index, { quantity: Number(val) || 0 })}
+                />
+              </div>
+              <div className="sm:col-span-3">
+                <label className="block text-xs text-gray-500 mb-1">单价 <span className="text-red-500">*</span></label>
+                <Input
+                  type="number"
+                  placeholder="单价"
+                  value={item.unitPrice > 0 ? String(item.unitPrice) : ''}
+                  onChange={val => updateProduct(index, { unitPrice: Number(val) || 0 })}
+                />
+              </div>
+            </div>
+            <div className="text-right text-xs text-gray-500 mt-2">
+              小计 <span className="font-medium text-gray-800">¥{item.amount.toFixed(2)}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="flex items-center justify-between border-t border-gray-200 mt-3 pt-3">
+        <span className="text-xs text-gray-500">共 {currentProducts.length} 项，{currentProducts.reduce((sum, item) => sum + item.quantity, 0)} 台</span>
+        <span className="text-sm text-gray-600">开票金额 <strong className="text-base text-blue-600 ml-2">¥{total.toFixed(2)}</strong></span>
+      </div>
+    </div>
+  );
+}
+
 /** 发票表单字段（新增/编辑共用） */
 function InvoiceFormFields({ form, onChange, isEdit = false, onCompanyNameChange, companySuggestions, showSuggestions, onSelectCompany, suggestionsRef, editExistingAttachments, onRemoveExistingAttachment, editAttachFiles, onEditAttachFilesChange, editAttachInputRef, invoiceCategoryOptions, shopNameOptions, invoiceStatusOptions }: {
   form: Omit<InvoiceRecord, '_id' | 'createTime'>;
@@ -1230,11 +1400,7 @@ function InvoiceFormFields({ form, onChange, isEdit = false, onCompanyNameChange
           <div>
             <label className="block text-xs text-gray-500 mb-1">开票类目</label>
             <Select placeholder="请选择开票类目" value={form.invoiceCategory || undefined}
-              onChange={val => onChange(prev => ({
-                ...prev,
-                invoiceCategory: val as string,
-                ...(val !== '二手手机' ? { phoneModel: '', phoneQuantity: 0, unitPrice: 0, invoiceAmount: 0 } : {}),
-              }))}
+              onChange={val => onChange(prev => changeInvoiceCategory(prev, val as string))}
               options={invoiceCategoryOptions}
               popupProps={{ attach: 'body', zIndex: 6000 }} />
           </div>
@@ -1248,34 +1414,12 @@ function InvoiceFormFields({ form, onChange, isEdit = false, onCompanyNameChange
 
           {/* 二手手机 - 动态字段 */}
           {form.invoiceCategory === '二手手机' && (
-            <>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">手机型号</label>
-                <Input placeholder="请输入手机型号" value={form.phoneModel || ''}
-                  onChange={val => onChange(prev => ({ ...prev, phoneModel: val as string }))} />
-              </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">手机数量</label>
-                <Input type="number" placeholder="请输入数量" value={form.phoneQuantity ? String(form.phoneQuantity) : ''}
-                  onChange={val => {
-                    const qty = Number(val) || 0;
-                    onChange(prev => ({ ...prev, phoneQuantity: qty, invoiceAmount: qty * (prev.unitPrice || 0) }));
-                  }} />
-              </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">单价</label>
-                <Input type="number" placeholder="请输入单价" value={form.unitPrice ? String(form.unitPrice) : ''}
-                  onChange={val => {
-                    const price = Number(val) || 0;
-                    onChange(prev => ({ ...prev, unitPrice: price, invoiceAmount: (prev.phoneQuantity || 0) * price }));
-                  }} />
-              </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">开票金额</label>
-                <Input type="number" placeholder="自动计算" value={form.invoiceAmount ? String(form.invoiceAmount) : ''}
-                  readonly disabled />
-              </div>
-            </>
+            <div className="col-span-2">
+              <PhoneProductEditor
+                products={getInvoicePhoneProducts(form)}
+                onChange={products => onChange(prev => syncPhoneProducts(prev, products))}
+              />
+            </div>
           )}
 
           {/* 租赁服务费 - 手动输入金额 */}

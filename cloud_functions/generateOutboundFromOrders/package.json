@@ -1,0 +1,10 @@
+{
+  "name": "generateOutboundFromOrders",
+  "version": "1.0.0",
+  "description": "由订单生成待出库单（单/多订单），回写订单 outboundRecordId",
+  "main": "index.js",
+  "dependencies": {
+    "@cloudbase/node-sdk": "^3.16.0",
+    "wx-server-sdk": "~2.6.3"
+  }
+}

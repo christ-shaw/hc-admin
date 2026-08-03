@@ -1,6 +1,7 @@
 import { Navigate, Outlet, useLocation } from 'react-router-dom';
 import { Loading } from 'tdesign-react';
 import { usePermission } from '../contexts/PermissionContext';
+import { appRoutes } from '../routes/appRoutes';
 
 function PageLoader() {
   return (
@@ -24,10 +25,15 @@ export function PermissionGuard() {
       : (path === '/forbidden' ? <Outlet /> : <Navigate to="/forbidden" replace />);
   }
 
-  if (path === '/forbidden') return <Outlet />;
-
   if (status !== 'ready') {
-    return <Navigate to="/forbidden" replace />;
+    return path === '/forbidden' ? <Outlet /> : <Navigate to="/forbidden" replace />;
+  }
+
+  if (path === '/forbidden') {
+    const fallbackPath = canAccessPage('/')
+      ? '/'
+      : appRoutes.find(route => canAccessPage(route.path))?.path;
+    return fallbackPath ? <Navigate to={fallbackPath} replace /> : <Outlet />;
   }
 
   if (!canAccessPage(path)) {

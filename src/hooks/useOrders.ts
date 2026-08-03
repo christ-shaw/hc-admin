@@ -13,49 +13,43 @@ interface QueryResult {
 interface SaveResult {
   success: boolean;
   savedCount?: number;
+  savedIds?: string[];
   errMsg?: string;
 }
 
-interface ApplyExpressResult {
+export interface CreateAfterSaleInput {
+  sourceOrderId: string;
+  requestId: string;
+  products: OrderRecord['products'];
+  needsOutbound: boolean;
+  consignee: string;
+  consigneePhone: string;
+  consigneeAddress: string;
+  shippingFee: string;
+  customerRemark: string;
+}
+
+export interface CreateAfterSaleResult {
   success: boolean;
-  env?: string;
+  duplicated?: boolean;
   orderId?: string;
-  sfOrderId?: string;
-  waybillNo?: string;
+  order?: OrderRecord;
   errMsg?: string;
-  errorCode?: string;
 }
 
-type QuerySfOrderResult = ApplyExpressResult;
-
-interface CancelSfExpressResult extends ApplyExpressResult {
-  resStatus?: string | number;
-}
-
-interface GenerateOutboundResult {
+export interface AfterSaleListResult {
   success: boolean;
+  source?: OrderRecord | null;
+  orders?: OrderRecord[];
   errMsg?: string;
-  data?: {
-    outboundId?: string;
-    outboundNumber?: string;
-    outboundStatus?: 'pending' | 'completed' | 'cancelled';
-  };
-  outbound?: {
-    outboundId?: string;
-    outboundNumber?: string;
-    outboundStatus?: 'pending' | 'completed' | 'cancelled';
-  };
 }
 
-interface CancelOutboundResult {
+export interface AfterSaleRelationResult {
   success: boolean;
+  order?: OrderRecord;
+  source?: OrderRecord | null;
+  sourceSnapshot?: { _id: string; serialNumber: number };
   errMsg?: string;
-  data?: {
-    outboundId?: string;
-    outboundNumber?: string;
-    outboundStatus?: 'cancelled';
-    orderUpdated?: boolean;
-  };
 }
 
 interface OrderState {
@@ -179,188 +173,63 @@ export function useOrders() {
     }
   }, []);
 
-  /** 手动生成订单关联出库单 */
-  const generateOutbound = useCallback(async (_id: string): Promise<GenerateOutboundResult> => {
+  /** 从已发货租赁2订单创建售后订单。 */
+  const createAfterSale = useCallback(async (input: CreateAfterSaleInput): Promise<CreateAfterSaleResult> => {
     try {
-      const result = await callFunction<GenerateOutboundResult>('generateOutboundRecord', {
-        data: { orderId: _id },
+      return await callFunction<CreateAfterSaleResult>('manageAfterSaleOrders', {
+        data: { action: 'create', ...input },
       });
+    } catch (err) {
+      console.error('创建售后订单失败:', err);
+      return { success: false, errMsg: String(err) };
+    }
+  }, []);
 
+  /** 查询原订单关联的全部售后订单。 */
+  const listAfterSales = useCallback(async (sourceOrderId: string): Promise<AfterSaleListResult> => {
+    try {
+      return await callFunction<AfterSaleListResult>('manageAfterSaleOrders', {
+        data: { action: 'listBySource', sourceOrderId },
+      });
+    } catch (err) {
+      console.error('查询售后记录失败:', err);
+      return { success: false, orders: [], errMsg: String(err) };
+    }
+  }, []);
+
+  /** 查询售后订单对应的原订单。 */
+  const getAfterSaleRelation = useCallback(async (orderId: string): Promise<AfterSaleRelationResult> => {
+    try {
+      return await callFunction<AfterSaleRelationResult>('manageAfterSaleOrders', {
+        data: { action: 'getRelation', orderId },
+      });
+    } catch (err) {
+      console.error('查询售后来源订单失败:', err);
+      return { success: false, errMsg: String(err) };
+    }
+  }, []);
+
+  /** 由订单生成待出库单（单/多订单合并），成功后回填 outboundRecordId */
+  const generateOutbound = useCallback(async (
+    orderIds: string[],
+    shippingMethod: string,
+    remark?: string,
+  ): Promise<{ success: boolean; outboundId?: string; errMsg?: string }> => {
+    try {
+      const result = await callFunction<{ success: boolean; outboundId?: string; errMsg?: string }>('generateOutboundFromOrders', {
+        data: { orderIds, shippingMethod, remark: remark || '' },
+      });
       if (result.success) {
-        const outbound = result.data || result.outbound || {};
         setState(prev => ({
           ...prev,
-          records: prev.records.map(r => r._id === _id ? {
-            ...r,
-            linkedOutboundId: outbound.outboundId || r.linkedOutboundId,
-            linkedOutboundNumber: outbound.outboundNumber || r.linkedOutboundNumber,
-            outboundSyncStatus: outbound.outboundStatus === 'completed' ? 'completed' : 'pending',
-          } : r),
+          records: prev.records.map(r => orderIds.includes(r._id)
+            ? { ...r, outboundRecordId: result.outboundId || r._id, shippingFee: shippingMethod }
+            : r),
         }));
       }
-
       return result;
     } catch (err) {
       console.error('生成出库单失败:', err);
-      return { success: false, errMsg: String(err) };
-    }
-  }, []);
-
-  /** 取消订单关联的待出库单 */
-  const cancelOutbound = useCallback(async (_id: string, reason?: string): Promise<CancelOutboundResult> => {
-    try {
-      const result = await callFunction<CancelOutboundResult>('cancelOutbound', {
-        data: { orderId: _id, reason },
-      });
-
-      if (result.success) {
-        setState(prev => ({
-          ...prev,
-          records: prev.records.map(r => r._id === _id ? {
-            ...r,
-            linkedOutboundId: '',
-            linkedOutboundNumber: '',
-            outboundSyncStatus: 'none',
-          } : r),
-        }));
-      }
-
-      return result;
-    } catch (err) {
-      console.error('取消出库失败:', err);
-      return { success: false, errMsg: String(err) };
-    }
-  }, []);
-
-  /** 申请顺丰快递单 */
-  const applySfExpress = useCallback(async (_id: string): Promise<ApplyExpressResult> => {
-    try {
-      const result = await callFunction<ApplyExpressResult>('applySfExpress', {
-        data: { orderId: _id },
-      });
-
-      if (result.success) {
-        setState(prev => ({
-          ...prev,
-          records: prev.records.map(r => r._id === _id ? {
-            ...r,
-            status: 'shipped',
-            trackingNumber: result.waybillNo || r.trackingNumber,
-            shippingFee: r.shippingFee || 'prepaid',
-            expressProvider: 'sf',
-            sfEnv: result.env || r.sfEnv,
-            expressApplyStatus: 'applied',
-            expressApplyTime: new Date().toISOString(),
-            expressErrorMsg: '',
-            sfOrderId: result.sfOrderId || r.sfOrderId,
-            sfWaybillNo: result.waybillNo || r.sfWaybillNo,
-          } : r),
-        }));
-      } else {
-        setState(prev => ({
-          ...prev,
-          records: prev.records.map(r => r._id === _id ? {
-            ...r,
-            expressProvider: 'sf',
-            sfEnv: result.env || r.sfEnv,
-            expressApplyStatus: 'failed',
-            expressErrorMsg: result.errMsg || '申请快递失败',
-          } : r),
-        }));
-      }
-
-      return result;
-    } catch (err) {
-      console.error('申请顺丰快递失败:', err);
-      return { success: false, errMsg: String(err) };
-    }
-  }, []);
-
-  /** 查询顺丰下单结果 */
-  const querySfOrderResult = useCallback(async (_id: string): Promise<QuerySfOrderResult> => {
-    try {
-      const result = await callFunction<QuerySfOrderResult>('querySfOrderResult', {
-        data: { orderId: _id },
-      });
-
-      if (result.success) {
-        setState(prev => ({
-          ...prev,
-          records: prev.records.map(r => r._id === _id ? {
-            ...r,
-            status: 'shipped',
-            trackingNumber: result.waybillNo || r.trackingNumber,
-            shippingFee: r.shippingFee || 'prepaid',
-            expressProvider: 'sf',
-            sfEnv: result.env || r.sfEnv,
-            expressApplyStatus: 'applied',
-            expressApplyTime: new Date().toISOString(),
-            expressErrorMsg: '',
-            sfOrderId: result.sfOrderId || r.sfOrderId,
-            sfWaybillNo: result.waybillNo || r.sfWaybillNo,
-          } : r),
-        }));
-      } else {
-        setState(prev => ({
-          ...prev,
-          records: prev.records.map(r => r._id === _id ? {
-            ...r,
-            expressProvider: 'sf',
-            sfEnv: result.env || r.sfEnv,
-            expressApplyStatus: 'failed',
-            expressErrorMsg: result.errMsg || '查询顺丰下单结果失败',
-            sfOrderId: result.sfOrderId || r.sfOrderId,
-          } : r),
-        }));
-      }
-
-      return result;
-    } catch (err) {
-      console.error('查询顺丰下单结果失败:', err);
-      return { success: false, errMsg: String(err) };
-    }
-  }, []);
-
-  /** 取消顺丰发货 */
-  const cancelSfExpress = useCallback(async (_id: string): Promise<CancelSfExpressResult> => {
-    try {
-      const result = await callFunction<CancelSfExpressResult>('cancelSfExpress', {
-        data: { orderId: _id },
-      });
-
-      if (result.success) {
-        setState(prev => ({
-          ...prev,
-          records: prev.records.map(r => r._id === _id ? {
-            ...r,
-            status: 'unknown',
-            trackingNumber: '',
-            shippingFee: '',
-            expressProvider: 'sf',
-            sfEnv: result.env || r.sfEnv,
-            expressApplyStatus: 'cancelled',
-            expressCancelTime: new Date().toISOString(),
-            expressErrorMsg: '',
-            sfOrderId: result.sfOrderId || r.sfOrderId,
-            sfWaybillNo: '',
-          } : r),
-        }));
-      } else {
-        setState(prev => ({
-          ...prev,
-          records: prev.records.map(r => r._id === _id ? {
-            ...r,
-            expressProvider: 'sf',
-            sfEnv: result.env || r.sfEnv,
-            expressErrorMsg: result.errMsg || '取消顺丰发货失败',
-            sfOrderId: result.sfOrderId || r.sfOrderId,
-          } : r),
-        }));
-      }
-
-      return result;
-    } catch (err) {
-      console.error('取消顺丰发货失败:', err);
       return { success: false, errMsg: String(err) };
     }
   }, []);
@@ -422,11 +291,10 @@ export function useOrders() {
     importOrders,
     deleteOrder,
     updateOrder,
+    createAfterSale,
+    listAfterSales,
+    getAfterSaleRelation,
     generateOutbound,
-    cancelOutbound,
-    applySfExpress,
-    querySfOrderResult,
-    cancelSfExpress,
     resetFilters,
     getPageRecords,
     setCurrentPage,

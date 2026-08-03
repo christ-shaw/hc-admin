@@ -6,3 +6,9 @@ dist
 .DS_Store
 .codebuddy
 tmp/
+/outputs/
+
+# 本地设计交付产物（login.html 实际为 ZIP 包副本）
+/Orders list redesign.zip
+/login.html
+/design_handoff_phone_models/

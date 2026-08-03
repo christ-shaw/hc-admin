@@ -41,11 +41,13 @@ export function useLogs() {
         total: number;
       }>('getOperationLogs', requestData);
 
+      const nextRecords = Array.isArray(result.data) ? result.data : [];
+
       setState(prev => ({
-        records: cursor ? [...prev.records, ...result.data] : result.data,
-        cursor: result.cursor,
-        hasMore: result.hasMore,
-        total: result.total,
+        records: cursor ? [...prev.records, ...nextRecords] : nextRecords,
+        cursor: result.cursor || null,
+        hasMore: !!result.hasMore,
+        total: Number(result.total) || 0,
         loading: false,
       }));
 

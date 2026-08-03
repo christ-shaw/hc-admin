@@ -1,514 +1,252 @@
-# 订单-出库联动系统设计文档
-
-> 版本：v1.1  
-> 日期：2026-06-21
-
----
-
-## 1. 需求概述
-
-### 1.1 业务目标
-
-打通订单系统与出库系统的数据流转，实现"订单创建 → 自动生成出库单 → 出库完成 → 自动回填物流信息"的全链路闭环。
-
-### 1.2 核心需求
-
-| # | 需求 | 说明 |
-|---|------|------|
-| 1 | 出库状态 | 出库记录新增 `待出库` / `已出库` 两个状态 |
-| 2 | 自动生成出库单 | 订单录入且判定为需要实物出库后，自动在出库记录中创建一条"待出库"记录，含自动生成的出库编号 |
-| 3 | 订单-出库关联 | 订单与出库单之间建立双向关联 |
-| 4 | 出库完成回写 | 出库同事通过微信小程序完成出库后，自动将物流单号回填到订单，并将订单状态改为"已发货" |
-
-### 1.3 角色与职责
-
-| 角色 | 操作 | 系统 |
-|------|------|------|
-| 客服/销售 | 录入订单 | Web 管理端 |
-| 出库同事 | 扫描出库、填写物流单号 | 微信小程序 |
-| 系统 | 自动生成出库单、回写物流信息 | 云函数 |
-
----
-
-## 2. 数据模型设计
-
-### 2.1 出库记录扩展（OutboundRecord）
-
-```typescript
-interface OutboundRecord {
-  _id: string;                      // 文档 ID（云数据库自动生成）
-  outboundNumber: string;           // 【新增】出库编号，自动生成，如 "CK-20260621-00001"
-  outboundStatus: 'pending' | 'completed';  // 【新增】出库状态：待出库 / 已出库（作废、异常不复用该字段）
-  customerName: string;             // 客户名称
-  consignee?: string;               // 【新增】收货人（从订单同步）
-  consigneePhone?: string;          // 【新增】收货人电话（从订单同步）
-  consigneeAddress?: string;        // 【新增】收货人地址（从订单同步）
-  outboundDate: string;             // 计划/关联出库日期（创建时 = 订单日期，完成时不覆盖）
-  completedDate?: string;           // 【新增】实际出库完成时间
-  completedBy?: string;             // 【新增】出库操作人
-  trackingNumber?: string;          // 物流单号（出库完成时由小程序回填）
-  phoneModels: PhoneModelItem[];    // 手机型号+数量（从订单货品同步）
-  linkedOrderId?: string;           // 【新增】关联的订单 _id（手工出库单可为空）
-  linkedOrderSerialNumber?: number; // 【新增】关联的订单序号（冗余，方便展示）
-  source: 'order' | 'manual';       // 【新增】来源：订单自动生成 / 手工录入
-  linkedOrderStatus?: 'active' | 'deleted' | 'missing'; // 【新增】关联订单状态，不复用 source
-  remark?: string;                  // 备注
-  createTime?: { $date: string };
-}
-```
-
-### 2.2 订单记录扩展（OrderRecord）
-
-```typescript
-interface OrderRecord {
-  // ... 现有字段保持不变 ...
-  
-  linkedOutboundId?: string;        // 【新增】关联的出库单 _id
-  linkedOutboundNumber?: string;    // 【新增】关联的出库编号（冗余，方便展示）
-  outboundSyncStatus?: 'none' | 'pending' | 'completed';  // 【新增】出库同步状态：无出库 / 待出库 / 已出库
-}
-```
-
-### 2.3 出库编号规则
-
-| 规则 | 说明 |
-|------|------|
-| 格式 | `CK-YYYYMMDD-NNNNN` |
-| 示例 | `CK-20260621-00001` |
-| 日期部分 | 按订单日期 |
-| 流水号 | 每天从 00001 开始，通过 `system_counters` 的 `db_counter_outbound_YYYYMMDD` 计数器自增 |
-| 唯一性 | 计数器事务保证 |
-
-### 2.4 状态流转图
-
-```
-订单创建/编辑（需要实物出库，且订单仍处于待发货状态）
-    │
-    ├─→ 出库单自动生成（outboundStatus = 'pending'）
-    │       出库编号自动分配
-    │       订单 ←→ 出库单 双向关联建立
-    │
-    │    ┌── 订单无需发货（虚拟产品/租后款项等）
-    │    │       不生成出库单
-    │    
-    ▼
-出库同事在小程序完成出库
-    │
-    ├─→ 扫描确认货品
-    ├─→ 填写物流单号
-    ├─→ 点击"确认出库"
-    │
-    ▼
-云函数 completeOutbound
-    │
-    ├─→ 更新出库单：outboundStatus = 'completed'
-    ├─→ 回写出库单：completedDate / completedBy / trackingNumber
-    │
-    ├─→ 更新订单：trackingNumber = 物流单号
-    ├─→ 更新订单：status = 'shipped'
-    ├─→ 更新订单：outboundSyncStatus = 'completed'
-    │
-    └─→ 记录操作日志
-```
-
----
-
-## 3. 架构设计
-
-### 3.1 数据流
-
-```
-┌──────────────┐    saveOrders     ┌──────────────────┐
-│  Web 管理端   │ ─────────────────→ │  saveOrders 云函数  │
-│  (录入订单)   │                    │                    │
-└──────────────┘                    │  1. 保存订单        │
-                                    │  2. 检查是否需要实物出库│
-                                    │  3. 自动创建出库单   │
-                                    │  4. 建立双向关联    │
-                                    └────────┬───────────┘
-                                             │
-                    ┌────────────────────────┘
-                    ▼
-          ┌─────────────────────┐
-          │  CloudBase 数据库    │
-          │  ├─ orders          │
-          │  ├─ outbound_records│
-          │  └─ system_counters │
-          └──────────┬──────────┘
-                     │
-                     │ 查询待出库记录
-                     ▼
-┌──────────────┐    ┌──────────────────────┐
-│ 微信小程序     │ ←─ │ queryRecords/queryOutbound │
-│ (出库同事)    │    │ 返回待出库列表         │
-└──────┬───────┘    └──────────────────────┘
-       │
-       │ 完成出库 + 物流单号
-       ▼
-┌──────────────────┐
-│ completeOutbound  │
-│ 云函数             │
-│                    │
-│ 1. 更新出库状态     │
-│ 2. 回填物流单号到订单│
-│ 3. 修改订单状态     │
-└──────────────────┘
-```
-
-### 3.2 哪些订单需要自动生成出库单
-
-> 注意：当前系统中 `shipped` 表示"已发货"，并且会要求填写物流单号。因此不能用 `status === 'shipped'` 作为创建待出库单的触发条件。出库单应在订单仍处于待发货状态时生成，出库完成后才将订单状态更新为 `shipped`。
-
-| 条件 | 生成出库单？ |
-|------|:-----------:|
-| 订单状态为 `unknown` / `--`，且需要实物出库 | ✅ 是 |
-| 订单状态为 `shipped`（已发货） | ❌ 否 |
-| 订单状态为 `noShip`（不用发货，如虚拟产品、仅退款） | ❌ 否 |
-| 订单已有 `linkedOutboundId`（避免重复生成） | ❌ 否 |
-| 编辑订单时已有待出库单 | ❌ 不重复生成，仅同步收货人/货品等可变信息 |
-| 编辑订单时已有已完成出库单 | ❌ 不自动修改，由人工处理 |
-
-推荐封装统一判断函数：
-
-```typescript
-function shouldGenerateOutbound(order: OrderRecord) {
-  return requiresPhysicalShipment(order)
-    && isPendingShipmentStatus(order.status)
-    && !order.linkedOutboundId;
-}
-
-function isPendingShipmentStatus(status?: string) {
-  return status === 'unknown' || status === '--' || !status;
-}
-```
-
-### 3.3 出库单生成时机
-
-**新增订单：**
-- `requiresPhysicalShipment(order) && isPendingShipmentStatus(status)` → 自动生成出库单
-- `status === 'noShip'`、虚拟产品、仅退款、退租金等无实物出库场景 → 不生成
-- `status === 'shipped'` 且已有物流单号 → 视为历史/已发货订单，不生成待出库单
-
-**编辑订单：**
-- 原本不需要出库，改为需要实物出库且仍处于待发货状态 → 自动生成出库单
-- 原本已有关联待出库单 → 同步更新收货人、收货地址、货品明细等信息
-- 已有关联出库单且 `outboundStatus === 'completed'` → 不自动修改，由人工创建补发/异常处理流程
-- 订单从待发货改为 `noShip` → 不自动删除出库单，标记待人工确认
-
----
-
-## 4. 接口设计
-
-### 4.1 云函数：saveOrders（修改）
-
-**新增逻辑：** 保存订单后，检查是否需要自动生成出库单。
-
-```
-保存订单成功
-    │
-    ├─ shouldGenerateOutbound(order)？
-    │   ├─ 是 → 调用 generateOutboundRecord(order)
-    │   └─ 否 → 跳过
-    │
-    └─ 返回 { ..., outbound: { ... } }
-```
-
-`saveOrders` 当前承担批量保存职责，联动出库时需要按单处理部分成功/失败：
-
-```
-for each order:
-  开始事务
-    ├─ 创建/更新订单
-    ├─ 如需出库：生成出库编号
-    ├─ 如需出库：创建 pending 出库单
-    └─ 回写订单 linkedOutboundId / linkedOutboundNumber / outboundSyncStatus
-  提交事务
-```
-
-返回结果建议包含每条订单的保存与出库创建状态，避免出现"订单已保存但出库单失败"时前端无法感知。
-
-### 4.2 云函数：generateOutboundRecord（新增）
-
-| 字段 | 值 |
-|------|-----|
-| `outboundNumber` | 自动生成 `CK-YYYYMMDD-NNNNN` |
-| `outboundStatus` | `'pending'` |
-| `customerName` | 从订单同步 |
-| `consignee` | 从订单同步 |
-| `consigneePhone` | 从订单同步 |
-| `consigneeAddress` | 从订单同步 |
-| `outboundDate` | 从订单日期，作为计划/关联出库日期 |
-| `phoneModels` | 从订单货品转换（brand + productName → model，quantity） |
-| `linkedOrderId` | 订单 _id |
-| `linkedOrderSerialNumber` | 订单 serialNumber |
-| `source` | `'order'` |
-
-### 4.3 云函数：queryRecords / queryOutbound（修改）
-
-**修改：** 当前 Web 端出库列表调用通用 `queryRecords`。本方案可选择改造 `queryRecords`，或新增小程序专用 `queryOutbound`；两者必须保持同一套筛选语义。小程序端查询 `pending` 状态的出库单。
-
-```
-输入: { type: 'outbound', outboundStatus: 'pending', customerName?, ... }
-输出: { data: OutboundRecord[] }
-```
-
-### 4.4 云函数：completeOutbound（新增）
-
-**用途：** 微信小程序调用，完成出库。
-
-```
-输入: {
-  outboundId: string,       // 出库单 _id
-  trackingNumber: string,   // 物流单号
-  completedBy: string,      // 出库操作人
-  phoneModels?: PhoneModelItem[],  // 实际出库型号（可修正）
-}
-```
-
-**逻辑：**
-1. 校验出库单存在且状态为 `pending`
-2. 更新出库单：`outboundStatus = 'completed'`、`completedDate`、`completedBy`、`trackingNumber`
-3. 查询关联订单
-4. 更新订单：`trackingNumber`、`status = 'shipped'`、`outboundSyncStatus = 'completed'`
-5. 记录操作日志
-
-### 4.5 云函数：updateOutbound（新增/修改）
-
-**场景：** 手工修改出库记录（Web 管理端），同步更新关联订单。
-
-建议命名与现有系统对齐：
-- 若沿用通用函数：改造 `updateRecord(type='outbound')`
-- 若新增专用函数：新增 `updateOutbound`
-
-同步规则：
-- 仅允许自动同步 `pending` 出库单的收货信息、货品明细、备注
-- 已 `completed` 的出库单不自动覆盖订单，物流号变更需走人工确认
-- 若修改 `trackingNumber` 并确认同步订单，需要记录操作日志
-
----
-
-## 5. 前端实现（Web 管理端）
-
-### 5.1 出库管理页面改造
-
-#### 5.1.1 新增字段展示
-
-| 列 | 说明 |
-|----|------|
-| 出库编号 | `outboundNumber`，独立列 |
-| 出库状态 | `outboundStatus`：待出库 🟡 / 已出库 🟢 |
-| 关联订单 | `linkedOrderSerialNumber`，可点击跳转 |
-| 来源 | `source`：订单同步 / 手工录入 |
-
-#### 5.1.2 状态筛选
-
-筛选栏新增"出库状态"下拉：全部 / 待出库 / 已出库
-
-#### 5.1.3 出库详情弹窗
-
-| 区块 | 字段 |
-|------|------|
-| 基本信息 | 出库编号、出库状态、出库日期、完成日期、来源、操作人 |
-| 关联订单 | 订单序号（可点击）、客户名称、收货信息 |
-| 货品明细 | 型号、数量表格 |
-| 物流信息 | 物流单号 |
-| 操作日志 | 出库/回写时间线 |
-
-### 5.2 订单详情增加出库关联
-
-订单详情弹窗中显示：
-- 关联出库编号（可点击跳转）
-- 出库状态徽章
-- 出库同步状态
-
-### 5.3 出库详情新增 Tab
-
-出库详情中新增「关联订单」Tab，展示订单摘要信息：
-
-```
-┌─────────────────────────────────────┐
-│ 出库单 CK-20260621-00001    [详情]  │
-├─────────────────────────────────────┤
-│ [基本信息] [货品明细] [关联订单]     │
-│                                     │
-│ 关联订单                            │
-│ 序号: 12345                         │
-│ 客户: 张三                          │
-│ 货品: 品牌 / 产品名 / 规格          │
-│ 订单状态: 已发货 🟢                  │
-│ [查看完整订单 →]                    │
-└─────────────────────────────────────┘
-```
-
----
-
-## 6. 微信小程序端（简要设计）
-
-### 6.1 待出库列表页
-
-```
-┌─────────────────────────┐
-│ 待出库任务               │
-├─────────────────────────┤
-│ CK-20260621-00001       │
-│ 客户: 张三              │
-│ 型号: iPhone 15 × 1    │
-│ 收货: 北京朝阳区...     │
-│ [确认出库 →]            │
-├─────────────────────────┤
-│ CK-20260621-00002       │
-│ ...                     │
-└─────────────────────────┘
-```
-
-### 6.2 出库确认页
-
-```
-┌─────────────────────────┐
-│ 确认出库                 │
-│                         │
-│ 出库编号: CK-...00001   │
-│ 客户: 张三              │
-│                         │
-│ 货品清单:               │
-│ ☑️ iPhone 15 128G × 1  │
-│ ☑️ AirPods × 1         │
-│                         │
-│ 物流单号: [___________] │
-│   [扫码录入]            │
-│                         │
-│ [确认出库]              │
-└─────────────────────────┘
-```
-
-### 6.3 API 调用
-
-| 操作 | 云函数 | 说明 |
-|------|--------|------|
-| 获取待出库列表 | `queryRecords` 或 `queryOutbound` + `outboundStatus: 'pending'` | 分页查询 |
-| 出库确认 | `completeOutbound` | 更新出库+回写订单 |
-
----
-
-## 7. 数据一致性保障
-
-### 7.1 事务保护
-
-`completeOutbound` 云函数使用数据库事务：
-
-```
-开始事务
-  ├─ 读取出库单，验证状态 = pending
-  ├─ 更新出库单（status/date/tracking）
-  ├─ 读取关联订单
-  ├─ 更新订单（tracking/status）
-  └─ 写入操作日志
-提交事务
-```
-
-`saveOrders` / `updateOrder` 中的出库单生成也应使用事务，至少保证同一订单的以下操作要么全部成功，要么全部失败：
-- 订单保存/更新
-- 出库编号计数器自增
-- 出库单创建
-- 订单关联字段回写
-
-### 7.2 异常处理
-
-| 场景 | 处理 |
-|------|------|
-| 事务冲突 | 重试最多 3 次 |
-| 订单已删除 | 仍完成出库，日志中记录异常 |
-| 重复出库 | 校验状态 = pending，否则拒绝 |
-| 网络超时 | 返回错误，由小程序重试 |
-| 订单已是 `shipped` 且有物流单号 | 不创建待出库单，避免重复发货 |
-| 订单从待发货改为 `noShip` | 保留待出库单并标记待人工确认 |
-
-### 7.3 幂等性
-
-- `generateOutboundRecord`：检查 `linkedOrderId` → `linkedOutboundId` 是否已有，防止重复生成
-- `generateOutboundRecord`：建议额外用 `linkedOrderId` 建唯一约束/唯一索引语义，避免并发编辑重复创建
-- `completeOutbound`：检查 `outboundStatus` 是否为 `pending`
-- `completeOutbound`：若已完成且传入的 `trackingNumber` 与已记录一致，返回成功，便于小程序网络超时后安全重试；若物流号不同，返回冲突
-
-### 7.4 权限与日志
-
-| 操作 | 权限建议 | 日志 |
-|------|----------|------|
-| 自动生成出库单 | 系统权限 | 记录订单号、出库编号、触发来源 |
-| 小程序完成出库 | 出库角色 | 记录操作人、物流号、完成时间 |
-| 手工修改关联出库单 | 管理端出库编辑权限 | 记录修改字段和是否同步订单 |
-| 删除/作废出库单 | 管理员或主管权限 | 记录原因，不建议硬删除 |
-
----
-
-## 8. 实施计划
-
-### 阶段 0：状态语义确认 + 历史数据盘点（0.5 天）
-
-| 步骤 | 内容 |
-|------|------|
-| 0.1 | 确认订单状态中"待发货"使用 `unknown` / `--`，`shipped` 仅表示已发货 |
-| 0.2 | 统一文档与代码中的不用发货状态为 `noShip` |
-| 0.3 | 盘点历史订单和出库记录，确认迁移范围 |
-
-### 阶段 1：数据模型 + 基础设施（0.5 天）
-
-| 步骤 | 内容 |
-|------|------|
-| 1.1 | `system_counters` 创建出库编号计数器文档 `db_counter_outbound_YYYYMMDD` |
-| 1.2 | 修改 `OutboundRecord` 类型，新增出库编号、状态、关联订单、完成信息等字段 |
-| 1.3 | 修改 `OrderRecord` 类型，新增 3 个字段 |
-
-### 阶段 2：云函数开发（1 天）
-
-| 步骤 | 内容 |
-|------|------|
-| 2.1 | 实现 `getAndIncrementOutboundCounter` 出库编号生成函数 |
-| 2.2 | 修改 `saveOrders` 云函数：订单保存后按 `shouldGenerateOutbound` 自动生成出库单 |
-| 2.3 | 修改 `queryOrders` 云函数：返回关联出库信息 |
-| 2.4 | 修改 `queryRecords` 或新增 `queryOutbound`：支持 `outboundStatus` 筛选 |
-| 2.5 | 新增 `completeOutbound` 云函数：出库完成 + 订单回写 |
-| 2.6 | 部署并测试 |
-
-### 阶段 3：前端改造（1 天）
-
-| 步骤 | 内容 |
-|------|------|
-| 3.1 | 出库列表页新增出库编号列、出库状态列、关联订单列、状态筛选 |
-| 3.2 | 出库详情弹窗新增关联订单 Tab |
-| 3.3 | 订单详情弹窗显示关联出库信息 |
-| 3.4 | 订单列表页新增出库状态列 |
-
-### 阶段 4：测试（0.5 天）
-
-| 步骤 | 内容 |
-|------|------|
-| 4.1 | 新增待发货实物订单 → 验证出库单自动生成 |
-| 4.2 | 编辑订单 → 验证出库单同步更新 |
-| 4.3 | 模拟出库完成 → 验证订单物流号回填和状态变更 |
-| 4.4 | 验证待出库/已出库筛选 |
-| 4.5 | 验证已发货订单、`noShip` 订单、虚拟产品不会生成待出库单 |
-
-### 阶段 5：历史数据迁移（0.5 天）
-
-| 步骤 | 内容 |
-|------|------|
-| 5.1 | 给旧出库记录补 `outboundStatus`：有物流号默认为 `completed`，无物流号默认为 `pending` 或人工确认 |
-| 5.2 | 给旧出库记录补 `outboundNumber`，可使用迁移专用前缀或按历史日期生成 |
-| 5.3 | 尝试按物流号、客户名、日期关联旧订单；无法可靠匹配的保持未关联 |
-| 5.4 | 迁移完成后抽样校验订单-出库双向关联 |
-
----
-
-## 9. 边界情况
-
-| 场景 | 处理策略 |
-|------|----------|
-| 订单删除 | 不自动删除出库单，设置 `linkedOrderStatus = 'deleted'`，保留 `source` 原值 |
-| 出库单已被人为删除 | 下次编辑订单时重新生成 |
-| 订单状态从待发货改为 noShip | 不自动删除出库单，人工确认后手动处理 |
-| 同一订单多个货品 | 生成一条出库单，phoneModels 包含所有货品 |
-| 出库数量与订单数量不一致 | 小程序端可修正数量，但需备注差异原因 |
-| 无需要发货的货品（虚拟产品） | 不生成出库单 |
-| 小程序重复提交完成出库 | 同一物流号返回成功，不同物流号返回冲突 |
-| 已完成出库后订单收货信息被修改 | 不自动覆盖出库单，提示人工确认是否补发/改单 |
+# 订单 ↔ 出库单 关联与发货回填 设计文档
+
+> 状态：草案（头脑风暴阶段，含待决策项）
+> 范围：hc-admin（React 前端 + 云函数）+ stockhelper（微信小程序 + 云函数），同一 CloudBase 环境 `cloud1-8gvbotkt966e5e19`
+
+## 1. 背景与目标
+
+当前订单（`orders`）与出库单（`outbound_records`）**没有持久关联**，只在 hc-admin「发货」对话框里靠 `订单.consignee` 模糊匹配 `出库单.customerName`，手动挑一条把快递单号抄到订单。存在匹配脆弱、无追溯、无货品核对、可重复关联、无库存核对等问题。
+
+本设计要把两者打通成一条可追溯链路，实现：
+
+1. 新建/编辑订单时选择「是否需要出库」；需要出库的订单在操作栏出现「生成出库单」按钮。
+2. 点击生成 → 系统创建一条**待出库**的出库单。
+3. 允许把**同一客户的多张订单合并**生成同一张出库单。
+4. 出库单记录快递方式（包邮/到付/自提）与备注。
+5. 小程序首页用卡片展示需要出库的出库单。
+6. 小程序录入发货信息（照片、快递单号）并完成发货后，系统**自动把物流单号回填到关联订单**。
+
+## 2. 现状检查（截至草案时）
+
+| 项 | 现状 |
+| --- | --- |
+| 订单「是否需要出库」字段 | ❌ 不存在 |
+| 订单「生成出库单」按钮 | ❌ 不存在（仅有手动匹配已有出库单的「发货」对话框，`Orders.tsx:878` `handleShipOpen`） |
+| 出库单状态字段 | ⚠️ 查询侧已支持 `outboundStatus='pending'`（`queryRecords`），**但无任何地方创建 pending 出库单** |
+| 小程序待出库计数 | ⚠️ 首页已有 `pendingOutboundTotal`（`index.js:loadPendingOutboundOrders`，仅计数，非列表） |
+| 小程序出库状态徽标 | ⚠️ query 页已渲染 `outboundStatus`（`query.wxml`） |
+| 小程序出库创建 | `saveOutbound` 存 customerName/outboundDate/trackingNumber/phoneModels/phonePhotos，**无状态、无 orderId、不回填订单** |
+| 订单↔出库回填 | ❌ 无（hc-admin 发货对话框是单向抄单号，出库单不回写 orderId） |
+
+**结论**：查询/展示侧有部分脚手架可复用，创建侧（生成待出库单）与回填侧（完成发货写回订单）需新建。
+
+## 3. 数据模型变更
+
+### 3.1 `orders`（新增字段）
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `needsOutbound` | boolean | 是否需要出库。手工建单由用户勾选；赞晨导入订单默认 `true`（本就是待发货） |
+| `outboundRecordId` | string | 关联的出库单 `_id`。生成后回填，用于防重复生成 + 完成发货时反查 |
+
+> 复用已有字段：`shippingFee`（`prepaid` 包邮 / `cod` 到付 / `pickup` 自提）、`trackingNumber`、`status`（`unknown`=待发货 `--` → `shipped`）、`consignee/consigneePhone/consigneeAddress`、`customerName`。
+
+### 3.2 `outbound_records`（新增/规范字段）
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `outboundStatus` | 'pending' \| 'completed' | 待出库 / 已出库。**无此字段的历史记录一律视为 completed**（兼容旧数据） |
+| `orderIds` | string[] | 关联的订单 `_id` 列表（支持合并多订单，需求3） |
+| `shippingMethod` | string | 快递方式：`prepaid`/`cod`/`pickup`（取自订单 `shippingFee`，需求4） |
+| `remark` | string | 备注（需求4；字段已存在） |
+| `source` | 'order' \| 'manual' | **来源标记（必填，列表/详情展示）**：`order`=由订单生成；`manual`=手工创建（hc-admin 或小程序直接建，无来源订单）。历史无此字段的记录按 `manual` 兜底 |
+| `consignee` / `consigneePhone` / `consigneeAddress` | string | 收货信息（从订单复制，便于小程序发货贴单） |
+
+> 复用已有字段：`customerName`、`outboundDate`、`trackingNumber`、`phoneModels[]`、`phonePhotos[]`、`hasIssue`。
+> `phoneModels[]` 由关联订单的货品聚合而来：每个订单货品 `品牌/货品/规格` 拼成 `model`，`quantity` 取订单数量；合并订单时相同 `model` 数量累加。
+
+## 4. 流程设计（对应需求 1–6）
+
+### 4.1 需求1：订单选择是否需要出库 + 生成按钮
+
+- 订单**新建/编辑表单**增加「需要出库」开关 → 写 `needsOutbound`。
+  - 手工建单：**默认值仅由「订单类型」自动判定，销售渠道不参与**（决策②=C），用户仍可手动改。
+
+    | 订单类型 | 是否寄出实物 | `needsOutbound` 默认 |
+    | --- | --- | --- |
+    | `newBusiness` 新增业务 | 是 | **true** |
+    | `postRentalShip` 租后发货 | 是 | **true** |
+    | `postRentalReturn` 租后退货 | 否（退回=入库方向） | false |
+    | `postRentalPayment` 租后款项 | 否（纯款项） | false |
+    | `deposit` 押金 | 否（纯款项） | false |
+
+    - **覆盖**：`isVirtualProductOrder`（虚拟货品单，本就 `noShip`）→ 一律 `false`，忽略上表。
+  - 赞晨导入：`importOrderFromAssist` 默认 `needsOutbound=true`。
+- 订单列表**操作栏**的「生成出库单」按钮，仅当满足：`needsOutbound===true` 且 `status` 为待发货 且 `outboundRecordId` 为空 时显示。
+
+### 4.2 需求2：生成待出库单
+
+- 点击「生成出库单」→ 调用新云函数 `generateOutboundFromOrders(orderIds=[单个])`：
+  1. 校验订单存在、需要出库、未生成过。
+  2. 创建 `outbound_records`：`outboundStatus='pending'`、`orderIds`、`phoneModels`（聚合）、`shippingMethod`=订单 `shippingFee`、`consignee` 信息、`source='order'`。
+  3. 回写每个订单 `outboundRecordId = 新出库单._id`。
+  4. 幂等：事务内校验 `outboundRecordId` 为空，防并发重复生成。
+
+### 4.3 需求3：合并多订单生成一个出库单
+
+- 订单列表支持**多选**（勾选框），点「合并生成出库单」。
+- 校验：所选订单**同一客户**（`customerName` 或 `consignee` 一致）、均 `needsOutbound`、均未生成过。
+- **快递方式在生成时统一选择一个**（决策①），写入出库单 `shippingMethod`，不逐单沿用订单各自的 `shippingFee`。
+- 生成**一张** `outbound_records`，`orderIds=[全部]`，`phoneModels` 合并聚合（同 model 累加），并回写每个订单的 `outboundRecordId`。
+- 单张订单生成也走同一入口：生成时弹出「统一选择快递方式」（默认带入订单 `shippingFee`，可改）。
+
+### 4.4 需求4：出库单含快递方式与备注
+
+- `shippingMethod`（包邮/到付/自提）**生成时统一选择**（决策①）；`remark` 可在生成时或小程序端编辑。
+
+> **库存（决策③）**：生成出库单与完成发货**均不校验、不占用、不扣减库存**——库存模型尚未上线。后续库存上线时再作为独立增强接入。
+
+### 4.5 需求5：小程序待出库卡片
+
+- 复用 `queryRecords`（`type='outbound'`, `pendingOnly=true`，已支持）。
+- 小程序首页把现有 `pendingOutboundTotal` 计数扩展为**卡片列表**：展示客户、型号汇总、快递方式、备注；点击进入发货录入。
+- 建议新增独立「待出库」页承载列表 + 进入完成发货表单。
+
+### 4.6 需求6：完成发货 + 自动回填订单
+
+- 顺丰单号先生成时，`generateOutboundFromOrders` 自动把订单已有的 `trackingNumber` 带入待出库记录。
+- 待出库记录先生成时，顺丰申请成功或查询恢复成功后自动回填其 `trackingNumber`；已有不同单号时不覆盖并返回冲突警告。
+- 小程序打开某待出库单：已有顺丰单号时直接核对并点「完成发货」，不要求再次扫码；没有单号的其他快递仍可录入/扫码。
+- 调用新云函数 `completeOutbound(outboundId, trackingNumber?, phonePhotos, remark?)`：
+  1. 置 `outboundStatus='completed'`，保存单号与照片。
+  2. **自动回填（不覆盖不同单号，决策⑤）**：对 `orderIds` 中每个订单：
+     - 若订单已是 `shipped` → 跳过。
+     - 若订单已有与出库单相同的 `trackingNumber`（例如提前生成的顺丰单）→ 保留单号并更新 `status='shipped'`。
+     - 若订单已有其他 `trackingNumber` → 整个事务失败并提示单号冲突。
+     - 若订单无单号 → 写入出库单号并更新 `status='shipped'`、`shippingFee`=`shippingMethod`。
+  3. 事务/批量，保证出库单与订单状态一致；跳过的订单在返回结果中列出，便于人工核对。
+- 该流程**自动化并取代** hc-admin 现有手动匹配发货对话框（对「由订单生成」的出库单而言）。
+
+### 4.7 手工创建出库单 + 旧手动匹配（保留，决策④）
+
+- **手工创建**：允许在 hc-admin / 小程序直接新建出库单（不来自订单），`source='manual'`、`orderIds=[]`。用于特殊情况（无对应订单、临时补录等）。
+- **旧「发货对话框」保留**：对**没有 `outboundRecordId`** 的订单，仍可用旧流程按 `consignee`↔`customerName` 模糊匹配、手动挑一条 `manual`/历史出库单，把单号抄到订单。
+  - 建议增强：手动匹配成功时，也把该订单 `_id` 追加进出库单 `orderIds`、并回写订单 `outboundRecordId`，让「手工路径」也留下双向可追溯链路。
+- 两条路径共存：**由订单生成**的走「生成→完成→自动回填」；**先有出库单**的走「手动匹配」。`source` 字段用于区分与统计。
+
+## 5. 云函数
+
+| 函数 | 归属 | 职责 | 鉴权 |
+| --- | --- | --- | --- |
+| `generateOutboundFromOrders` | hc-admin（新增） | 单/多订单 → 生成待出库单 + 回写 `outboundRecordId` | 双鉴权（网页 `getCurrentUser`，参见记录类函数） |
+| `completeOutbound` | 共享（新增/扩展 saveOutbound） | 完成发货 → 置 completed + 回填订单 | 小程序 `OPENID` + 网页 `getCurrentUser` 双鉴权 |
+| `queryRecords` | hc-admin（已有） | `pendingOnly` 待出库查询（已支持，复用） | 已双鉴权 |
+
+> 注意跨仓库同名函数去重原则：`completeOutbound` 只保留**一份源码**（建议 hc-admin 为 owner），避免两个仓库分叉部署互相覆盖（见近期 `queryRecords` 等去重教训）。
+
+## 6. 兼容与迁移
+
+- 旧 `outbound_records` 无 `outboundStatus` → 视为 `completed`，不出现在待出库列表。
+- 旧订单无 `needsOutbound` → 视为 `false`（不显示生成按钮），或按需批量回填。
+- hc-admin 现有手动「发货匹配」对话框：**保留**（决策④），与新流程长期并存；对已生成出库单的订单走自动回填，历史/手工出库（`source='manual'`）仍可手动匹配。
+
+## 7. 决策记录 / 待决策
+
+### 已定
+- ✅ **① 合并快递方式**：生成时**统一选择一个** `shippingMethod`（不逐单沿用）。
+- ✅ **② 需要出库默认值**：**仅按订单类型**自动判定（渠道不参与，=C），映射表见 §4.1；`newBusiness`/`postRentalShip` 默认 `true`，其余 `false`，虚拟货品单强制 `false`。用户可手动改。
+- ✅ **③ 库存**：**不校验、不占用、不扣减**（库存模型未上线）。
+- ✅ **⑤ 回填不覆盖不同单号**：相同预生成运单号允许完成出库并标记
+  `shipped`；不同单号拒绝完成，避免出库与订单物流信息不一致。
+- ✅ **④ 手动匹配流程保留**：旧「发货对话框」**保留**；特殊情况允许**手工创建出库单**（`source='manual'`）。出库单**必须标明来源** `source`（`order` 订单生成 / `manual` 手工创建），列表/详情均展示。
+
+### 待决策
+1. **一订单多货品聚合**：确认 `phoneModels[]` 的 `model` 拼写规则（`品牌 / 货品 / 规格`，与小程序一致），跨品牌保留多条、同 model 累加数量。
+2. **撤销/删除解链**：待出库单被删或订单被删时如何解链（清 `outboundRecordId`、从 `orderIds` 移除）。
+3. **权限**：生成出库单 / 完成发货 分别需要哪些 `actionPermissions`（如 `outbound:create` / `orders:update`）。
+
+## 8. 实施方案（可落地细化）
+
+### 8.1 字段落库清单
+
+**`orders`（写入点：`saveOrders` / `updateOrder`）**
+
+| 字段 | 类型 | 默认 | 写入时机 |
+| --- | --- | --- | --- |
+| `needsOutbound` | boolean | 按 §4.1 订单类型矩阵计算 | 建单/编辑保存 |
+| `outboundRecordId` | string | `''` | 生成出库单时回写；解链时清空 |
+
+**`outbound_records`（写入点：`generateOutboundFromOrders` / `completeOutbound` / 手工创建）**
+
+| 字段 | 类型 | 生成时 | 完成时 |
+| --- | --- | --- | --- |
+| `outboundStatus` | 'pending'\|'completed' | `pending` | `completed` |
+| `orderIds` | string[] | 关联订单 | 不变 |
+| `source` | 'order'\|'manual' | `order` | 不变 |
+| `shippingMethod` | string | 统一选择 | 不变 |
+| `remark` | string | 可填 | 可补填 |
+| `customerName` | string | 取订单 | 不变 |
+| `consignee`/`consigneePhone`/`consigneeAddress` | string | 取订单 | 不变 |
+| `phoneModels` | PhoneModelItem[] | 聚合(见 8.2) | 不变 |
+| `outboundDate` | string | `''` | 完成当天 |
+| `trackingNumber` | string | `''` | 录入 |
+| `phonePhotos` | string[] | `[]` | 录入 |
+
+### 8.2 phoneModels 聚合规则（定 §7.1）
+
+- 每个订单货品 → `model` 字符串，规则**与小程序一致**：
+  `规格 !== '默认' ? '品牌 / 货品 / 规格' : '品牌 / 货品'`，`quantity` 取订单 `quantity`。
+- 合并多订单：相同 `model` **累加 quantity**；不同 `model`（含跨品牌）**各保留一条**。
+
+### 8.3 云函数接口
+
+**`generateOutboundFromOrders`（hc-admin 新增，权限 `outbound:create`，双鉴权）**
+- 入参：`{ orderIds: string[], shippingMethod: string, remark?: string }`
+- 事务逻辑：
+  1. 载入订单，校验：存在、`needsOutbound===true`、`status` 为待发货(`unknown`)、`outboundRecordId` 为空、**同一 `customerName`**、非虚拟货品单。
+  2. 聚合 `phoneModels`（8.2）。
+  3. 建 `outbound_records`（`outboundStatus='pending'`, `source='order'`, `orderIds`, `shippingMethod`, `remark`, 客户/收货信息, `phoneModels`）；订单已有唯一快递单号时同步写入 `trackingNumber`，合并订单存在多个不同单号时拒绝生成。
+  4. 回写每个订单 `outboundRecordId = 新出库单._id`。
+- 出参：`{ success, outboundId }`；异常：`MIXED_CUSTOMER` / `ALREADY_GENERATED` / `INVALID_STATUS` 等。
+
+**`completeOutbound`（共享，hc-admin 为唯一 owner，权限 `outbound:update` + `orders:update`，双鉴权）**
+- 入参：`{ outboundId: string, trackingNumber?: string, phonePhotos?: string[], remark?: string }`
+- 逻辑：
+  1. 载入出库单，须 `outboundStatus==='pending'`。
+  2. 优先使用出库记录已有的 `trackingNumber`；已有单号时调用方无需再次提交或扫码。记录无单号时才使用入参，二者不同时返回冲突。
+  3. 置 `completed`、写 `trackingNumber`/`phonePhotos`/`outboundDate=今天`/`remark`。
+  4. 逐个 `orderIds` 回填（**不覆盖不同单号，决策⑤**）：已发货跳过；相同已有单号保留并标记 `shipped`；不同单号返回 `TRACKING_NUMBER_CONFLICT` 并回滚；无单号则写入出库单号。
+- 出参：`{ success, backfilled: string[], skipped: string[] }`；不同单号返回 `TRACKING_NUMBER_CONFLICT`。
+
+### 8.4 hc-admin UI
+
+- **建单/编辑表单**：新增「需要出库」开关，默认按订单类型矩阵（§4.1）计算，切换订单类型时联动默认值，用户可改。
+- **订单列表操作栏**：`needsOutbound && 待发货 && !outboundRecordId` 时显示「生成出库单」→ 弹窗选 `shippingMethod`（默认带入订单 `shippingFee`）+ 备注 → 调 `generateOutboundFromOrders([orderId])`。
+- **合并生成**：列表加多选框 + 批量「合并生成出库单」；前端校验同客户，弹一个统一 `shippingMethod` 选择。
+- **详情/列表**：展示 `source`、`outboundRecordId`（可跳出库单）。
+- **旧发货对话框保留**（决策④），供 `manual`/历史出库单手动匹配；匹配成功增强回写 `orderIds`+`outboundRecordId`。
+
+### 8.5 小程序 UI
+
+- **首页**：把现有 `pendingOutboundTotal` 计数扩成**待出库卡片列表**（`queryRecords` `type='outbound'` `pendingOnly=true`）。卡片显示客户、型号汇总、快递方式、备注，点击进「完成发货」。
+- **完成发货表单**：预填出库单信息；已有顺丰单号时只展示核对并直接完成，无单号的其他快递才录入/扫码（+ 拍照 `phonePhotos`）→ 调 `completeOutbound`。
+- **手工创建出库单**（`source='manual'`）：阶段2，复用现有出库录入表单，`orderIds=[]`。
+
+> **现状（已存在脚手架）**：小程序首页已有「待处理出库单」入口卡（计数徽标）→ 跳 `query` 页按 `pendingOnly` 列出待出库记录（状态徽标 未出库/已出库）；`query` 详情弹窗已有「完成发货」区块（单号输入 + 按钮），调用 `completeOutbound`。**阶段1 只需部署 `completeOutbound` 云函数即闭环**，无需新增小程序代码。
+> **阶段2 增强**：完成发货时的**拍照上传**（现有完成流程为纯单号，未含照片）。
+
+### 8.6 权限（定 §7.3）
+
+| 动作 | 权限点 |
+| --- | --- |
+| 保存 `needsOutbound` | 沿用 `orders:create` / `orders:update` |
+| 生成出库单 | `outbound:create` |
+| 完成发货（含回填订单） | 仅 `outbound:update`（订单回填为系统副作用，不再单独要 `orders:update`，避免只有库存权限的仓管被拦） |
+| 手工创建出库单 | `outbound:create` |
+
+### 8.7 删除 / 解链（定 §7.2）
+
+- **删待出库单**（pending）：清空其 `orderIds` 对应订单的 `outboundRecordId`；`completed` 出库单删除需二次确认。
+- **删订单**：从其所属出库单 `orderIds` 移除该 id；若 `orderIds` 变空 → 提示/标记该出库单。
+- 实现落在 `deleteOrder` / `deleteOutboundRecord`。
+
+### 8.8 分阶段落地
+
+- **阶段1（MVP）**：`needsOutbound` 字段+默认矩阵；**单订单**生成出库单；小程序待出库列表 + 完成发货 + 回填（不覆盖）。跑通「订单→生成→完成→回填」主链路。
+- **阶段2**：合并多订单生成；手工创建出库单（`source='manual'`）+ 来源展示；旧手动匹配增强回写 `orderIds`。
+- **阶段3**：删除解链；权限点接入；旧数据兼容兜底（`outboundStatus`/`source` 缺省处理）。
+
+## 9. 关联文档
+
+- 订单导入：`docs/order-assist-import-design.md`
+- 订单建单规则：`.codebuddy/rules/order-create-rules.md`

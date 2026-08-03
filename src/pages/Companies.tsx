@@ -1,9 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Table, Button, Input, Dialog, MessagePlugin, Textarea } from 'tdesign-react';
 import { ClipboardPaste, Plus, Sparkles } from 'lucide-react';
 import { CompanyTemplate } from '../types';
+import { useTabDirty } from '../contexts/TabWorkspaceContext';
 import { useCompanies } from '../hooks/useCompanies';
 import { parseCompanyInfo } from '../lib/cloudbase';
+import { PAGE_SIZE } from '../utils/constants';
 
 const EMPTY_COMPANY: Omit<CompanyTemplate, '_id' | 'createTime'> = {
   companyName: '',
@@ -31,10 +33,38 @@ export function Companies() {
   const [importText, setImportText] = useState('');
   const [readingClipboard, setReadingClipboard] = useState(false);
   const [parsing, setParsing] = useState(false);
+  const editInitialRef = useRef('');
+  useTabDirty(
+    (addVisible && JSON.stringify(addForm) !== JSON.stringify(EMPTY_COMPANY))
+      || (editVisible && JSON.stringify(editForm) !== editInitialRef.current)
+      || (importVisible && !!importText.trim()),
+    '公司信息',
+  );
 
   useEffect(() => {
-    companies.fetchRecords();
+    companies.fetchRecords(null);
   }, []);
+
+  const displayRecords = companies.getPageRecords(companies.currentPage);
+  const hasLoadedNextPage = companies.currentPage * PAGE_SIZE < companies.records.length;
+  const canGoNextPage = hasLoadedNextPage || companies.hasMore;
+
+  useEffect(() => {
+    const totalPages = Math.max(1, Math.ceil(companies.totalRecords / PAGE_SIZE));
+    if (companies.currentPage > totalPages) companies.setCurrentPage(totalPages);
+  }, [companies.currentPage, companies.setCurrentPage, companies.totalRecords]);
+
+  const handlePrevPage = () => {
+    companies.setCurrentPage(Math.max(1, companies.currentPage - 1));
+  };
+
+  const handleNextPage = () => {
+    if (hasLoadedNextPage) {
+      companies.setCurrentPage(companies.currentPage + 1);
+      return;
+    }
+    if (companies.cursor) companies.fetchRecords(companies.cursor);
+  };
 
   /** 新增 */
   const handleAddOpen = () => {
@@ -115,7 +145,7 @@ export function Companies() {
   /** 编辑 */
   const handleEditOpen = (record: CompanyTemplate) => {
     setEditId(record._id);
-    setEditForm({
+    const form = {
       companyName: record.companyName,
       taxId: record.taxId,
       registeredAddress: record.registeredAddress,
@@ -123,7 +153,9 @@ export function Companies() {
       bankName: record.bankName,
       bankAccount: record.bankAccount,
       bankCode: record.bankCode,
-    });
+    };
+    setEditForm(form);
+    editInitialRef.current = JSON.stringify(form);
     setEditVisible(true);
   };
 
@@ -218,7 +250,7 @@ export function Companies() {
       {/* 表格 */}
       <div className="glass-card">
         <Table
-          data={companies.records}
+          data={displayRecords}
           columns={columns}
           loading={companies.loading}
           rowKey="_id"
@@ -226,6 +258,26 @@ export function Companies() {
           hover
           stripe
         />
+        <div className="flex items-center justify-center gap-2 border-t border-gray-100 py-4">
+          <Button
+            size="small"
+            variant="outline"
+            disabled={companies.currentPage <= 1}
+            onClick={handlePrevPage}
+          >
+            上一页
+          </Button>
+          <span className="text-sm text-gray-500">第 {companies.currentPage} 页</span>
+          <Button
+            size="small"
+            variant="outline"
+            disabled={!canGoNextPage || companies.loading}
+            onClick={handleNextPage}
+          >
+            下一页
+          </Button>
+          <span className="text-sm text-gray-400">共 {companies.totalRecords} 条</span>
+        </div>
       </div>
 
       {/* 新增弹窗 */}

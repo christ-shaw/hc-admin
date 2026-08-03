@@ -4,13 +4,11 @@ import { PhoneBrand } from '../types';
 import { ProductBrandSeed } from '../data/productDict';
 
 const PRODUCT_MODEL_FUNCTION = 'manageProductModels';
-const LEGACY_PHONE_MODEL_FUNCTION = 'phoneModels';
 
 interface PhoneModelsResult<T = unknown> {
   success: boolean;
   data?: T;
   errMsg?: string;
-  addedCount?: number;
 }
 
 function normalizeBrands(data: PhoneBrand[] = []): PhoneBrand[] {
@@ -37,7 +35,7 @@ export function usePhoneModels() {
     setLoadError('');
     try {
       const result = await callFunction<{ success: boolean; data?: PhoneBrand[]; errMsg?: string }>(PRODUCT_MODEL_FUNCTION, {
-        action: 'getBrands',
+        action: 'getProductTree',
       });
       if (result.success) {
         setBrands(normalizeBrands(result.data || []));
@@ -57,7 +55,7 @@ export function usePhoneModels() {
   const loadAllModels = useCallback(async () => {
     setLoading(true);
     try {
-      const result = await callFunction<{ success: boolean; data: string[] }>(LEGACY_PHONE_MODEL_FUNCTION, {
+      const result = await callFunction<{ success: boolean; data: string[] }>(PRODUCT_MODEL_FUNCTION, {
         action: 'getAllModels',
       });
       if (result.success) {
@@ -69,20 +67,6 @@ export function usePhoneModels() {
       return [];
     } finally {
       setLoading(false);
-    }
-  }, []);
-
-  const loadModelsByBrand = useCallback(async (brand: string) => {
-    try {
-      const result = await callFunction<{ success: boolean; data: string[] }>(LEGACY_PHONE_MODEL_FUNCTION, {
-        action: 'getModelsByBrand',
-        brand,
-      });
-      if (result.success) return result.data || [];
-      return [];
-    } catch (err) {
-      console.error('加载品牌型号失败:', err);
-      return [];
     }
   }, []);
 
@@ -141,24 +125,6 @@ export function usePhoneModels() {
     } catch (err) {
       console.error('删除品牌失败:', err);
       return { success: false, errMsg: '删除失败' };
-    }
-  }, []);
-
-  const addModels = useCallback(async (brand: string, models: string[]) => {
-    try {
-      const result = await callFunction<{ success: boolean; errMsg?: string; addedCount?: number }>(LEGACY_PHONE_MODEL_FUNCTION, {
-        action: 'addModels',
-        brand,
-        models,
-      });
-      return {
-        success: result?.success || false,
-        errMsg: result?.errMsg || '添加失败',
-        addedCount: result?.addedCount || 0,
-      };
-    } catch (err) {
-      console.error('添加型号失败:', err);
-      return { success: false, errMsg: '添加失败', addedCount: 0 };
     }
   }, []);
 
@@ -275,12 +241,10 @@ export function usePhoneModels() {
     loadError,
     loadBrands,
     loadAllModels,
-    loadModelsByBrand,
     initializeFromSeed,
     addBrand,
     updateBrand,
     deleteBrand,
-    addModels,
     addProduct,
     updateProduct,
     deleteProduct,

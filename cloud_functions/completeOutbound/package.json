@@ -1,0 +1,10 @@
+{
+  "name": "completeOutbound",
+  "version": "1.0.0",
+  "description": "完成发货：出库单置已出库 + 回填关联订单物流单号（不覆盖）",
+  "main": "index.js",
+  "dependencies": {
+    "@cloudbase/node-sdk": "^3.16.0",
+    "wx-server-sdk": "~2.6.3"
+  }
+}

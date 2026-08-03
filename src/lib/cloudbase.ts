@@ -72,7 +72,9 @@ export async function signIn(username: string, password: string) {
 
 /** 登出 */
 export async function signOut() {
-  const result = await auth.signOut();
+  // 传入空参数会走 SDK 的容错登出流程：即使 refresh token 已失效，
+  // SDK 也会在服务端返回 unauthenticated 后清除本地凭据。
+  const result = await auth.signOut({});
   window.dispatchEvent(new CustomEvent(AUTH_STATE_CHANGED_EVENT));
   return result;
 }
@@ -122,21 +124,64 @@ export const AUTH_STATE_CHANGED_EVENT = 'auth:state-changed';
 /** 判断是否为认证相关错误 */
 function isAuthError(err: any): boolean {
   if (!err) return false;
-  // 检查错误码
-  const code = String(err.code || err.resultCode || '').toUpperCase();
-  if (['AUTH_EXPIRED', 'TOKEN_EXPIRED', 'UNAUTHENTICATED'].includes(code)) {
-    return true;
+
+  const candidates: unknown[] = [
+    err.code,
+    err.resultCode,
+    err.error,
+    err.error_description,
+    err.message,
+    err.msg,
+    err.apiErrorMsg,
+    err.data?.code,
+    err.data?.error,
+    err.data?.error_description,
+    err.data?.message,
+    err.data?.msg,
+    err.cause?.code,
+    err.cause?.error,
+    err.cause?.error_description,
+    err.cause?.message,
+  ];
+
+  for (const candidate of candidates) {
+    const text = String(candidate || '').toLowerCase();
+    if (
+      text.includes('auth_expired')
+      || text.includes('auth expired')
+      || text.includes('token_expired')
+      || text.includes('token expired')
+      || text.includes('unauthenticated')
+      || text.includes('invalid refresh token')
+      || text.includes('invalid_grant')
+    ) {
+      return true;
+    }
   }
-  // 检查错误消息
-  const msg = String(err.message || err.msg || '').toLowerCase();
-  if (msg.includes('auth expired') || msg.includes('token expired') || msg.includes('unauthenticated')) {
-    return true;
-  }
+
   return false;
+}
+
+let clearingExpiredSession: Promise<void> | null = null;
+
+/** 清理已失效的 CloudBase 本地凭据，避免后续请求重复使用坏的 refresh token */
+function clearExpiredSession() {
+  if (clearingExpiredSession) return clearingExpiredSession;
+
+  clearingExpiredSession = auth.signOut({})
+    .then(() => undefined)
+    .catch(() => undefined)
+    .finally(() => {
+      window.dispatchEvent(new CustomEvent(AUTH_STATE_CHANGED_EVENT));
+      clearingExpiredSession = null;
+    });
+
+  return clearingExpiredSession;
 }
 
 /** 触发认证过期事件 */
 function emitAuthExpired() {
+  void clearExpiredSession();
   window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT));
 }
 

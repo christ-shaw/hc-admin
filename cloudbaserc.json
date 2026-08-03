@@ -1,7 +1,7 @@
 {
   "envId": "cloud1-8gvbotkt966e5e19",
   "version": "2.0",
-  "functionRoot": "cloud_functions/sendWechatNotification/functions",
+  "functionRoot": "cloud_functions",
   "functions": [
     {
       "name": "getAndIncrementCounter",
@@ -30,6 +30,43 @@
     },
     {
       "name": "cancelSfExpress",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
+      "name": "printSfWaybill",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15",
+      "timeout": 30,
+      "envVariables": {
+        "SF_PROD_CLIENT_CODE": "HCSMKBNA9WWC",
+        "SF_PROD_SERVICE_URL": "https://bspgw.sf-express.com/std/service",
+        "SF_PROD_PRINT_TEMPLATE_CODE": "fm_76130_standard_HCSMKBNA9WWC",
+        "SF_PROD_CUSTOM_TEMPLATE_CODE": "fm_76130_standard_custom_10057208710_3",
+        "SF_SANDBOX_CLIENT_CODE": "HCSMKBNA9WWC",
+        "SF_ENV": "sandbox",
+        "SF_SANDBOX_PRINT_TEMPLATE_CODE": "fm_76130_standard_HCSMKBNA9WWC",
+        "SF_SANDBOX_CUSTOM_TEMPLATE_CODE": "fm_76130_standard_custom_10057208710_3"
+      }
+    },
+    {
+      "name": "manageSfPluginPrint",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15",
+      "timeout": 30,
+      "envVariables": {
+        "SF_PROD_CLIENT_CODE": "HCSMKBNA9WWC",
+        "SF_PROD_SERVICE_URL": "https://bspgw.sf-express.com/std/service",
+        "SF_PROD_PRINT_TEMPLATE_CODE": "fm_76130_standard_HCSMKBNA9WWC",
+        "SF_PROD_CUSTOM_TEMPLATE_CODE": "fm_76130_standard_custom_10057208710_3",
+        "SF_SANDBOX_CLIENT_CODE": "HCSMKBNA9WWC",
+        "SF_ENV": "sandbox",
+        "SF_SANDBOX_PRINT_TEMPLATE_CODE": "fm_76130_standard_HCSMKBNA9WWC",
+        "SF_SANDBOX_CUSTOM_TEMPLATE_CODE": "fm_76130_standard_custom_10057208710_3"
+      }
+    },
+    {
+      "name": "manageSfConfig",
       "handler": "index.main",
       "runtime": "Nodejs18.15"
     },
@@ -84,6 +121,21 @@
       "runtime": "Nodejs18.15"
     },
     {
+      "name": "manageSuppliers",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
+      "name": "manageAnnouncements",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
+      "name": "managePurchases",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
       "name": "generateDailyShipmentStats",
       "handler": "index.main",
       "runtime": "Nodejs18.15",
@@ -126,6 +178,26 @@
       "runtime": "Nodejs18.15"
     },
     {
+      "name": "querySfExpressOrders",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
+      "name": "manageSfShipment",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
+      "name": "recordSfExport",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
+      "name": "manageAfterSaleOrders",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
       "name": "saveOrders",
       "handler": "index.main",
       "runtime": "Nodejs18.15"
@@ -163,7 +235,7 @@
     {
       "name": "sendWechatNotification",
       "handler": "index.main",
-      "runtime": "Nodejs18.15"
+      "runtime": "Nodejs24.11"
     },
     {
       "name": "queryInvoices",
@@ -202,6 +274,16 @@
     },
     {
       "name": "updateCompany",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
+      "name": "generateOutboundFromOrders",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15"
+    },
+    {
+      "name": "completeOutbound",
       "handler": "index.main",
       "runtime": "Nodejs18.15"
     }

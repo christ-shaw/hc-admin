@@ -60,10 +60,10 @@
     @apply text-primary font-semibold;
   }
   
+  /* 异常订单行（未收款/未退回）：红色背景标识，异常原因由状态列小字提示传达 */
   .order-row-unreceived,
   .order-row-unreceived td {
     background-color: #fef2f2 !important;
-    color: #dc2626 !important;
   }
 
   .dashboard-message-roll {
@@ -73,6 +73,21 @@
 
   .dashboard-message-roll:hover {
     animation-play-state: paused;
+  }
+
+  .order-filter-panel .t-input,
+  .order-filter-date-input {
+    height: 40px;
+    border-radius: 8px !important;
+  }
+
+  .order-filter-panel .t-input__inner {
+    height: 38px;
+  }
+
+  .order-filter-panel .t-select,
+  .order-filter-panel .t-select__wrap {
+    width: 100%;
   }
 
   .order-basic-form-grid {
@@ -96,5 +111,19 @@
   .order-basic-form-field .t-select,
   .order-basic-form-field .t-select__wrap {
     width: 100%;
+  }
+
+  .workspace-tabs-scroll {
+    scrollbar-width: thin;
+    scrollbar-color: #d1d5db transparent;
+  }
+
+  .workspace-tabs-scroll::-webkit-scrollbar {
+    height: 4px;
+  }
+
+  .workspace-tabs-scroll::-webkit-scrollbar-thumb {
+    background: #d1d5db;
+    border-radius: 9999px;
   }
 }

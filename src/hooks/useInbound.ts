@@ -122,5 +122,32 @@ export function useInbound() {
     return state.records.slice(start, start + PAGE_SIZE);
   }, [state.records]);
 
-  return { ...state, fetchRecords, updateRecord, deleteRecord, resetFilters, getPageRecords, setCurrentPage };
+  /** 按条件获取全部入库记录（用于导出，自动分页）。 */
+  const fetchAllRecords = useCallback(async (filters: InboundFilters): Promise<InboundRecord[]> => {
+    const allRecords: InboundRecord[] = [];
+    const currentUser = await getCurrentPermissionUserPayload().catch(() => null);
+    let cursor = 0;
+    let hasMore = true;
+
+    while (hasMore && allRecords.length < 10000) {
+      const result = await callFunction<QueryResult>('queryRecords', {
+        data: {
+          type: 'inbound',
+          limit: 100,
+          cursor: String(cursor),
+          ...filters,
+          currentUser,
+        },
+      });
+      if (!result.success && result.errMsg) throw new Error(result.errMsg);
+      const records = result.data || [];
+      allRecords.push(...records);
+      cursor += records.length;
+      hasMore = result.hasMore === true && records.length > 0;
+    }
+
+    return allRecords.slice(0, 10000);
+  }, []);
+
+  return { ...state, fetchRecords, fetchAllRecords, updateRecord, deleteRecord, resetFilters, getPageRecords, setCurrentPage };
 }

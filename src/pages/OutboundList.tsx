@@ -1,27 +1,18 @@
 import { useEffect, useState } from 'react';
-import { Table, Button, Input, MessagePlugin, Dialog, Select, Tag } from 'tdesign-react';
-import { Search, RotateCcw } from 'lucide-react';
+import { Table, Button, Input, MessagePlugin, Dialog, Tag, Select } from 'tdesign-react';
+import { Search, RotateCcw, FileDown } from 'lucide-react';
 import { OutboundRecord, OutboundFilters } from '../types';
+import { OUTBOUND_STATUS_MAP } from '../data/dict';
 import { useOutbound } from '../hooks/useOutbound';
 import { useLogs } from '../hooks/useLogs';
 import { useStorage } from '../hooks/useStorage';
-import { formatDate, getTotalQuantity } from '../utils/format';
+import { formatDate, getOutboundRecipientName, getTotalQuantity } from '../utils/format';
 import { getCurrentOperatorName } from '../lib/cloudbase';
 import { RecordDetail } from '../components/RecordDetail';
 import { RecordEdit } from '../components/RecordEdit';
-import {
-  getOutboundSourceText,
-  getOutboundStatusText,
-  getOutboundStatusTheme,
-  resolveOutboundStatus,
-} from '../utils/outboundLinkage';
-
-const OUTBOUND_STATUS_OPTIONS = [
-  { label: '全部', value: '' },
-  { label: '待出库', value: 'pending' },
-  { label: '已出库', value: 'completed' },
-  { label: '已取消', value: 'cancelled' },
-];
+import { exportOutboundRecordsExcel } from '../utils/recordExcel';
+import { RecordExportDialog } from '../components/RecordExportDialog';
+import { useTabDirty } from '../contexts/TabWorkspaceContext';
 
 export function OutboundList() {
   const outbound = useOutbound();
@@ -33,6 +24,10 @@ export function OutboundList() {
   const [currentRecord, setCurrentRecord] = useState<OutboundRecord | null>(null);
   const [deleteConfirmVisible, setDeleteConfirmVisible] = useState(false);
   const [filters, setFilters] = useState<OutboundFilters>({});
+  const [exportVisible, setExportVisible] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [editDirty, setEditDirty] = useState(false);
+  useTabDirty(editVisible && editDirty, '出库记录');
 
   useEffect(() => {
     outbound.fetchRecords();
@@ -42,7 +37,6 @@ export function OutboundList() {
     outbound.resetFilters();
     const searchFilters: OutboundFilters = { ...filters };
     // trim 字符串字段，避免前后空格导致查不到
-    if (searchFilters.outboundNumber) searchFilters.outboundNumber = searchFilters.outboundNumber.trim();
     if (searchFilters.customerName) searchFilters.customerName = searchFilters.customerName.trim();
     if (searchFilters.trackingNumber) searchFilters.trackingNumber = searchFilters.trackingNumber.trim();
     if (searchFilters.model) searchFilters.model = searchFilters.model.trim();
@@ -53,6 +47,28 @@ export function OutboundList() {
     setFilters({});
     outbound.resetFilters();
     outbound.fetchRecords(null, {});
+  };
+
+  const handleExport = async (startDate: string, endDate: string) => {
+    setExporting(true);
+    try {
+      const exportFilters: OutboundFilters = {
+        startDate,
+        endDate,
+      };
+      const records = await outbound.fetchAllRecords(exportFilters);
+      if (records.length === 0) {
+        MessagePlugin.warning('所选日期范围内没有出库记录');
+        return;
+      }
+      exportOutboundRecordsExcel(records, startDate, endDate);
+      MessagePlugin.success(`已导出 ${records.length} 条出库记录`);
+      setExportVisible(false);
+    } catch (err) {
+      MessagePlugin.error('导出失败: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setExporting(false);
+    }
   };
 
   const handleDetail = (record: OutboundRecord) => {
@@ -97,36 +113,12 @@ export function OutboundList() {
   };
 
   const columns = [
-    {
-      colKey: 'outboundNumber',
-      title: '出库编号',
-      width: 150,
-      ellipsis: true,
-      cell: ({ row }: { row: OutboundRecord }) => row.outboundNumber || '-',
-    },
-    {
-      colKey: 'outboundStatus',
-      title: '出库状态',
-      width: 100,
-      cell: ({ row }: { row: OutboundRecord }) => {
-        const status = resolveOutboundStatus(row);
-        return <Tag theme={getOutboundStatusTheme(status)} variant="light">{getOutboundStatusText(status)}</Tag>;
-      },
-    },
     { colKey: 'outboundDate', title: '出库日期', width: 110, cell: ({ row }: { row: OutboundRecord }) => formatDate(row.outboundDate, false) },
-    { colKey: 'customerName', title: '客户名称', width: 140, ellipsis: true },
-    {
-      colKey: 'linkedOrderSerialNumber',
-      title: '关联订单',
-      width: 100,
-      cell: ({ row }: { row: OutboundRecord }) => row.linkedOrderSerialNumber ? `#${row.linkedOrderSerialNumber}` : '-',
-    },
-    {
-      colKey: 'source',
-      title: '来源',
-      width: 90,
-      cell: ({ row }: { row: OutboundRecord }) => getOutboundSourceText(row.source),
-    },
+    { colKey: 'outboundStatus', title: '状态', width: 80, cell: ({ row }: { row: OutboundRecord }) => {
+      const st = row.outboundStatus === 'pending' ? 'pending' : 'completed';
+      return <Tag theme={st === 'pending' ? 'warning' : 'success'} variant="light">{OUTBOUND_STATUS_MAP[st]}</Tag>;
+    } },
+    { colKey: 'customerName', title: '收件人', width: 140, ellipsis: true, cell: ({ row }: { row: OutboundRecord }) => getOutboundRecipientName(row) },
     { colKey: 'trackingNumber', title: '快递单号', width: 140, cell: ({ row }: { row: OutboundRecord }) => row.trackingNumber || '-' },
     { colKey: 'phoneModels', title: '手机型号', width: 200, cell: ({ row }: { row: OutboundRecord }) =>
       row.phoneModels?.map(m => `${m.model} x${m.quantity}`).join(', ') || '-'
@@ -149,19 +141,27 @@ export function OutboundList() {
 
   return (
     <div className="space-y-4">
-      <div>
-        <h1 className="text-2xl font-semibold text-gray-800">出库记录</h1>
-        <p className="text-gray-500 mt-1">管理所有出库记录</p>
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold text-gray-800">出库记录</h1>
+          <p className="text-gray-500 mt-1">管理所有出库记录</p>
+        </div>
+        <Button variant="outline" icon={<FileDown size={16} />} onClick={() => setExportVisible(true)}>导出 Excel</Button>
       </div>
 
       {/* 筛选栏 */}
       <div className="glass-card p-4">
-        <div className="grid grid-cols-2 md:grid-cols-8 gap-3 items-end">
-          <Input placeholder="出库编号" value={filters.outboundNumber || ''} onChange={(val) => setFilters(prev => ({ ...prev, outboundNumber: val as string }))} />
-          <Select placeholder="出库状态" value={filters.outboundStatus || ''} onChange={(val) => setFilters(prev => ({ ...prev, outboundStatus: val as OutboundFilters['outboundStatus'] }))} options={OUTBOUND_STATUS_OPTIONS} />
+        <div className="grid grid-cols-2 md:grid-cols-6 gap-3 items-end">
           <Input placeholder="客户名称" value={filters.customerName || ''} onChange={(val) => setFilters(prev => ({ ...prev, customerName: val as string }))} />
           <Input placeholder="快递单号" value={filters.trackingNumber || ''} onChange={(val) => setFilters(prev => ({ ...prev, trackingNumber: val as string }))} />
           <Input placeholder="手机型号" value={filters.model || ''} onChange={(val) => setFilters(prev => ({ ...prev, model: val as string }))} />
+          <Select placeholder="出库状态" clearable value={filters.outboundStatus || ''}
+            onChange={(val) => setFilters(prev => ({ ...prev, outboundStatus: (val as string) || '' }))}
+            options={[
+              { label: '全部', value: '' },
+              { label: OUTBOUND_STATUS_MAP.pending, value: 'pending' },
+              { label: OUTBOUND_STATUS_MAP.completed, value: 'completed' },
+            ]} />
           <input type="date" className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-primary" placeholder="开始日期" value={filters.startDate || ''} onChange={(e) => setFilters(prev => ({ ...prev, startDate: e.target.value }))} />
           <input type="date" className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-primary" placeholder="结束日期" value={filters.endDate || ''} onChange={(e) => setFilters(prev => ({ ...prev, endDate: e.target.value }))} />
           <div className="flex gap-2">
@@ -214,6 +214,7 @@ export function OutboundList() {
         type="outbound"
         onClose={() => setEditVisible(false)}
         onSave={handleSave}
+        onDirtyChange={setEditDirty}
       />
 
       {/* 删除确认 */}
@@ -225,6 +226,14 @@ export function OutboundList() {
       >
         <p>确定要删除这条出库记录吗？此操作不可撤销。</p>
       </Dialog>
+
+      <RecordExportDialog
+        visible={exportVisible}
+        recordLabel="出库记录"
+        exporting={exporting}
+        onClose={() => setExportVisible(false)}
+        onExport={handleExport}
+      />
     </div>
   );
 }

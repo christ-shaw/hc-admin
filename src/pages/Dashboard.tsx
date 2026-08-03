@@ -14,6 +14,8 @@ import {
 import { callFunction } from '../lib/cloudbase';
 import { OrderFilters, OrderRecord } from '../types';
 import { formatDate } from '../utils/format';
+import { getOrderTotalAmount, hasUnreceivedPayment } from '../utils/orderProducts';
+import { AnnouncementCenter } from '../components/AnnouncementCenter';
 
 interface QuickStat {
   title: string;
@@ -122,24 +124,6 @@ const buildOrderLabel = (order: OrderRecord) => {
 
 const getOwnerName = (order: OrderRecord) => order.salesperson || '-';
 const buildOwnerLabel = (order: OrderRecord) => `责任人 ${getOwnerName(order)}`;
-
-function hasUnreceivedPayment(order: OrderRecord) {
-  if (order.paymentAccount === '未收款') return true;
-  const value = order.paymentSplits;
-  const splits = Array.isArray(value)
-    ? value
-    : typeof value === 'string'
-      ? (() => {
-          try {
-            const parsed = JSON.parse(value);
-            return Array.isArray(parsed) ? parsed : [];
-          } catch {
-            return [];
-          }
-        })()
-      : [];
-  return splits.some(split => split?.account === '未收款');
-}
 
 async function fetchOrdersForDynamicMessages() {
   const orders: OrderRecord[] = [];
@@ -251,7 +235,7 @@ export function Dashboard() {
           id: `${order._id}-payment`,
           type: 'payment',
           title: '订单待收款',
-          detail: `${buildOrderLabel(order)} · ${buildOwnerLabel(order)} · 金额 ¥${order.amount || 0}`,
+          detail: `${buildOrderLabel(order)} · ${buildOwnerLabel(order)} · 金额 ¥${getOrderTotalAmount(order)}`,
           owner: getOwnerName(order),
           date: getOrderTime(order),
           orderId: order._id,
@@ -353,14 +337,24 @@ export function Dashboard() {
         </div>
 
         <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
-          <div className="rounded-lg bg-orange-50 px-3 py-2 text-orange-700">
+          <button
+            type="button"
+            onClick={() => navigate('/orders', { state: { filter: { abnormalStatus: 'unreturned' } } })}
+            className="rounded-lg bg-orange-50 px-3 py-2 text-left text-orange-700 transition hover:bg-orange-100"
+            title="查看未退回入库的订单"
+          >
             <div className="text-xl font-semibold">{returnMessageCount}</div>
             <div className="text-xs">未退回入库</div>
-          </div>
-          <div className="rounded-lg bg-red-50 px-3 py-2 text-red-700">
+          </button>
+          <button
+            type="button"
+            onClick={() => navigate('/orders', { state: { filter: { abnormalStatus: 'unreceived' } } })}
+            className="rounded-lg bg-red-50 px-3 py-2 text-left text-red-700 transition hover:bg-red-100"
+            title="查看未收款的订单"
+          >
             <div className="text-xl font-semibold">{paymentMessageCount}</div>
             <div className="text-xs">未收款</div>
-          </div>
+          </button>
         </div>
       </div>
 
@@ -412,9 +406,12 @@ export function Dashboard() {
     <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_400px]">
       <div className="space-y-6">
         {/* 标题 */}
-        <div>
-          <h1 className="text-2xl font-semibold text-gray-800">首页</h1>
-          <p className="text-gray-500 mt-1">{statsRangeText}</p>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold text-gray-800">首页</h1>
+            <p className="text-gray-500 mt-1">{statsRangeText}</p>
+          </div>
+          <AnnouncementCenter />
         </div>
 
         {/* 统计卡片 */}

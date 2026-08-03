@@ -54,27 +54,22 @@ export interface InboundRecord {
 /** 出库记录 */
 export interface OutboundRecord {
   _id: string;
-  outboundNumber?: string;
-  outboundStatus?: 'pending' | 'completed' | 'cancelled';
   customerName: string;
-  consignee?: string;
-  consigneePhone?: string;
-  consigneeAddress?: string;
   outboundDate: string;
-  completedDate?: string;
-  completedBy?: string;
-  cancelledDate?: string;
-  cancelledBy?: string;
-  cancelReason?: string;
   trackingNumber?: string;
   phoneModels: PhoneModelItem[];
   phonePhotos?: string[];
   hasIssue?: boolean;
-  linkedOrderId?: string;
-  linkedOrderSerialNumber?: number;
-  source?: 'order' | 'manual';
-  linkedOrderStatus?: 'active' | 'deleted' | 'missing';
   remark?: string;
+  // 订单↔出库单关联（见 docs/order-outbound-linkage-design.md）
+  outboundStatus?: 'pending' | 'completed'; // 待出库/已出库；无此字段的历史记录视为 completed
+  orderIds?: string[];                        // 关联订单 _id（支持合并多订单）
+  shippingMethod?: string;                    // 快递方式: prepaid|cod|pickup（生成时统一选择）
+  source?: 'order' | 'manual';               // 来源：订单生成/手工创建；缺省按 manual
+  consignee?: string;                         // 收货人（取自订单）
+  consigneePhone?: string;                    // 收货人电话
+  consigneeAddress?: string;                  // 收货人地址
+  sfExpressOrderRecordId?: string;             // 关联的顺丰实际包裹记录（第一阶段只读）
   createTime?: { $date: string };
 }
 
@@ -122,12 +117,10 @@ export interface InboundFilters {
 
 /** 出库筛选条件 */
 export interface OutboundFilters {
-  outboundNumber?: string;
-  outboundStatus?: 'pending' | 'completed' | 'cancelled' | '';
   customerName?: string;
   trackingNumber?: string;
   model?: string;
-  source?: 'order' | 'manual' | '';
+  outboundStatus?: string;   // 出库状态过滤: pending | completed（空=全部）
   startDate?: string;
   endDate?: string;
 }
@@ -173,6 +166,114 @@ export interface PaymentSplit {
   amount: number;
 }
 
+export interface SfWaybillNoInfo {
+  waybillType?: string | number;
+  waybillNo: string;                 // 顺丰运单号
+}
+
+export type SfExpressApplyStatus = 'applying' | 'applied' | 'failed' | 'cancelled';
+export type SfShipmentStatus =
+  | 'packing'
+  | 'sealed'
+  | 'handed_over'
+  | 'picked_up'
+  | 'cancelled'
+  | 'legacy_locked';
+
+export interface SfExpressOrderRecord {
+  _id: string;
+  sourceOrderId: string;
+  sourceSerialNumber: number;
+  sourceOnlineOrderNumber: string;
+  sourceOrderDate: string;
+  sfOrderId: string;
+  attemptNo: number;
+  env: 'sandbox' | 'production';
+  isCurrent: boolean;
+  status: SfExpressApplyStatus;
+  waybillNo: string;
+  waybillNoInfoList: SfWaybillNoInfo[];
+  linkedOrderIds: string[];
+  linkedOutboundIds: string[];
+  shipmentStatus: SfShipmentStatus;
+  shipmentVersion: number;
+  isLegacyShipment: boolean;
+  reuseEnabled: boolean;
+  reuseEnabledAt?: string;
+  reuseDisabledAt?: string;
+  finalPackagePhotos?: string[];
+  handedOverAt?: string;
+  applyRequestId?: string;
+  applyRequestTime?: string;
+  searchRequestId?: string;
+  searchTime?: string;
+  cancelRequestId?: string;
+  cancelRequestTime?: string;
+  applyTime?: string;
+  cancelTime?: string;
+  errorCode?: string;
+  errorMessage?: string;
+  orderSnapshot?: {
+    customerRemark?: string;
+    rawCustomerRemark?: string;
+    productRemark?: string;
+    printProductRemark?: string;
+    products?: Array<{
+      brand?: string;
+      productName?: string;
+      specification?: string;
+      quantity?: number;
+    }>;
+  };
+  shipmentRemarkEntries?: Array<{
+    orderId: string;
+    orderNumber: string;
+    role: 'primary' | 'appended';
+    productRemark: string;
+    printProductRemark?: string;
+    customerRemark: string;
+    attachedAt: string;
+  }>;
+  shipmentRemarkFull?: string;
+  shipmentPrintRemark?: string;
+  printCount: number;
+  lastPrintTime?: string | { $date: string };
+  lastPrintRequestId?: string;
+  createdAt: string;
+  updatedAt: string;
+  operatorId?: string;
+}
+
+export type SfWorkbenchStatus =
+  | 'not_required'
+  | 'not_created'
+  | 'applying'
+  | 'applied'
+  | 'failed'
+  | 'cancelled'
+  | 'other_express'
+  | 'legacy_unmanaged';
+
+export interface SfOtherEnvSummary {
+  env: 'sandbox' | 'production';
+  status: SfExpressApplyStatus;
+  sfOrderId: string;
+  waybillNo: string;
+}
+
+export interface SfExportSummary {
+  count: number;
+  lastExportTime: string;
+}
+
+export interface SfExpressWorkbenchRow {
+  order: OrderRecord;
+  sfStatus: SfWorkbenchStatus;
+  currentSfOrder: SfExpressOrderRecord | null;
+  otherEnvSummary: SfOtherEnvSummary[];
+  exportSummary: SfExportSummary;
+}
+
 /** 订单记录 —— 对齐 Excel「订单明细」工作表 25 列 */
 export interface OrderRecord {
   _id: string;
@@ -186,31 +287,23 @@ export interface OrderRecord {
   channelCategory: string;          // 渠道类别
   onlineOrderNumber: string;        // 网店订单号
   customerName: string;             // 客户名称
-  brand: string;                    // 品牌
-  productName: string;              // 货品名称
-  specification: string;            // 规格
-  quantity: number;                 // 数量
-  unitPrice: number;                // 单价
-  amount: number;                   // 金额
-  paymentAccount: string;           // 收款账户
-  paymentSplits?: PaymentSplit[] | string; // 多账户收款明细（兼容旧数据）
+  products?: ProductItem[];         // 货品明细（新结构：一条订单多条货品）
+  /** @deprecated 旧扁平结构单货品字段，仅兼容未迁移数据；读取货品请用 getOrderProducts() */
+  brand?: string;                   // 品牌
+  /** @deprecated 见 brand */
+  productName?: string;             // 货品名称
+  /** @deprecated 见 brand */
+  specification?: string;           // 规格
+  /** @deprecated 见 brand */
+  quantity?: number;                // 数量
+  /** @deprecated 见 brand */
+  unitPrice?: number;               // 单价
+  /** @deprecated 见 brand */
+  amount?: number;                  // 金额
+  paymentAccount?: string;          // 收款账户（订单级；旧数据可能存在货品级收款，读取用 getOrderPaymentSplits）
+  paymentSplits?: PaymentSplit[] | string; // 多账户收款明细（订单级，合计对齐订单总额；兼容旧字符串数据）
   trackingNumber: string;           // 物流单号
   expressProvider?: string;         // 快递服务商
-  sfEnv?: string;                   // 顺丰环境
-  expressApplyStatus?: string;      // 快递申请状态
-  expressApplyTime?: string;        // 快递申请时间
-  expressErrorMsg?: string;         // 快递申请失败原因
-  sfRequestId?: string;             // 顺丰请求ID
-  sfOrderId?: string;               // 顺丰客户订单号
-  sfWaybillNo?: string;             // 顺丰运单号
-  sfSenderContact?: string;         // 顺丰寄件人
-  sfSenderTel?: string;             // 顺丰寄件电话（脱敏）
-  sfSearchRequestId?: string;       // 顺丰查询请求ID
-  sfSearchRawResponse?: unknown;    // 顺丰查询原始响应
-  expressCancelTime?: string;       // 快递取消时间
-  sfCancelRequestId?: string;       // 顺丰取消请求ID
-  sfCancelRawResponse?: unknown;    // 顺丰取消原始响应
-  sfRawResponse?: unknown;          // 顺丰原始响应
   consignee: string;                // 收货人名称
   consigneePhone: string;           // 收货人电话
   consigneeAddress: string;         // 收货人地址
@@ -224,12 +317,17 @@ export interface OrderRecord {
   paidRent: number;                 // 已交租金
   transferItems?: string;            // 转租赁2多组货品JSON（兼容多组）
   importSource?: string;            // 订单来源标记（hc-order-assist=赞晨租导入）
+  afterSaleSourceOrderId?: string;  // 手工售后订单关联的原订单 ID
+  afterSaleSourceSerialNumber?: number; // 原订单序号快照（原订单删除后仍可追溯）
+  afterSaleRequestId?: string;      // 售后创建请求 ID（提交重试幂等）
+  afterSaleCreatedBy?: string;      // 售后订单创建人 ID
   attachments: OrderAttachment[];   // 订单附件
   returnStatus?: string;            // 归还状态（租后发货/租后退货时使用）
   returnTrackingNumbers?: string;   // 归还物流单号（多个逗号分隔，归还状态=运输途中时必填）
-  linkedOutboundId?: string;        // 关联的出库单 _id
-  linkedOutboundNumber?: string;    // 关联的出库编号
-  outboundSyncStatus?: 'none' | 'pending' | 'completed'; // 出库同步状态
+  needsOutbound?: boolean;          // 是否需要出库（默认按订单类型判定，见出库单关联设计文档）
+  outboundRecordId?: string;        // 关联的出库单 _id（生成出库单后回写，防重复生成+完成发货回填）
+  sfExpressOrderRecordId?: string;  // 关联的顺丰实际包裹记录（第一阶段只读）
+  sharedWaybill?: boolean;          // 是否与其他订单共享同一顺丰运单
   createTime?: { $date: string };
 }
 
@@ -242,7 +340,7 @@ export interface TransferProductItem {
   paidRent: number;
 }
 
-/** 货品条目（新增订单时支持多条） */
+/** 货品条目（新增订单时支持多条）；收款已上移订单级，货品级收款字段仅旧数据存在 */
 export interface ProductItem {
   brand: string;
   productName: string;
@@ -250,12 +348,15 @@ export interface ProductItem {
   quantity: number;
   unitPrice: number;
   amount: number;
-  paymentAccount: string;
+  /** @deprecated 收款在订单级 paymentAccount，旧数据回退读取用 */
+  paymentAccount?: string;
+  /** @deprecated 收款在订单级 paymentSplits，旧数据回退读取用 */
   paymentSplits?: PaymentSplit[];
 }
 
 /** 订单筛选条件 */
 export interface OrderFilters {
+  serialNumber?: string;
   customerName?: string;
   salesperson?: string;
   salesChannel?: string;
@@ -266,6 +367,8 @@ export interface OrderFilters {
   onlineOrderNumber?: string;
   startDate?: string;
   endDate?: string;
+  /** 异常状态筛选：unreceived=未收款，unreturned=未退回入库 */
+  abnormalStatus?: string;
 }
 
 /** 统计数据 */
@@ -318,6 +421,14 @@ export interface InvoiceFile {
   fileName: string;               // 原始文件名
 }
 
+/** 二手手机开票货品 */
+export interface InvoicePhoneProduct {
+  model: string;                  // 手机型号
+  quantity: number;               // 数量
+  unitPrice: number;              // 单价
+  amount: number;                 // 小计（数量 × 单价）
+}
+
 /** 发票记录 */
 export interface InvoiceRecord {
   _id: string;
@@ -334,6 +445,7 @@ export interface InvoiceRecord {
   bankCode: string;               // 开户行行号
   invoiceCategory: string;        // 开票类目
   invoiceAmount: number;          // 开票金额
+  phoneProducts?: InvoicePhoneProduct[]; // 手机货品明细（二手手机类目，支持多条）
   phoneModel?: string;            // 手机型号（二手手机类目）
   phoneQuantity?: number;         // 手机数量（二手手机类目）
   unitPrice?: number;             // 单价（二手手机类目）

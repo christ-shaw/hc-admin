@@ -203,7 +203,7 @@ export function Inventory() {
   const totalCount = Object.values(inventoryData).reduce((sum, arr) => sum + arr.length, 0);
 
   return (
-    <div className="space-y-4">
+    <div className="min-w-0 space-y-4">
       {/* 标题 */}
       <div>
         <h1 className="text-2xl font-semibold text-gray-800">库存管理</h1>
@@ -261,11 +261,12 @@ export function Inventory() {
           )}
 
           {/* 筛选 */}
-          <div className="ml-auto flex items-center gap-2">
+          <div className="flex w-full min-w-0 flex-wrap items-center gap-2 xl:ml-auto xl:w-auto">
             <Input
               placeholder="搜索编号/名称/规格"
               value={filters.keyword}
               onChange={(val) => setFilters(prev => ({ ...prev, keyword: val as string }))}
+              className="min-w-[220px] flex-1 xl:flex-none"
               style={{ width: 220 }}
               onEnter={handleSearch}
             />
@@ -302,7 +303,7 @@ export function Inventory() {
       )}
 
       {/* 数据表格 */}
-      <div className="glass-card">
+      <div className="glass-card min-w-0 overflow-hidden">
         <Tabs
           value={activeTab}
           onChange={(val) => setActiveTab(val as string)}
@@ -311,27 +312,29 @@ export function Inventory() {
             label: `${name} (${inventoryData[key]?.length || 0})`,
           }))}
         />
-        <Table
-          data={filteredData}
-          columns={columns}
-          rowKey="_id"
-          tableLayout="fixed"
-          hover
-          stripe
-          empty={
-            <div className="py-12 text-center">
-              <FileSpreadsheet size={48} className="mx-auto text-gray-300 mb-3" />
-              <p className="text-gray-400">
-                {totalCount === 0 ? '请点击「导入 Excel」上传库存文件' : '当前表无匹配数据'}
-              </p>
-              {totalCount === 0 && (
-                <p className="text-gray-300 text-sm mt-1">
-                  支持读取工作表：半成品库存、成品库存、维修仓
+        <div className="max-w-full overflow-x-auto">
+          <Table
+            data={filteredData}
+            columns={columns}
+            rowKey="_id"
+            tableLayout="fixed"
+            hover
+            stripe
+            empty={
+              <div className="py-12 text-center">
+                <FileSpreadsheet size={48} className="mx-auto text-gray-300 mb-3" />
+                <p className="text-gray-400">
+                  {totalCount === 0 ? '请点击「导入 Excel」上传库存文件' : '当前表无匹配数据'}
                 </p>
-              )}
-            </div>
-          }
-        />
+                {totalCount === 0 && (
+                  <p className="text-gray-300 text-sm mt-1">
+                    支持读取工作表：半成品库存、成品库存、维修仓
+                  </p>
+                )}
+              </div>
+            }
+          />
+        </div>
         {filteredData.length > 0 && (
           <div className="flex justify-between items-center py-3 px-4 border-t border-gray-100">
             <span className="text-sm text-gray-500">

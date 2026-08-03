@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Table, Button, Input, Select, MessagePlugin, Dialog } from 'tdesign-react';
-import { Search, RotateCcw } from 'lucide-react';
+import { Search, RotateCcw, FileDown } from 'lucide-react';
 import { InboundRecord, InboundFilters } from '../types';
 import { useInbound } from '../hooks/useInbound';
 import { useLogs } from '../hooks/useLogs';
@@ -10,6 +10,9 @@ import { getCurrentOperatorName } from '../lib/cloudbase';
 import { RecordDetail } from '../components/RecordDetail';
 import { RecordEdit } from '../components/RecordEdit';
 import { DICT_CODES, useDictionaries } from '../contexts/DictionaryContext';
+import { exportInboundRecordsExcel } from '../utils/recordExcel';
+import { RecordExportDialog } from '../components/RecordExportDialog';
+import { useTabDirty } from '../contexts/TabWorkspaceContext';
 
 export function InboundList() {
   const inbound = useInbound();
@@ -25,6 +28,10 @@ export function InboundList() {
 
   const [filters, setFilters] = useState<InboundFilters>({});
   const [channelTypeFilter, setChannelTypeFilter] = useState('');
+  const [exportVisible, setExportVisible] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [editDirty, setEditDirty] = useState(false);
+  useTabDirty(editVisible && editDirty, '入库记录');
 
   useEffect(() => {
     inbound.fetchRecords();
@@ -47,6 +54,33 @@ export function InboundList() {
     setChannelTypeFilter('');
     inbound.resetFilters();
     inbound.fetchRecords(null, {});
+  };
+
+  const handleExport = async (startDate: string, endDate: string) => {
+    setExporting(true);
+    try {
+      const exportFilters: InboundFilters = {
+        startDate,
+        endDate,
+      };
+      const records = await inbound.fetchAllRecords(exportFilters);
+      if (records.length === 0) {
+        MessagePlugin.warning('所选日期范围内没有入库记录');
+        return;
+      }
+      exportInboundRecordsExcel(
+        records,
+        startDate,
+        endDate,
+        value => dictionaries.getLabel(DICT_CODES.channelType, value),
+      );
+      MessagePlugin.success(`已导出 ${records.length} 条入库记录`);
+      setExportVisible(false);
+    } catch (err) {
+      MessagePlugin.error('导出失败: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setExporting(false);
+    }
   };
 
   const handleDetail = (record: InboundRecord) => {
@@ -116,15 +150,18 @@ export function InboundList() {
   const displayRecords = inbound.getPageRecords(inbound.currentPage);
 
   return (
-    <div className="space-y-4">
-      <div>
-        <h1 className="text-2xl font-semibold text-gray-800">入库记录</h1>
-        <p className="text-gray-500 mt-1">管理所有入库记录</p>
+    <div className="min-w-0 space-y-4">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold text-gray-800">入库记录</h1>
+          <p className="text-gray-500 mt-1">管理所有入库记录</p>
+        </div>
+        <Button variant="outline" icon={<FileDown size={16} />} onClick={() => setExportVisible(true)}>导出 Excel</Button>
       </div>
 
       {/* 筛选栏 */}
       <div className="glass-card p-4">
-        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3 items-end">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4 items-end [&>*]:min-w-0">
           <Input placeholder="客户名称" value={filters.customerName || ''} onChange={(val) => setFilters(prev => ({ ...prev, customerName: val as string }))} />
           <Select
             placeholder="渠道类型"
@@ -141,8 +178,8 @@ export function InboundList() {
             onChange={(val) => setFilters(prev => ({ ...prev, hasIssue: val === '' ? undefined : val === 'true' }))}
             options={[{ label: '全部', value: '' }, { label: '有异常', value: 'true' }, { label: '正常', value: 'false' }]}
           />
-          <input type="date" className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-primary" placeholder="开始日期" value={filters.startDate || ''} onChange={(e) => setFilters(prev => ({ ...prev, startDate: e.target.value }))} />
-          <input type="date" className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-primary" placeholder="结束日期" value={filters.endDate || ''} onChange={(e) => setFilters(prev => ({ ...prev, endDate: e.target.value }))} />
+          <input type="date" className="w-full min-w-0 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-primary" placeholder="开始日期" value={filters.startDate || ''} onChange={(e) => setFilters(prev => ({ ...prev, startDate: e.target.value }))} />
+          <input type="date" className="w-full min-w-0 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-primary" placeholder="结束日期" value={filters.endDate || ''} onChange={(e) => setFilters(prev => ({ ...prev, endDate: e.target.value }))} />
         </div>
         <div className="flex gap-2 mt-3">
           <Button theme="primary" icon={<Search size={16} />} onClick={handleSearch}>查询</Button>
@@ -151,17 +188,18 @@ export function InboundList() {
       </div>
 
       {/* 表格 */}
-      <div className="glass-card">
-        <Table
-          data={displayRecords}
-          columns={columns}
-          loading={inbound.loading}
-          rowKey="_id"
-          tableLayout="fixed"
-          hover
-          stripe
-
-        />
+      <div className="glass-card min-w-0 overflow-hidden">
+        <div className="max-w-full overflow-x-auto">
+          <Table
+            data={displayRecords}
+            columns={columns}
+            loading={inbound.loading}
+            rowKey="_id"
+            tableLayout="fixed"
+            hover
+            stripe
+          />
+        </div>
         {/* 分页 */}
         <div className="flex justify-center items-center gap-2 py-4 border-t border-gray-100">
           <Button size="small" variant="outline" disabled={inbound.currentPage <= 1}
@@ -194,6 +232,7 @@ export function InboundList() {
         type="inbound"
         onClose={() => setEditVisible(false)}
         onSave={handleSave}
+        onDirtyChange={setEditDirty}
       />
 
       {/* 删除确认 */}
@@ -205,6 +244,14 @@ export function InboundList() {
       >
         <p>确定要删除这条入库记录吗？此操作不可撤销。</p>
       </Dialog>
+
+      <RecordExportDialog
+        visible={exportVisible}
+        recordLabel="入库记录"
+        exporting={exporting}
+        onClose={() => setExportVisible(false)}
+        onExport={handleExport}
+      />
     </div>
   );
 }

@@ -1,13 +1,14 @@
 import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
-import { Table, Button, Input, Select, Tag, Dialog, MessagePlugin, Textarea } from 'tdesign-react';
-import { Search, RotateCcw, Upload, Download, Plus, Pencil, Trash2, Minus, X, ChevronRight, ChevronLeft, FileDown, Check } from 'lucide-react';
+import { Table, Button, Input, Select, Tag, Dialog, Dropdown, MessagePlugin, Textarea, Switch } from 'tdesign-react';
+import type { DropdownOption } from 'tdesign-react';
+import { Search, RotateCcw, Upload, Plus, Pencil, Trash2, Minus, X, ChevronRight, ChevronLeft, FileDown, Check } from 'lucide-react';
 import { OrderRecord, OrderFilters, InboundRecord, OutboundRecord, PhoneBrand, PhoneModelItem, ProductItem, TransferProductItem, OrderAttachment, PaymentSplit, dictToOptions, getDictLabel } from '../types';
 import { useOrders } from '../hooks/useOrders';
 import { usePhoneModels } from '../hooks/usePhoneModels';
 import { formatDate, getTotalQuantity } from '../utils/format';
-import { OUTBOUND_SYNC_STATUS_MAP, getOutboundSyncStatusTheme, resolveOutboundStatus, resolveOutboundSyncStatus } from '../utils/outboundLinkage';
 import { parseOrderExcel, exportOrderExcel } from '../utils/orderExcel';
+import { getOrderProducts, getOrderTotalAmount, getOrderTotalQuantity, getOrderPaymentSplits, hasUnreceivedPayment } from '../utils/orderProducts';
 import { getBrandLabel, getProductLabel } from '../data/dict';
 import {
   parseConsigneeInfo,
@@ -19,6 +20,8 @@ import {
 } from '../lib/cloudbase';
 import { PAGE_SIZE } from '../utils/constants';
 import { DICT_CODES, useDictionaries } from '../contexts/DictionaryContext';
+import { useTabDirty } from '../contexts/TabWorkspaceContext';
+import { usePermission } from '../contexts/PermissionContext';
 
 /** ========== 预计算静态 options（模块级常量，避免每次渲染重建） ========== */
 const PLACEHOLDER_OPTION = { label: '请选择', value: '' };
@@ -53,8 +56,6 @@ const EMPTY_PRODUCT: ProductItem = {
   quantity: 0,
   unitPrice: 0,
   amount: 0,
-  paymentAccount: '',
-  paymentSplits: [],
 };
 
 /** 转租赁2货品条目默认值 */
@@ -87,9 +88,98 @@ interface OrderFormData {
   customerRemark: string;
   transferProducts: TransferProductItem[];
   products: ProductItem[];
+  paymentAccount: string;           // 订单级收款账户（展示值，由拆分推导）
+  paymentSplits: PaymentSplit[];    // 订单级多账户拆分，合计对齐订单总金额
   attachments: OrderAttachment[];
   returnStatus: string;
   returnTrackingNumbers: string;
+  needsOutbound: boolean;
+}
+
+/** 新建订单时"保存后自动生成待出库单"选项 */
+interface AutoOutboundOption {
+  enabled: boolean | null;
+}
+
+interface AfterSaleFormData {
+  products: ProductItem[];
+  consignee: string;
+  consigneePhone: string;
+  consigneeAddress: string;
+  shippingFee: string;
+  customerRemark: string;
+  needsOutbound: boolean;
+}
+
+const EMPTY_AFTER_SALE_FORM: AfterSaleFormData = {
+  products: [{ ...EMPTY_PRODUCT }],
+  consignee: '',
+  consigneePhone: '',
+  consigneeAddress: '',
+  shippingFee: '',
+  customerRemark: '',
+  needsOutbound: false,
+};
+
+const DEFAULT_AUTO_OUTBOUND: AutoOutboundOption = { enabled: null };
+
+const CONSIGNEE_PHONE_PATTERN = /^\d{6,20}$/;
+
+function createAfterSaleRequestId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  return `after-sale-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function isAfterSaleEligible(record: OrderRecord): boolean {
+  const rental2 = record.orderAttribute === 'rental2' || record.orderAttribute === '租赁2';
+  const shipped = record.status === 'shipped' || record.status === '已发货';
+  return rental2 && shipped && !record.afterSaleSourceOrderId && record.importSource !== 'manual-after-sale';
+}
+
+function normalizeShippingFeeValue(value: string | undefined): string {
+  const normalized = String(value || '').trim();
+  if (normalized === 'prepaid' || normalized === '包邮' || normalized === '寄付月结') return 'prepaid';
+  if (normalized === 'cod' || normalized === '到付' || normalized === '收方付') return 'cod';
+  if (normalized === 'pickup' || normalized === '自提') return 'pickup';
+  return '';
+}
+
+function buildAfterSaleForm(record: OrderRecord): AfterSaleFormData {
+  const sourceProducts = getOrderProducts(record);
+  const products = (sourceProducts.length > 0 ? sourceProducts : [EMPTY_PRODUCT]).map(product => ({
+    brand: product.brand || '',
+    productName: product.productName || '',
+    specification: product.specification || '',
+    quantity: Number(product.quantity) || 0,
+    unitPrice: 0,
+    amount: 0,
+  }));
+  return {
+    products,
+    consignee: record.consignee || '',
+    consigneePhone: record.consigneePhone || '',
+    consigneeAddress: record.consigneeAddress || '',
+    shippingFee: normalizeShippingFeeValue(record.shippingFee),
+    customerRemark: '',
+    needsOutbound: false,
+  };
+}
+
+function serializeAfterSaleDraft(
+  form: AfterSaleFormData,
+  outboundDecision: boolean | null,
+  autoOutbound: AutoOutboundOption,
+): string {
+  return JSON.stringify({ form, outboundDecision, autoOutbound });
+}
+
+function hasCompleteOutboundDetails(form: OrderFormData): boolean {
+  return !!(
+    form.consignee.trim()
+    && CONSIGNEE_PHONE_PATTERN.test(form.consigneePhone.trim())
+    && form.consigneeAddress.trim()
+    && form.shippingFee
+  );
 }
 
 interface OrderWizardDictionaries {
@@ -132,22 +222,65 @@ const EMPTY_ORDER: OrderFormData = {
   customerRemark: '',
   transferProducts: [],
   products: [{ ...EMPTY_PRODUCT }],
+  paymentAccount: '',
+  paymentSplits: [],
   attachments: [],
   returnStatus: '',
   returnTrackingNumbers: '',
+  needsOutbound: false,
 };
 
 const STATUS_TAG_THEME: Record<string, 'success' | 'warning' | 'danger' | 'default'> = {
   shipped: 'success',
+  unshipped: 'warning',
   unknown: 'default',
 };
 
-function isPendingShipmentStatus(status: string | undefined): boolean {
-  return status === 'unknown' || status === '--';
+// 状态胶囊配色（取自设计稿 Records Redesign）
+const STATUS_PILL_COLORS: Record<'success' | 'warning' | 'danger' | 'default', { fg: string; bg: string }> = {
+  success: { fg: '#00854A', bg: '#E3F6EA' },
+  warning: { fg: '#B85C00', bg: '#FDEEDD' },
+  danger: { fg: '#C23616', bg: '#FDE8E8' },
+  default: { fg: '#6B7785', bg: '#F0F1F3' },
+};
+
+/** 圆点胶囊状态标签（设计稿样式：圆角胶囊 + currentColor 圆点） */
+function StatusPill({ theme, label }: { theme: 'success' | 'warning' | 'danger' | 'default'; label: string }) {
+  const colors = STATUS_PILL_COLORS[theme];
+  return (
+    <span
+      className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium whitespace-nowrap"
+      style={{ backgroundColor: colors.bg, color: colors.fg }}
+    >
+      <span className="w-1.5 h-1.5 rounded-full bg-current shrink-0" />
+      {label}
+    </span>
+  );
 }
 
-function isExpressApplicableStatus(status: string | undefined): boolean {
-  return isPendingShipmentStatus(status);
+function isPendingShipmentStatus(status: string | undefined): boolean {
+  return status === 'unknown' || status === '--' || status === 'unshipped';
+}
+
+// 终态：不随「需要出库」开关改写的订单状态
+const TERMINAL_ORDER_STATUSES = new Set(['shipped', 'returnReceived', 'returnShipped']);
+
+/** 需要出库 → 未发货；不需要 → 不用发货；终态保持不变 */
+function deriveOutboundStatus(needsOutbound: boolean, prevStatus: string): string {
+  if (TERMINAL_ORDER_STATUSES.has(prevStatus)) return prevStatus;
+  return needsOutbound ? 'unshipped' : 'noShip';
+}
+
+/** 统一设置 needsOutbound 并联动订单状态、清理发货字段 */
+function applyNeedsOutbound(prev: OrderFormData, needsOutbound: boolean): OrderFormData {
+  const status = deriveOutboundStatus(needsOutbound, prev.status);
+  return {
+    ...prev,
+    needsOutbound,
+    status,
+    shippingFee: status === 'shipped' ? prev.shippingFee : '',
+    trackingNumber: status === 'shipped' ? prev.trackingNumber : '',
+  };
 }
 
 function isVirtualProductOrder(products: ProductItem[]): boolean {
@@ -155,16 +288,25 @@ function isVirtualProductOrder(products: ProductItem[]): boolean {
   return selectedBrands.length > 0 && selectedBrands.every(brand => brand === '虚拟产品');
 }
 
+// 需要出库的订单类型（仅按订单类型判定，见 docs/order-outbound-linkage-design.md §4.1）
+const OUTBOUND_ORDER_TYPES = new Set(['newBusiness', 'postRentalShip']);
+
+/** 计算「需要出库」默认值：虚拟货品单强制 false，否则按订单类型 */
+function defaultNeedsOutbound(orderType: string, products: ProductItem[]): boolean {
+  if (isVirtualProductOrder(products)) return false;
+  return OUTBOUND_ORDER_TYPES.has(orderType);
+}
+
 function applyVirtualProductStatus(prev: OrderFormData, products: ProductItem[]): OrderFormData {
   const wasVirtualProductOrder = isVirtualProductOrder(prev.products);
   const isVirtualOrder = isVirtualProductOrder(products);
 
   if (isVirtualOrder) {
-    return { ...prev, products, status: 'noShip', shippingFee: '', trackingNumber: '' };
+    return { ...prev, products, status: 'noShip', shippingFee: '', trackingNumber: '', needsOutbound: false };
   }
 
   if (wasVirtualProductOrder && prev.status === 'noShip') {
-    return { ...prev, products, status: 'unknown' };
+    return applyNeedsOutbound({ ...prev, products }, defaultNeedsOutbound(prev.orderType, products));
   }
 
   return { ...prev, products };
@@ -174,7 +316,7 @@ function getEffectiveShipmentFields(form: OrderFormData) {
   const status = isVirtualProductOrder(form.products) ? 'noShip' : form.status;
   return {
     status,
-    shippingFee: status === 'shipped' ? form.shippingFee : '',
+    shippingFee: status === 'noShip' ? '' : form.shippingFee,
     trackingNumber: status === 'shipped' ? form.trackingNumber : '',
   };
 }
@@ -183,6 +325,57 @@ function shouldShowProductPaymentFields(orderSource?: string, orderType?: string
   if (orderSource === 'new' && orderAttribute === 'rental1' && productBrand !== '虚拟产品') return false;
   if (orderSource === 'service' && (orderType === 'postRentalShip' || orderType === 'postRentalReturn')) return false;
   return true;
+}
+
+/** 多订单客服备注去重拼接（生成出库单时带入出库备注） */
+function mergeCustomerRemarks(records: Array<Pick<OrderRecord, 'customerRemark'>>): string {
+  return Array.from(new Set(
+    records.map(r => String(r.customerRemark || '').trim()).filter(Boolean)
+  )).join('；');
+}
+
+/** 生成订单简介：收件信息、租赁手机与备注、下单人与订单编号 */
+function buildOrderIntroduction(record: OrderRecord): string {
+  const consigneeLine = [record.consignee, record.consigneePhone, record.consigneeAddress]
+    .map(value => String(value || '').trim() || '-')
+    .join('，');
+  const phoneSummary = getOrderProducts(record)
+    .map(product => {
+      const productName = getProductLabel(product.productName) || getBrandLabel(product.brand) || '-';
+      const specification = product.specification && product.specification !== '默认'
+        ? ` ${product.specification}`
+        : '';
+      return `${productName}${specification}*${Number(product.quantity) || 0}台`;
+    })
+    .join('，') || '-';
+  const remark = String(record.customerRemark || '').trim() || '-';
+  const customerName = String(record.customerName || '').trim() || '-';
+  const orderNumber = String(record.onlineOrderNumber || record.serialNumber || '').trim() || '-';
+
+  return `${consigneeLine}\n\n${phoneSummary}，${remark}\n\n订单下单人:  ${customerName},  订单编号: ${orderNumber}`;
+}
+
+async function copyText(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // 权限策略可能禁用 Clipboard API，继续尝试兼容旧浏览器的复制方式。
+    }
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  try {
+    textarea.select();
+    if (!document.execCommand('copy')) throw new Error('copy failed');
+  } finally {
+    document.body.removeChild(textarea);
+  }
 }
 
 function formatPhoneModels(phoneModels?: PhoneModelItem[]): string {
@@ -194,30 +387,15 @@ function getOutboundPhoneTotal(record?: OutboundRecord | null): number {
   return record?.phoneModels?.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0) || 0;
 }
 
+const OUTBOUND_STATUS_LABELS: Record<string, { label: string; theme: 'warning' | 'success' | 'default' }> = {
+  pending: { label: '待出库', theme: 'warning' },
+  completed: { label: '已出库', theme: 'success' },
+  cancelled: { label: '已取消', theme: 'default' },
+};
+
 function shouldShowAfterSaleInboundConfirm(record: OrderRecord): boolean {
   const needsReturnConfirm = ['postRentalShip', 'postRentalReturn', '租后发货', '租后退货', '售后发货'].includes(record.orderType);
   return needsReturnConfirm && record.returnStatus !== 'returned';
-}
-
-function requiresPhysicalShipment(record: OrderRecord): boolean {
-  if (record.status === 'noShip') return false;
-  if (record.brand === '虚拟产品') return false;
-
-  const virtualProducts = ORDER_TYPE_VIRTUAL_PRODUCTS[record.orderType] || [];
-  if (virtualProducts.includes(record.productName)) return false;
-
-  return true;
-}
-
-function getGenerateOutboundBlockedReason(record: OrderRecord): string {
-  if (record.linkedOutboundId || record.linkedOutboundNumber) return '该订单已有关联出库单';
-  if (!isPendingShipmentStatus(record.status)) return '仅待发货订单可生成出库单';
-  if (!requiresPhysicalShipment(record)) return '该订单无需实物出库';
-  return '';
-}
-
-function canCancelOutbound(record: OrderRecord): boolean {
-  return !!(record.linkedOutboundId || record.linkedOutboundNumber) && record.outboundSyncStatus !== 'completed';
 }
 
 function clearHiddenProductPaymentFields(form: Pick<OrderFormData, 'orderSource' | 'orderType' | 'orderAttribute' | 'products'>): ProductItem[] {
@@ -227,10 +405,20 @@ function clearHiddenProductPaymentFields(form: Pick<OrderFormData, 'orderSource'
       ...product,
       unitPrice: 0,
       amount: 0,
-      paymentAccount: '',
-      paymentSplits: [],
     };
   });
+}
+
+/** 订单级收款区是否显示：任一货品的收款字段可见即显示 */
+function shouldShowOrderPaymentSection(form: Pick<OrderFormData, 'orderSource' | 'orderType' | 'orderAttribute' | 'products'>): boolean {
+  return form.products.some(product =>
+    shouldShowProductPaymentFields(form.orderSource, form.orderType, form.orderAttribute, product.brand)
+  );
+}
+
+/** 订单总金额 = 各货品金额之和（隐藏收款的货品金额已被清零） */
+function getFormTotalAmount(form: Pick<OrderFormData, 'products'>): number {
+  return form.products.reduce((sum, product) => sum + (Number(product.amount) || 0), 0);
 }
 
 function parsePaymentSplits(value: OrderRecord['paymentSplits'] | ProductItem['paymentSplits']): PaymentSplit[] {
@@ -255,15 +443,17 @@ function normalizePaymentSplits(source: Pick<ProductItem, 'paymentAccount' | 'am
   return source.paymentAccount ? [{ account: source.paymentAccount, amount: Math.max(0, Number(source.amount) || 0) }] : [];
 }
 
-function getEditablePaymentSplits(product: ProductItem): PaymentSplit[] {
-  const rawSplits = parsePaymentSplits(product.paymentSplits)
+/** 订单级收款拆分的可编辑视图：无拆分时给一行默认（金额=订单总额） */
+function getEditableOrderPaymentSplits(form: Pick<OrderFormData, 'paymentAccount' | 'paymentSplits' | 'products'>): PaymentSplit[] {
+  const total = getFormTotalAmount(form);
+  const rawSplits = parsePaymentSplits(form.paymentSplits)
     .map(split => ({
       account: String(split.account || ''),
       amount: Math.max(0, Number(split.amount) || 0),
     }));
   if (rawSplits.length > 0) return rawSplits;
-  if (product.paymentAccount) return [{ account: product.paymentAccount, amount: Math.max(0, Number(product.amount) || 0) }];
-  return [{ account: '', amount: Math.max(0, Number(product.amount) || 0) }];
+  if (form.paymentAccount) return [{ account: form.paymentAccount, amount: total }];
+  return [{ account: '', amount: total }];
 }
 
 function getPaymentAccountValue(splits: PaymentSplit[]): string {
@@ -272,14 +462,13 @@ function getPaymentAccountValue(splits: PaymentSplit[]): string {
   return Array.from(new Set(accounts)).join('、');
 }
 
-function getPaymentSplitTotal(product: ProductItem): number {
-  return normalizePaymentSplits(product).reduce((sum, split) => sum + (Number(split.amount) || 0), 0);
-}
-
-function isPaymentSplitValid(product: ProductItem): boolean {
-  const splits = normalizePaymentSplits(product);
+/** 订单级收款校验：每笔拆分账户+金额齐全，合计等于订单总金额 */
+function isOrderPaymentValid(form: Pick<OrderFormData, 'paymentAccount' | 'paymentSplits' | 'products'>): boolean {
+  const total = getFormTotalAmount(form);
+  const splits = normalizePaymentSplits({ paymentAccount: form.paymentAccount, amount: total, paymentSplits: form.paymentSplits });
   if (splits.length === 0 || splits.some(split => !split.account || split.amount <= 0)) return false;
-  return Math.abs(getPaymentSplitTotal(product) - (Number(product.amount) || 0)) < 0.01;
+  const splitTotal = splits.reduce((sum, split) => sum + (Number(split.amount) || 0), 0);
+  return Math.abs(splitTotal - total) < 0.01;
 }
 
 function formatPaymentSplits(source: Pick<OrderRecord, 'paymentAccount' | 'amount' | 'paymentSplits'>): string {
@@ -289,23 +478,26 @@ function formatPaymentSplits(source: Pick<OrderRecord, 'paymentAccount' | 'amoun
   return splits.map(split => `${split.account || '-'} ¥${split.amount || 0}`).join('；');
 }
 
-function hasUnreceivedPayment(record: OrderRecord): boolean {
-  return record.paymentAccount === '未收款' || normalizePaymentSplits(record as unknown as ProductItem).some(split => split.account === '未收款');
-}
-
+/** 保存时剥离货品级收款字段（收款在订单级） */
 function serializeProductForSave(product: ProductItem): ProductItem {
-  const paymentSplits = normalizePaymentSplits(product);
-  return {
-    ...product,
-    paymentSplits,
-    paymentAccount: getPaymentAccountValue(paymentSplits),
-  };
+  const { paymentAccount: _pa, paymentSplits: _ps, ...rest } = product;
+  return rest;
 }
 
-function syncSinglePaymentSplitAmount(product: ProductItem, amount: number): PaymentSplit[] {
-  const splits = normalizePaymentSplits(product);
+/** 货品金额变化后同步订单级收款：单一拆分自动跟随订单总额，多拆分保持人工填写 */
+function syncOrderPaymentSplits(form: Pick<OrderFormData, 'paymentAccount' | 'paymentSplits' | 'products'>): PaymentSplit[] {
+  const total = getFormTotalAmount(form);
+  const splits = normalizePaymentSplits({ paymentAccount: form.paymentAccount, amount: total, paymentSplits: form.paymentSplits });
   if (splits.length > 1) return splits;
-  return [{ account: splits[0]?.account || product.paymentAccount || '', amount }];
+  return [{ account: splits[0]?.account || form.paymentAccount || '', amount: total }];
+}
+
+/** 保存前归一化订单级收款：区块隐藏时清空 */
+function serializeOrderPayment(form: Pick<OrderFormData, 'orderSource' | 'orderType' | 'orderAttribute' | 'products' | 'paymentAccount' | 'paymentSplits'>): { paymentAccount: string; paymentSplits: PaymentSplit[] } {
+  if (!shouldShowOrderPaymentSection(form)) return { paymentAccount: '', paymentSplits: [] };
+  const total = getFormTotalAmount(form);
+  const paymentSplits = normalizePaymentSplits({ paymentAccount: form.paymentAccount, amount: total, paymentSplits: form.paymentSplits });
+  return { paymentAccount: getPaymentAccountValue(paymentSplits), paymentSplits };
 }
 
 function buildEditFormFromRecord(record: OrderRecord): OrderFormData {
@@ -344,19 +536,21 @@ function buildEditFormFromRecord(record: OrderRecord): OrderFormData {
     status: record.status,
     customerRemark: record.customerRemark,
     transferProducts,
-    products: [{
-      brand: record.brand,
-      productName: record.productName,
-      specification: record.specification,
-      quantity: record.quantity,
-      unitPrice: record.unitPrice,
-      amount: record.amount,
-      paymentAccount: record.paymentAccount,
-      paymentSplits: normalizePaymentSplits(record as unknown as ProductItem),
-    }],
+    products: (() => {
+      const items = getOrderProducts(record);
+      if (items.length === 0) return [{ ...EMPTY_PRODUCT }];
+      return items.map(item => ({ ...item }));
+    })(),
+    // 订单级收款：新数据直接读，旧货品级收款自动折算合并（编辑保存后即收敛为订单级）
+    ...(() => {
+      const paymentSplits = getOrderPaymentSplits(record);
+      return { paymentSplits, paymentAccount: getPaymentAccountValue(paymentSplits) };
+    })(),
     attachments: record.attachments || [],
     returnStatus: record.returnStatus || '',
     returnTrackingNumbers: record.returnTrackingNumbers || '',
+    // 旧数据无 needsOutbound 时按订单类型兜底（noShip=虚拟单→false）
+    needsOutbound: record.needsOutbound ?? (record.status === 'noShip' ? false : OUTBOUND_ORDER_TYPES.has(record.orderType)),
   };
 }
 
@@ -364,6 +558,7 @@ export function Orders() {
   const orders = useOrders();
   const location = useLocation();
   const dictionaries = useDictionaries();
+  const { can } = usePermission();
   const productModels = usePhoneModels();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -389,7 +584,9 @@ export function Orders() {
   const FILTER_SALESPERSON_OPTIONS = useMemo(() => [{ label: '全部', value: '' }, ...SALESPERSONS.map(v => ({ label: dictionaries.getLabel(DICT_CODES.salesperson, v), value: v }))], [SALESPERSONS, dictionaries]);
   const FILTER_ORDER_STATUS_OPTIONS = useMemo(() => [{ label: '全部', value: '' }, ...dictToOptions(ORDER_STATUS_MAP)], [ORDER_STATUS_MAP]);
   const SHIP_CONFIRM_SHIPPING_FEE_OPTIONS = useMemo(
-    () => dictToOptions(SHIPPING_FEE_MAP).filter(option => option.value === 'prepaid' || option.value === 'cod'),
+    () => dictToOptions(SHIPPING_FEE_MAP).filter(option => (
+      option.value === 'prepaid' || option.value === 'cod' || option.value === 'pickup'
+    )),
     [SHIPPING_FEE_MAP]
   );
 
@@ -438,21 +635,30 @@ export function Orders() {
   const [filters, setFilters] = useState<OrderFilters>({});
   const [detailVisible, setDetailVisible] = useState(false);
   const [currentRecord, setCurrentRecord] = useState<OrderRecord | null>(null);
+  const [introductionVisible, setIntroductionVisible] = useState(false);
+  const [introductionText, setIntroductionText] = useState('');
   const [importing, setImporting] = useState(false);
   const [importPreviewVisible, setImportPreviewVisible] = useState(false);
   const [importPreviewData, setImportPreviewData] = useState<OrderRecord[]>([]);
-  const [applyingExpressId, setApplyingExpressId] = useState<string | null>(null);
-  const [queryingSfResultId, setQueryingSfResultId] = useState<string | null>(null);
-  const [cancelingSfId, setCancelingSfId] = useState<string | null>(null);
-  const [generatingOutboundId, setGeneratingOutboundId] = useState<string | null>(null);
-  const [cancelingOutboundId, setCancelingOutboundId] = useState<string | null>(null);
+  const [showMoreFilters, setShowMoreFilters] = useState(false);
   const [addVisible, setAddVisible] = useState(false);
   const [addForm, setAddForm] = useState<OrderFormData>(EMPTY_ORDER);
+  const [addNeedsOutboundDecision, setAddNeedsOutboundDecision] = useState<boolean | null>(null);
+  const [addAutoOutbound, setAddAutoOutbound] = useState<AutoOutboundOption>(DEFAULT_AUTO_OUTBOUND);
   const [saving, setSaving] = useState(false);
   const [editVisible, setEditVisible] = useState(false);
   const [editForm, setEditForm] = useState<OrderFormData>(EMPTY_ORDER);
   const [editId, setEditId] = useState('');
+  const [manualTrackingVisible, setManualTrackingVisible] = useState(false);
+  const [manualTrackingTarget, setManualTrackingTarget] = useState<OrderRecord | null>(null);
+  const [manualTrackingNumber, setManualTrackingNumber] = useState('');
+  const [manualTrackingShippingFee, setManualTrackingShippingFee] = useState('prepaid');
+  const [manualTrackingSaving, setManualTrackingSaving] = useState(false);
   const [shipDialogVisible, setShipDialogVisible] = useState(false);
+  // 关联出库单详情弹窗
+  const [outboundDetailVisible, setOutboundDetailVisible] = useState(false);
+  const [outboundDetailLoading, setOutboundDetailLoading] = useState(false);
+  const [outboundDetail, setOutboundDetail] = useState<OutboundRecord | null>(null);
   const [shipTarget, setShipTarget] = useState<OrderRecord | null>(null);
   const [shipRecords, setShipRecords] = useState<OutboundRecord[]>([]);
   const [selectedShipRecord, setSelectedShipRecord] = useState<OutboundRecord | null>(null);
@@ -463,6 +669,13 @@ export function Orders() {
   const [shipPhotoLoading, setShipPhotoLoading] = useState(false);
   const [shipPhotoTarget, setShipPhotoTarget] = useState<OutboundRecord | null>(null);
   const [shipPhotoUrls, setShipPhotoUrls] = useState<Array<{ fileID: string; tempFileURL: string }>>([]);
+  // 生成出库单弹窗（支持单订单 / 合并多订单）
+  const [genOutVisible, setGenOutVisible] = useState(false);
+  const [genOutOrders, setGenOutOrders] = useState<OrderRecord[]>([]);
+  const [genOutShippingMethod, setGenOutShippingMethod] = useState('prepaid');
+  const [genOutRemark, setGenOutRemark] = useState('');
+  const [genOutSubmitting, setGenOutSubmitting] = useState(false);
+  const [selectedRowKeys, setSelectedRowKeys] = useState<Array<string | number>>([]);
   const [afterSaleInboundVisible, setAfterSaleInboundVisible] = useState(false);
   const [afterSaleInboundTarget, setAfterSaleInboundTarget] = useState<OrderRecord | null>(null);
   const [afterSaleInboundCustomerName, setAfterSaleInboundCustomerName] = useState('');
@@ -473,6 +686,18 @@ export function Orders() {
   const [deleteConfirmVisible, setDeleteConfirmVisible] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<OrderRecord | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [afterSaleVisible, setAfterSaleVisible] = useState(false);
+  const [afterSaleTarget, setAfterSaleTarget] = useState<OrderRecord | null>(null);
+  const [afterSaleForm, setAfterSaleForm] = useState<AfterSaleFormData>(EMPTY_AFTER_SALE_FORM);
+  const [afterSaleOutboundDecision, setAfterSaleOutboundDecision] = useState<boolean | null>(null);
+  const [afterSaleAutoOutbound, setAfterSaleAutoOutbound] = useState<AutoOutboundOption>(DEFAULT_AUTO_OUTBOUND);
+  const [afterSaleRequestId, setAfterSaleRequestId] = useState('');
+  const [afterSaleSaving, setAfterSaleSaving] = useState(false);
+  const [afterSaleCloseConfirmVisible, setAfterSaleCloseConfirmVisible] = useState(false);
+  const [afterSaleHistoryVisible, setAfterSaleHistoryVisible] = useState(false);
+  const [afterSaleHistorySource, setAfterSaleHistorySource] = useState<OrderRecord | null>(null);
+  const [afterSaleHistoryRecords, setAfterSaleHistoryRecords] = useState<OrderRecord[]>([]);
+  const [afterSaleHistoryLoading, setAfterSaleHistoryLoading] = useState(false);
 
   // 编辑订单向导状态
   const [editStep, setEditStep] = useState(1);
@@ -493,26 +718,45 @@ export function Orders() {
   const [exportChannels, setExportChannels] = useState<string[]>([]); // 空=全部
   const [exportSalespersons, setExportSalespersons] = useState<string[]>([]); // 空=全部
   const [exporting, setExporting] = useState(false);
+  const editInitialRef = useRef('');
+  const exportInitialRef = useRef('');
+  const afterSaleInitialRef = useRef('');
+  const ordersInitialLoadedRef = useRef(false);
+  const handledLocationKeysRef = useRef(new Set<string>());
 
   useEffect(() => {
+    if (location.pathname !== '/orders') return;
     const state = location.state as { filter?: OrderFilters } | null;
+    const hasNavigationFilter = !!state?.filter;
+    if (hasNavigationFilter && handledLocationKeysRef.current.has(location.key)) return;
+    if (!hasNavigationFilter && ordersInitialLoadedRef.current) return;
+    handledLocationKeysRef.current.add(location.key);
+    ordersInitialLoadedRef.current = true;
     const stateFilter = state?.filter || {};
     const initialFilters: OrderFilters = {};
 
+    if (stateFilter.serialNumber) {
+      initialFilters.serialNumber = stateFilter.serialNumber.trim();
+    }
     if (stateFilter.onlineOrderNumber) {
       initialFilters.onlineOrderNumber = stateFilter.onlineOrderNumber.trim();
     } else if (stateFilter.customerName) {
       initialFilters.customerName = stateFilter.customerName.trim();
     }
+    if (stateFilter.abnormalStatus) {
+      initialFilters.abnormalStatus = stateFilter.abnormalStatus;
+      setShowMoreFilters(true); // 让来自首页卡片的异常筛选可见
+    }
 
     setFilters(initialFilters);
     orders.fetchRecords(null, initialFilters);
-  }, [location.state]);
+  }, [location.key, location.pathname, location.state]);
 
   const handleSearch = () => {
     orders.resetFilters();
     const searchFilters: OrderFilters = { ...filters };
     // trim 字符串字段，避免前后空格导致查不到
+    if (searchFilters.serialNumber) searchFilters.serialNumber = searchFilters.serialNumber.trim();
     if (searchFilters.customerName) searchFilters.customerName = searchFilters.customerName.trim();
     if (searchFilters.onlineOrderNumber) searchFilters.onlineOrderNumber = searchFilters.onlineOrderNumber.trim();
     orders.fetchRecords(null, searchFilters);
@@ -520,123 +764,201 @@ export function Orders() {
 
   const handleReset = () => {
     setFilters({});
+    setShowMoreFilters(false);
     orders.resetFilters();
     orders.fetchRecords(null, {});
   };
+
+  // 折叠区内生效的筛选数，收起时在「更多筛选」按钮上提示，避免隐藏筛选无感知
+  const moreFilterCount = [filters.serialNumber, filters.salesperson, filters.orderType, filters.status, filters.abnormalStatus].filter(Boolean).length;
 
   const handleDetail = useCallback((record: OrderRecord) => {
     setCurrentRecord(record);
     setDetailVisible(true);
   }, []);
 
-  const handleApplyExpress = useCallback(async (record: OrderRecord) => {
-    if (!record._id || applyingExpressId) return;
-    if (!isExpressApplicableStatus(record.status)) {
-      MessagePlugin.warning('仅订单状态为 -- 的订单可申请快递');
+  const resetAfterSaleDialog = useCallback(() => {
+    setAfterSaleVisible(false);
+    setAfterSaleTarget(null);
+    setAfterSaleForm(EMPTY_AFTER_SALE_FORM);
+    setAfterSaleOutboundDecision(null);
+    setAfterSaleAutoOutbound(DEFAULT_AUTO_OUTBOUND);
+    setAfterSaleRequestId('');
+    setAfterSaleCloseConfirmVisible(false);
+    afterSaleInitialRef.current = '';
+  }, []);
+
+  const handleAfterSaleOpen = useCallback((record: OrderRecord) => {
+    if (!can('orders:create')) {
+      MessagePlugin.warning('当前用户没有新增订单权限');
       return;
     }
-    if (record.trackingNumber || record.sfWaybillNo) {
-      MessagePlugin.warning('订单已存在快递单号，请勿重复申请');
+    if (!isAfterSaleEligible(record)) {
+      MessagePlugin.warning('仅已发货的原始租赁2订单可以生成售后订单');
       return;
     }
+    const form = buildAfterSaleForm(record);
+    const virtualOnly = isVirtualProductOrder(form.products);
+    const decision = virtualOnly ? false : null;
+    const normalizedForm = { ...form, needsOutbound: false };
+    const autoOutbound = { ...DEFAULT_AUTO_OUTBOUND };
+    setAfterSaleTarget(record);
+    setAfterSaleForm(normalizedForm);
+    setAfterSaleOutboundDecision(decision);
+    setAfterSaleAutoOutbound(autoOutbound);
+    setAfterSaleRequestId(createAfterSaleRequestId());
+    afterSaleInitialRef.current = serializeAfterSaleDraft(normalizedForm, decision, autoOutbound);
+    setAfterSaleVisible(true);
+  }, [can]);
 
-    setApplyingExpressId(record._id);
-    try {
-      const result = await orders.applySfExpress(record._id);
-      if (result.success) {
-        MessagePlugin.success(`顺丰下单成功，运单号：${result.waybillNo || '-'}`);
-      } else {
-        MessagePlugin.error(result.errMsg || '顺丰下单失败');
-      }
-    } finally {
-      setApplyingExpressId(null);
-    }
-  }, [applyingExpressId, orders]);
+  const isAfterSaleDraftDirty = useCallback(() => {
+    return !!afterSaleInitialRef.current
+      && serializeAfterSaleDraft(afterSaleForm, afterSaleOutboundDecision, afterSaleAutoOutbound) !== afterSaleInitialRef.current;
+  }, [afterSaleForm, afterSaleOutboundDecision, afterSaleAutoOutbound]);
 
-  const handleQuerySfOrderResult = useCallback(async (record: OrderRecord) => {
-    if (!record._id || queryingSfResultId) return;
-
-    setQueryingSfResultId(record._id);
-    try {
-      const result = await orders.querySfOrderResult(record._id);
-      if (result.success) {
-        MessagePlugin.success(`顺丰下单结果已更新，运单号：${result.waybillNo || '-'}`);
-      } else {
-        MessagePlugin.error(result.errMsg || '查询顺丰下单结果失败');
-      }
-    } finally {
-      setQueryingSfResultId(null);
-    }
-  }, [orders, queryingSfResultId]);
-
-  const handleCancelSfExpress = useCallback(async (record: OrderRecord) => {
-    if (!record._id || cancelingSfId) return;
-    if (!record.sfOrderId && !record.sfWaybillNo && !record.trackingNumber) {
-      MessagePlugin.warning('订单缺少顺丰订单信息，无法取消');
+  const handleAfterSaleRequestClose = useCallback(() => {
+    if (afterSaleSaving) return;
+    if (isAfterSaleDraftDirty()) {
+      setAfterSaleCloseConfirmVisible(true);
       return;
     }
-    if (!window.confirm('确认取消这笔顺丰发货吗？取消后的顺丰客户订单号不能重复使用。')) return;
+    resetAfterSaleDialog();
+  }, [afterSaleSaving, isAfterSaleDraftDirty, resetAfterSaleDialog]);
 
-    setCancelingSfId(record._id);
-    try {
-      const result = await orders.cancelSfExpress(record._id);
-      if (result.success) {
-        MessagePlugin.success('顺丰发货已取消');
-      } else {
-        MessagePlugin.error(result.errMsg || '取消顺丰发货失败');
-      }
-    } finally {
-      setCancelingSfId(null);
+  const handleAfterSaleProductsChange = useCallback((products: ProductItem[]) => {
+    const wasVirtual = isVirtualProductOrder(afterSaleForm.products);
+    const virtualOnly = isVirtualProductOrder(products);
+    if (wasVirtual !== virtualOnly) {
+      setAfterSaleOutboundDecision(virtualOnly ? false : null);
+      setAfterSaleAutoOutbound(DEFAULT_AUTO_OUTBOUND);
     }
-  }, [cancelingSfId, orders]);
+    setAfterSaleForm(prev => ({ ...prev, products, needsOutbound: virtualOnly ? false : prev.needsOutbound }));
+  }, [afterSaleForm.products]);
 
-  const handleGenerateOutbound = useCallback(async (record: OrderRecord) => {
-    if (!record._id || generatingOutboundId) return;
+  const handleAfterSaleOutboundDecisionChange = useCallback((value: boolean) => {
+    setAfterSaleOutboundDecision(value);
+    setAfterSaleAutoOutbound(DEFAULT_AUTO_OUTBOUND);
+    setAfterSaleForm(prev => ({ ...prev, needsOutbound: value }));
+  }, []);
 
-    const blockedReason = getGenerateOutboundBlockedReason(record);
-    if (blockedReason) {
-      MessagePlugin.warning(blockedReason);
+  const handleAfterSaleSave = useCallback(async () => {
+    if (!afterSaleTarget || !afterSaleRequestId) return;
+    if (afterSaleForm.products.length === 0) {
+      MessagePlugin.warning('请至少添加一条售后货品');
       return;
     }
-
-    if (!window.confirm(`确认根据订单 #${record.serialNumber || '-'} 生成待出库单吗？`)) return;
-
-    setGeneratingOutboundId(record._id);
-    try {
-      const result = await orders.generateOutbound(record._id);
-      if (result.success) {
-        const outbound = result.data || result.outbound || {};
-        MessagePlugin.success(`出库单生成成功${outbound.outboundNumber ? `：${outbound.outboundNumber}` : ''}`);
-      } else {
-        MessagePlugin.error(result.errMsg || '生成出库单失败');
+    for (let index = 0; index < afterSaleForm.products.length; index += 1) {
+      const product = afterSaleForm.products[index];
+      if (!product.brand || !product.productName || !product.specification) {
+        MessagePlugin.warning(`请补全货品 ${index + 1} 的品牌、名称和规格`);
+        return;
       }
-    } finally {
-      setGeneratingOutboundId(null);
+      if (!Number.isSafeInteger(Number(product.quantity)) || Number(product.quantity) <= 0) {
+        MessagePlugin.warning(`货品 ${index + 1} 数量必须为正整数`);
+        return;
+      }
     }
-  }, [generatingOutboundId, orders]);
 
-  const handleCancelOutbound = useCallback(async (record: OrderRecord) => {
-    if (!record._id || cancelingOutboundId) return;
-
-    if (!canCancelOutbound(record)) {
-      MessagePlugin.warning('该订单当前没有可取消的待出库单');
+    const virtualOnly = isVirtualProductOrder(afterSaleForm.products);
+    if (!virtualOnly && afterSaleOutboundDecision === null) {
+      MessagePlugin.warning('请选择是否需要出库');
       return;
     }
-
-    if (!window.confirm(`确认取消订单 #${record.serialNumber || '-'} 的待出库单吗？`)) return;
-
-    setCancelingOutboundId(record._id);
-    try {
-      const result = await orders.cancelOutbound(record._id, '订单页面手动取消出库');
-      if (result.success) {
-        MessagePlugin.success('已取消出库');
-      } else {
-        MessagePlugin.error(result.errMsg || '取消出库失败');
+    const needsOutbound = virtualOnly ? false : afterSaleOutboundDecision === true;
+    if (needsOutbound) {
+      if (!afterSaleForm.consignee.trim()) { MessagePlugin.warning('请填写收货人名称'); return; }
+      if (!CONSIGNEE_PHONE_PATTERN.test(afterSaleForm.consigneePhone.trim())) {
+        MessagePlugin.warning('收货人电话只能填写 6–20 位数字'); return;
       }
-    } finally {
-      setCancelingOutboundId(null);
+      if (!afterSaleForm.consigneeAddress.trim()) { MessagePlugin.warning('请填写收货人地址'); return; }
+      if (!afterSaleForm.shippingFee) { MessagePlugin.warning('请选择快递方式'); return; }
+      if (afterSaleAutoOutbound.enabled === null) { MessagePlugin.warning('请选择是否自动生成出库单'); return; }
     }
-  }, [cancelingOutboundId, orders]);
+
+    setAfterSaleSaving(true);
+    try {
+      const result = await orders.createAfterSale({
+        sourceOrderId: afterSaleTarget._id,
+        requestId: afterSaleRequestId,
+        products: afterSaleForm.products.map(product => ({
+          brand: product.brand,
+          productName: product.productName,
+          specification: product.specification,
+          quantity: Number(product.quantity),
+          unitPrice: 0,
+          amount: 0,
+        })),
+        needsOutbound,
+        consignee: needsOutbound ? afterSaleForm.consignee.trim() : '',
+        consigneePhone: needsOutbound ? afterSaleForm.consigneePhone.trim() : '',
+        consigneeAddress: needsOutbound ? afterSaleForm.consigneeAddress.trim() : '',
+        shippingFee: needsOutbound ? afterSaleForm.shippingFee : '',
+        customerRemark: afterSaleForm.customerRemark.trim(),
+      });
+      if (!result.success || !result.orderId) {
+        MessagePlugin.error(result.errMsg || '售后订单创建失败');
+        return;
+      }
+
+      MessagePlugin.success(result.duplicated ? '售后订单已创建，本次未重复生成' : '售后订单创建成功');
+      if (needsOutbound && afterSaleAutoOutbound.enabled === true) {
+        const outbound = await orders.generateOutbound(
+          [result.orderId],
+          afterSaleForm.shippingFee,
+          afterSaleForm.customerRemark.trim(),
+        );
+        if (outbound.success) {
+          MessagePlugin.success('已自动生成待出库单');
+        } else {
+          MessagePlugin.warning(`售后订单已创建，但自动生成出库单失败：${outbound.errMsg || '未知错误'}，可稍后手动生成`);
+        }
+      }
+      resetAfterSaleDialog();
+      await orders.fetchRecords(null, orders.filters);
+    } finally {
+      setAfterSaleSaving(false);
+    }
+  }, [
+    afterSaleTarget,
+    afterSaleRequestId,
+    afterSaleForm,
+    afterSaleOutboundDecision,
+    afterSaleAutoOutbound.enabled,
+    orders,
+    resetAfterSaleDialog,
+  ]);
+
+  const handleAfterSaleHistoryOpen = useCallback(async (record: OrderRecord) => {
+    setAfterSaleHistorySource(record);
+    setAfterSaleHistoryRecords([]);
+    setAfterSaleHistoryVisible(true);
+    setAfterSaleHistoryLoading(true);
+    try {
+      const result = await orders.listAfterSales(record._id);
+      if (!result.success) {
+        MessagePlugin.error(result.errMsg || '查询售后记录失败');
+        return;
+      }
+      setAfterSaleHistorySource(result.source || record);
+      setAfterSaleHistoryRecords(result.orders || []);
+    } finally {
+      setAfterSaleHistoryLoading(false);
+    }
+  }, [orders]);
+
+  const handleAfterSaleSourceOpen = useCallback(async (record: OrderRecord) => {
+    const result = await orders.getAfterSaleRelation(record._id);
+    if (!result.success) {
+      MessagePlugin.error(result.errMsg || '查询来源订单失败');
+      return;
+    }
+    if (!result.source) {
+      MessagePlugin.warning(`来源订单已删除，原订单序号为 ${result.sourceSnapshot?.serialNumber || record.afterSaleSourceSerialNumber || '-'}`);
+      return;
+    }
+    setCurrentRecord(result.source);
+    setDetailVisible(true);
+  }, [orders]);
 
   /** 导入 Excel */
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -675,6 +997,27 @@ export function Orders() {
     }
   };
 
+  const handleIntroduction = useCallback(async (record: OrderRecord) => {
+    const text = buildOrderIntroduction(record);
+    setIntroductionText(text);
+    setIntroductionVisible(true);
+    try {
+      await copyText(text);
+      MessagePlugin.success('简介已生成并复制到剪贴板');
+    } catch {
+      MessagePlugin.warning('简介已生成，但自动复制失败，可在预览窗口中重新复制');
+    }
+  }, []);
+
+  const handleCopyIntroduction = useCallback(async () => {
+    try {
+      await copyText(introductionText);
+      MessagePlugin.success('简介已复制到剪贴板');
+    } catch {
+      MessagePlugin.error('复制失败，请检查浏览器剪贴板权限');
+    }
+  }, [introductionText]);
+
   /** 导出 Excel — 打开引导弹窗 */
   const handleExport = () => {
     // 默认日期：当月1号 ~ 今天，最多半年
@@ -688,6 +1031,7 @@ export function Orders() {
     setExportChannels([]);
     setExportSalespersons([]);
     setExportStep(1);
+    exportInitialRef.current = JSON.stringify({ startDate, endDate, channels: [], salespersons: [], step: 1 });
     setExportVisible(true);
   };
 
@@ -764,10 +1108,19 @@ export function Orders() {
     const operatorName = await getCurrentOperatorName();
     const nickname = operatorName || SALESPERSONS[0];
     setAddForm({ ...EMPTY_ORDER, date: dateStr, salesperson: nickname, products: [{ ...EMPTY_PRODUCT }] });
+    setAddNeedsOutboundDecision(null);
+    setAddAutoOutbound(DEFAULT_AUTO_OUTBOUND);
     setAddAttachFiles([]);
     setAddStep(1);
     setAddVisible(true);
   };
+
+  /** 新建订单必须显式确认是否出库；每次改变该决定都重新确认自动生成。 */
+  const handleAddOutboundDecisionChange = useCallback((value: boolean | null) => {
+    setAddNeedsOutboundDecision(value);
+    setAddAutoOutbound(DEFAULT_AUTO_OUTBOUND);
+    setAddForm(prev => applyNeedsOutbound(prev, value === true));
+  }, []);
 
   /** 新增向导 — 下一步校验 */
   const handleAddNext = () => {
@@ -780,6 +1133,7 @@ export function Orders() {
       if (addForm.channelCategory === 'platform' && !addForm.onlineOrderNumber.trim()) { MessagePlugin.warning('平台渠道请填写网店订单号'); return; }
       if (!addForm.orderSource) { MessagePlugin.warning('请选择订单来源'); return; }
       if (!addForm.orderAttribute) { MessagePlugin.warning('请选择订单属性'); return; }
+      if (!addForm.orderType) { MessagePlugin.warning('请选择订单类型'); return; }
       if (!addForm.salesChannel) { MessagePlugin.warning('请选择销售渠道'); return; }
     }
     if (addStep === 3) {
@@ -789,14 +1143,24 @@ export function Orders() {
       if (addForm.products.some(p => !p.specification)) { MessagePlugin.warning('请选择规格'); return; }
       if (addForm.products.some(p => !p.quantity || p.quantity <= 0)) { MessagePlugin.warning('请填写数量'); return; }
       if (addForm.products.some(p => shouldShowProductPaymentFields(addForm.orderSource, addForm.orderType, addForm.orderAttribute, p.brand) && (!p.unitPrice || p.unitPrice <= 0))) { MessagePlugin.warning('请填写单价'); return; }
-      if (addForm.products.some(p => shouldShowProductPaymentFields(addForm.orderSource, addForm.orderType, addForm.orderAttribute, p.brand) && !isPaymentSplitValid(p))) { MessagePlugin.warning('请填写收款账户，并确保收款金额合计等于货品金额'); return; }
+      if (shouldShowOrderPaymentSection(addForm) && !isOrderPaymentValid(addForm)) { MessagePlugin.warning('请填写收款账户，并确保收款金额合计等于订单总金额'); return; }
       if (addForm.products.some(p => p.productName === '部分转租赁2' || p.productName === '全部转租赁2') && addForm.transferProducts.some(t => !t.paidPeriod || t.paidPeriod <= 0)) { MessagePlugin.warning('转租赁2请填写已交租期'); return; }
       if (addForm.products.some(p => p.productName === '部分转租赁2' || p.productName === '全部转租赁2') && addForm.transferProducts.some(t => !t.paidRent || t.paidRent <= 0)) { MessagePlugin.warning('转租赁2请填写已交租金'); return; }
     }
     if (addStep === 4) {
-      const { status } = getEffectiveShipmentFields(addForm);
-      if (status === 'shipped' && !addForm.shippingFee) { MessagePlugin.warning('已发货状态请选择邮寄结算方式'); return; }
-      if (status === 'shipped' && !addForm.trackingNumber) { MessagePlugin.warning('已发货状态请填写物流单号'); return; }
+      const virtualProductOrder = isVirtualProductOrder(addForm.products);
+      if (!virtualProductOrder && addNeedsOutboundDecision === null) {
+        MessagePlugin.warning('请选择是否需要出库'); return;
+      }
+      if (!virtualProductOrder && addNeedsOutboundDecision === true) {
+        if (!addForm.consignee.trim()) { MessagePlugin.warning('请填写收货人名称'); return; }
+        if (!CONSIGNEE_PHONE_PATTERN.test(addForm.consigneePhone.trim())) {
+          MessagePlugin.warning('收货人电话只能填写 6–20 位数字'); return;
+        }
+        if (!addForm.consigneeAddress.trim()) { MessagePlugin.warning('请填写收货人地址'); return; }
+        if (!addForm.shippingFee) { MessagePlugin.warning('请选择快递方式'); return; }
+        if (addAutoOutbound.enabled === null) { MessagePlugin.warning('请选择是否自动生成出库单'); return; }
+      }
     }
     if (addStep === 5) {
       const needReturnStatus = addForm.orderType === 'postRentalShip' || addForm.orderType === 'postRentalReturn';
@@ -816,12 +1180,32 @@ export function Orders() {
         addForm.salesChannel || addForm.channelCategory ||
         addForm.consignee.trim() || addForm.consigneePhone.trim() || addForm.consigneeAddress.trim() ||
         addForm.shippingFee || addForm.trackingNumber.trim() ||
+        addNeedsOutboundDecision !== null || addAutoOutbound.enabled !== null ||
         addForm.customerRemark.trim() ||
         addForm.transferProducts.some(t => t.brand || t.productName || t.specification || t.paidPeriod || t.paidRent) ||
         addAttachFiles.length > 0) return true;
-    // 检查货品是否有数据
-    return addForm.products.some(p => p.brand || p.productName || p.specification || p.quantity || p.unitPrice || p.paymentAccount || normalizePaymentSplits(p).length > 0);
+    // 检查货品/订单收款是否有数据
+    if (addForm.paymentSplits.some(split => split.account || split.amount > 0)) return true;
+    return addForm.products.some(p => p.brand || p.productName || p.specification || p.quantity || p.unitPrice);
   };
+
+  const exportState = JSON.stringify({
+    startDate: exportDateStart,
+    endDate: exportDateEnd,
+    channels: exportChannels,
+    salespersons: exportSalespersons,
+    step: exportStep,
+  });
+  const orderPageDirty = (addVisible && isAddFormDirty())
+    || (editVisible && (JSON.stringify(editForm) !== editInitialRef.current || editAttachFiles.length > 0))
+    || (afterSaleVisible && isAfterSaleDraftDirty())
+    || importPreviewVisible
+    || (exportVisible && !!exportInitialRef.current && exportState !== exportInitialRef.current)
+    || (!!manualTrackingTarget && manualTrackingVisible && (
+      manualTrackingNumber !== (manualTrackingTarget.trackingNumber || '')
+      || manualTrackingShippingFee !== (manualTrackingTarget.shippingFee || 'prepaid')
+    ));
+  useTabDirty(orderPageDirty, '订单管理');
 
   const handleRequestCloseAdd = () => {
     if (isAddFormDirty()) {
@@ -838,6 +1222,8 @@ export function Orders() {
     setAddVisible(false);
     setAddStep(1);
     setAddForm(EMPTY_ORDER);
+    setAddNeedsOutboundDecision(null);
+    setAddAutoOutbound(DEFAULT_AUTO_OUTBOUND);
     setAddAttachFiles([]);
   };
 
@@ -868,8 +1254,8 @@ export function Orders() {
 
       const firstTransfer = addForm.transferProducts[0];
       const shipmentFields = getEffectiveShipmentFields(addForm);
-      const newRecords: OrderRecord[] = addForm.products.map((product, index) => ({
-        _id: `manual_${Date.now()}_${index}`,
+      const newRecord: OrderRecord = {
+        _id: `manual_${Date.now()}`,
         serialNumber,
         date: addForm.date,
         orderSource: addForm.orderSource,
@@ -880,12 +1266,13 @@ export function Orders() {
         channelCategory: addForm.channelCategory,
         onlineOrderNumber: addForm.onlineOrderNumber,
         customerName: addForm.customerName,
-        ...serializeProductForSave(product),
+        products: addForm.products.map(serializeProductForSave),
+        ...serializeOrderPayment(addForm),
         trackingNumber: shipmentFields.trackingNumber,
-        consignee: addForm.consignee,
-        consigneePhone: addForm.consigneePhone,
-        consigneeAddress: addForm.consigneeAddress,
-        shippingFee: shipmentFields.shippingFee,
+        consignee: addForm.needsOutbound ? addForm.consignee.trim() : '',
+        consigneePhone: addForm.needsOutbound ? addForm.consigneePhone.trim() : '',
+        consigneeAddress: addForm.needsOutbound ? addForm.consigneeAddress.trim() : '',
+        shippingFee: addForm.needsOutbound ? shipmentFields.shippingFee : '',
         status: shipmentFields.status,
         customerRemark: addForm.customerRemark,
         transferBrand: firstTransfer?.brand || '',
@@ -897,13 +1284,27 @@ export function Orders() {
         attachments,
         returnStatus: addForm.returnStatus || '',
         returnTrackingNumbers: addForm.returnTrackingNumbers || '',
-      }));
-      const result = await orders.importOrders(newRecords);
+        needsOutbound: addForm.needsOutbound,
+        outboundRecordId: '',
+      };
+      const result = await orders.importOrders([newRecord]);
       if (result.success) {
-        MessagePlugin.success(`新增订单成功，共 ${newRecords.length} 条`);
+        MessagePlugin.success(newRecord.products && newRecord.products.length > 1 ? `新增订单成功，含 ${newRecord.products.length} 条货品` : '新增订单成功');
+        // 勾选了"保存后自动生成待出库单"且订单为待发货时，自动生成；失败不影响订单已创建
+        const newOrderId = result.savedIds?.[0];
+        if (addAutoOutbound.enabled === true && addForm.needsOutbound && newOrderId && isPendingShipmentStatus(shipmentFields.status)) {
+          const gen = await orders.generateOutbound([newOrderId], addForm.shippingFee, addForm.customerRemark.trim());
+          if (gen.success) {
+            MessagePlugin.success('已自动生成待出库单');
+          } else {
+            MessagePlugin.warning(`订单已创建，但自动生成出库单失败：${gen.errMsg || '未知错误'}，可稍后在列表手动生成`);
+          }
+        }
         setAddVisible(false);
         setAddStep(1);
         setAddForm(EMPTY_ORDER);
+        setAddNeedsOutboundDecision(null);
+        setAddAutoOutbound(DEFAULT_AUTO_OUTBOUND);
         setAddAttachFiles([]);
       } else {
         MessagePlugin.error('新增失败: ' + (result.errMsg || '未知错误'));
@@ -917,12 +1318,65 @@ export function Orders() {
 
   /** 编辑订单 */
   const handleEditOpen = useCallback((record: OrderRecord) => {
+    const form = buildEditFormFromRecord(record);
     setEditId(record._id);
     setEditStep(1);
     setEditAttachFiles([]);
-    setEditForm(buildEditFormFromRecord(record));
+    setEditForm(form);
+    editInitialRef.current = JSON.stringify(form);
     setEditVisible(true);
   }, []);
+
+  /** 手工修改订单快递单号（有订单页面访问权限的用户均可操作）。 */
+  const handleManualTrackingOpen = useCallback((record: OrderRecord) => {
+    setManualTrackingTarget(record);
+    setManualTrackingNumber(record.trackingNumber || '');
+    setManualTrackingShippingFee(record.shippingFee || 'prepaid');
+    setManualTrackingVisible(true);
+  }, []);
+
+  const closeManualTrackingDialog = useCallback(() => {
+    if (manualTrackingSaving) return;
+    setManualTrackingVisible(false);
+    setManualTrackingTarget(null);
+    setManualTrackingNumber('');
+    setManualTrackingShippingFee('prepaid');
+  }, [manualTrackingSaving]);
+
+  const handleManualTrackingSave = useCallback(async () => {
+    if (!manualTrackingTarget || manualTrackingSaving) return;
+    const trackingNumber = manualTrackingNumber.trim();
+    if (trackingNumber && !manualTrackingShippingFee) {
+      MessagePlugin.warning('请先选择邮寄结算方式');
+      return;
+    }
+
+    const status = trackingNumber
+      ? 'shipped'
+      : (manualTrackingTarget.needsOutbound === false || manualTrackingTarget.status === 'noShip' ? 'noShip' : 'unshipped');
+
+    setManualTrackingSaving(true);
+    try {
+      const success = await orders.updateOrder(manualTrackingTarget._id, {
+        trackingNumber,
+        shippingFee: status === 'noShip' ? '' : manualTrackingShippingFee,
+        status,
+      });
+      if (!success) {
+        MessagePlugin.error('快递单号修改失败');
+        return;
+      }
+      MessagePlugin.success(trackingNumber ? '快递单号已更新，订单已标记为已发货' : '快递单号已清空');
+      setManualTrackingVisible(false);
+      setManualTrackingTarget(null);
+      setManualTrackingNumber('');
+      setManualTrackingShippingFee('prepaid');
+    } catch (err) {
+      MessagePlugin.error('快递单号修改异常: ' + String(err));
+    } finally {
+      setManualTrackingSaving(false);
+    }
+  }, [manualTrackingNumber, manualTrackingSaving, manualTrackingShippingFee, manualTrackingTarget, orders]);
 
   const findOutboundRecords = useCallback(async (consignee: string) => {
     const keyword = consignee.trim();
@@ -933,7 +1387,6 @@ export function Orders() {
       data: {
         type: 'outbound',
         customerName: keyword,
-        outboundStatus: 'completed',
         limit: 20,
         cursor: null,
         currentUser,
@@ -944,8 +1397,38 @@ export function Orders() {
     }
 
     return (result.data || [])
-      .filter(item => item.trackingNumber && resolveOutboundStatus(item) === 'completed')
+      .filter(item => item.trackingNumber)
       .sort((a, b) => Number(b.customerName === keyword) - Number(a.customerName === keyword));
+  }, []);
+
+  /** 查看订单关联的出库单 */
+  const handleViewOutbound = useCallback(async (record: OrderRecord) => {
+    const outboundId = record.outboundRecordId;
+    if (!outboundId) {
+      MessagePlugin.warning('该订单暂无关联出库单');
+      return;
+    }
+    setOutboundDetailVisible(true);
+    setOutboundDetailLoading(true);
+    setOutboundDetail(null);
+    try {
+      const currentUser = await getCurrentPermissionUserPayload().catch(() => null);
+      const result = await callFunction<{ success?: boolean; data?: OutboundRecord[]; errMsg?: string }>('queryRecords', {
+        data: { type: 'outbound', _id: outboundId, limit: 1, cursor: null, currentUser },
+      });
+      if (result.success === false) {
+        throw new Error(result.errMsg || '查询出库单失败');
+      }
+      const detail = (result.data || [])[0] || null;
+      setOutboundDetail(detail);
+      if (!detail) {
+        MessagePlugin.warning('关联的出库单不存在（可能已被删除）');
+      }
+    } catch (err) {
+      MessagePlugin.error('查询出库单失败: ' + String(err));
+    } finally {
+      setOutboundDetailLoading(false);
+    }
   }, []);
 
   const handleShipOpen = useCallback(async (record: OrderRecord) => {
@@ -977,6 +1460,52 @@ export function Orders() {
       setShipLoading(false);
     }
   }, [findOutboundRecords]);
+
+  const openGenerateDialog = useCallback((records: OrderRecord[]) => {
+    setGenOutOrders(records);
+    setGenOutShippingMethod(records[0]?.shippingFee || 'prepaid');
+    // 客服备注带入出库备注（多订单去重拼接），可编辑
+    setGenOutRemark(mergeCustomerRemarks(records));
+    setGenOutVisible(true);
+  }, []);
+
+  const handleGenerateOutboundOpen = useCallback((record: OrderRecord) => {
+    openGenerateDialog([record]);
+  }, [openGenerateDialog]);
+
+  // 合并多订单生成一个出库单：校验同收件信息、均需出库、均未生成、均待发货
+  const handleMergeGenerateOpen = useCallback(() => {
+    const selected = orders.getAllRecords().filter(r => selectedRowKeys.includes(r._id));
+    if (selected.length < 2) { MessagePlugin.warning('请至少选择 2 条订单合并'); return; }
+    const bad = selected.find(r => !r.needsOutbound || !isPendingShipmentStatus(r.status) || r.outboundRecordId);
+    if (bad) { MessagePlugin.warning('所选订单须均为「需要出库 + 未发货 + 未生成出库单」'); return; }
+    const recipientKey = [selected[0].consignee, selected[0].consigneePhone, selected[0].consigneeAddress]
+      .map(value => String(value || '').trim()).join('|');
+    if (!selected.every(r => [r.consignee, r.consigneePhone, r.consigneeAddress]
+      .map(value => String(value || '').trim()).join('|') === recipientKey)) {
+      MessagePlugin.warning('合并的订单必须使用相同的收件人、电话和地址'); return;
+    }
+    openGenerateDialog(selected);
+  }, [orders, selectedRowKeys, openGenerateDialog]);
+
+  const handleConfirmGenerateOutbound = useCallback(async () => {
+    if (genOutOrders.length === 0) return;
+    if (!genOutShippingMethod) { MessagePlugin.warning('请选择快递方式'); return; }
+    setGenOutSubmitting(true);
+    try {
+      const result = await orders.generateOutbound(genOutOrders.map(o => o._id), genOutShippingMethod, genOutRemark);
+      if (result.success) {
+        MessagePlugin.success(genOutOrders.length > 1 ? '已合并生成待出库单' : '已生成待出库单');
+        setGenOutVisible(false);
+        setGenOutOrders([]);
+        setSelectedRowKeys([]);
+      } else {
+        MessagePlugin.error(result.errMsg || '生成出库单失败');
+      }
+    } finally {
+      setGenOutSubmitting(false);
+    }
+  }, [genOutOrders, genOutShippingMethod, genOutRemark, orders]);
 
   const handleSelectShipRecord = useCallback((record: OutboundRecord) => {
     if (!record.trackingNumber) {
@@ -1153,6 +1682,7 @@ export function Orders() {
       if (editForm.channelCategory === 'platform' && !editForm.onlineOrderNumber.trim()) { MessagePlugin.warning('平台渠道请填写网店订单号'); return; }
       if (!editForm.orderSource) { MessagePlugin.warning('请选择订单来源'); return; }
       if (!editForm.orderAttribute) { MessagePlugin.warning('请选择订单属性'); return; }
+      if (!editForm.orderType) { MessagePlugin.warning('请选择订单类型'); return; }
       if (!editForm.salesChannel) { MessagePlugin.warning('请选择销售渠道'); return; }
     }
     if (editStep === 3) {
@@ -1162,15 +1692,13 @@ export function Orders() {
       if (editForm.products.some(p => !p.specification)) { MessagePlugin.warning('请选择规格'); return; }
       if (editForm.products.some(p => !p.quantity || p.quantity <= 0)) { MessagePlugin.warning('请填写数量'); return; }
       if (editForm.products.some(p => shouldShowProductPaymentFields(editForm.orderSource, editForm.orderType, editForm.orderAttribute, p.brand) && (!p.unitPrice || p.unitPrice <= 0))) { MessagePlugin.warning('请填写单价'); return; }
-      if (editForm.products.some(p => shouldShowProductPaymentFields(editForm.orderSource, editForm.orderType, editForm.orderAttribute, p.brand) && !isPaymentSplitValid(p))) { MessagePlugin.warning('请填写收款账户，并确保收款金额合计等于货品金额'); return; }
+      if (shouldShowOrderPaymentSection(editForm) && !isOrderPaymentValid(editForm)) { MessagePlugin.warning('请填写收款账户，并确保收款金额合计等于订单总金额'); return; }
       const editHasTransfer = editForm.products.some(p => p.productName === '部分转租赁2' || p.productName === '全部转租赁2');
       if (editHasTransfer && editForm.transferProducts.some(t => !t.paidPeriod || t.paidPeriod <= 0)) { MessagePlugin.warning('转租赁2请填写已交租期'); return; }
       if (editHasTransfer && editForm.transferProducts.some(t => !t.paidRent || t.paidRent <= 0)) { MessagePlugin.warning('转租赁2请填写已交租金'); return; }
     }
     if (editStep === 4) {
       const { status } = getEffectiveShipmentFields(editForm);
-      if (status === 'shipped' && !editForm.shippingFee) { MessagePlugin.warning('已发货状态请选择邮寄结算方式'); return; }
-      if (status === 'shipped' && !editForm.trackingNumber) { MessagePlugin.warning('已发货状态请填写物流单号'); return; }
     }
     if (editStep === 5) {
       const needReturnStatus = editForm.orderType === 'postRentalShip' || editForm.orderType === 'postRentalReturn';
@@ -1199,7 +1727,7 @@ export function Orders() {
 
       const firstTransfer = editForm.transferProducts[0];
       const shipmentFields = getEffectiveShipmentFields(editForm);
-      const buildFlatData = (product: ProductItem): Omit<OrderRecord, '_id' | 'createTime'> => ({
+      const updateData: Omit<OrderRecord, '_id' | 'createTime'> = {
         serialNumber: editForm.serialNumber,
         date: editForm.date,
         orderSource: editForm.orderSource,
@@ -1210,7 +1738,15 @@ export function Orders() {
         channelCategory: editForm.channelCategory,
         onlineOrderNumber: editForm.onlineOrderNumber,
         customerName: editForm.customerName,
-        ...serializeProductForSave(product),
+        products: editForm.products.map(serializeProductForSave),
+        // 收款在订单级；清空旧扁平货品字段，避免与 products 并存产生歧义
+        ...serializeOrderPayment(editForm),
+        brand: '',
+        productName: '',
+        specification: '',
+        quantity: 0,
+        unitPrice: 0,
+        amount: 0,
         trackingNumber: shipmentFields.trackingNumber,
         consignee: editForm.consignee,
         consigneePhone: editForm.consigneePhone,
@@ -1227,25 +1763,12 @@ export function Orders() {
         attachments: allAttachments,
         returnStatus: editForm.returnStatus || '',
         returnTrackingNumbers: editForm.returnTrackingNumbers || '',
-      });
+        needsOutbound: editForm.needsOutbound,
+      };
 
-      const flatData = buildFlatData(editForm.products[0] || EMPTY_PRODUCT);
-      const success = await orders.updateOrder(editId, flatData);
+      const success = await orders.updateOrder(editId, updateData);
       if (success) {
-        const extraProducts = editForm.products.slice(1);
-        if (extraProducts.length > 0) {
-          const timestamp = Date.now();
-          const extraRecords: OrderRecord[] = extraProducts.map((product, index) => ({
-            _id: `manual_${timestamp}_${index}`,
-            ...buildFlatData(product),
-          }));
-          const result = await orders.importOrders(extraRecords);
-          if (!result.success) {
-            MessagePlugin.error('主订单已修改，但新增货品保存失败: ' + (result.errMsg || '未知错误'));
-            return;
-          }
-        }
-        MessagePlugin.success(extraProducts.length > 0 ? `修改订单成功，并新增 ${extraProducts.length} 条货品记录` : '修改订单成功');
+        MessagePlugin.success('修改订单成功');
         setEditVisible(false);
         setEditStep(1);
         setEditAttachFiles([]);
@@ -1285,16 +1808,19 @@ export function Orders() {
   };
 
   const columns = useMemo(() => [
+    { colKey: 'row-select', type: 'multiple' as const, width: 46 },
     { colKey: 'serialNumber', title: '序号', width: 60 },
     { colKey: 'date', title: '日期', width: 100, cell: ({ row }: { row: OrderRecord }) => formatDate(row.date, false) },
     { colKey: 'orderType', title: '订单类型', width: 90, cell: ({ row }: { row: OrderRecord }) => getDictLabel(ORDER_TYPE_MAP, row.orderType) || '-' },
     {
       colKey: 'importSource', title: '订单来源', width: 90,
-      cell: ({ row }: { row: OrderRecord }) => (
-        row.importSource === 'hc-order-assist'
-          ? <Tag theme="primary" variant="light">赞晨租</Tag>
-          : <span>手工</span>
-      ),
+      cell: ({ row }: { row: OrderRecord }) => {
+        if (row.importSource === 'manual-after-sale' || row.importSource === 'hc-order-assist-after-sale') {
+          return <Tag theme="warning" variant="light">售后</Tag>;
+        }
+        if (row.importSource === 'hc-order-assist') return <Tag theme="primary" variant="light">赞晨租</Tag>;
+        return <span>手工</span>;
+      },
     },
     { colKey: 'salesChannel', title: '销售渠道', width: 90, cell: ({ row }: { row: OrderRecord }) => getDictLabel(SALES_CHANNEL_MAP, row.salesChannel) || '-' },
     { colKey: 'salesperson', title: '人员', width: 60, cell: ({ row }: { row: OrderRecord }) => row.salesperson || '-' },
@@ -1304,85 +1830,56 @@ export function Orders() {
     {
       colKey: 'productInfo', title: '货品名称/规格', width: 160,
       cell: ({ row }: { row: OrderRecord }) => {
-        const name = row.productName || '';
-        const spec = row.specification && row.specification !== '默认' ? ` ${row.specification}` : '';
-        return name ? `${getProductLabel(name)}${spec}` : '-';
+        const items = getOrderProducts(row).filter(item => item.productName || item.brand);
+        if (items.length === 0) return '-';
+        return (
+          <div>
+            {items.map((item, index) => {
+              const spec = item.specification && item.specification !== '默认' ? ` ${item.specification}` : '';
+              const label = item.productName ? `${getProductLabel(item.productName)}${spec}` : getBrandLabel(item.brand);
+              return <div key={index} className="truncate">{label || '-'}</div>;
+            })}
+          </div>
+        );
       },
     },
-    { colKey: 'quantity', title: '数量', width: 60, cell: ({ row }: { row: OrderRecord }) => row.quantity || '-' },
-    { colKey: 'amount', title: '金额', width: 80, cell: ({ row }: { row: OrderRecord }) => row.amount ? `¥${row.amount}` : '-' },
+    { colKey: 'quantity', title: '数量', width: 60, cell: ({ row }: { row: OrderRecord }) => getOrderTotalQuantity(row) || '-' },
+    { colKey: 'amount', title: '金额', width: 80, cell: ({ row }: { row: OrderRecord }) => { const total = getOrderTotalAmount(row); return total ? `¥${total}` : '-'; } },
     {
       colKey: 'status', title: '订单状态', width: 80,
       cell: ({ row }: { row: OrderRecord }) => {
         const theme = STATUS_TAG_THEME[row.status] || 'default';
-        return <Tag theme={theme} variant="light">{getDictLabel(ORDER_STATUS_MAP, row.status) || '--'}</Tag>;
-      },
-    },
-    {
-      colKey: 'outboundSyncStatus', title: '出库状态', width: 90,
-      cell: ({ row }: { row: OrderRecord }) => {
-        const status = resolveOutboundSyncStatus(row);
-        return <Tag theme={getOutboundSyncStatusTheme(status)} variant="light">{OUTBOUND_SYNC_STATUS_MAP[status]}</Tag>;
-      },
-    },
-    {
-      colKey: 'op', title: '操作', width: 390, fixed: 'right' as const,
-      cell: ({ row }: { row: OrderRecord }) => {
-        const hasOutbound = !!(row.linkedOutboundId || row.linkedOutboundNumber);
+        const isUnreceived = hasUnreceivedPayment(row);
+        const isUnreturned = row.returnStatus === 'notReturned' || row.returnStatus === 'inTransit';
         return (
+          <div>
+            <StatusPill theme={theme} label={getDictLabel(ORDER_STATUS_MAP, row.status) || '--'} />
+            {isUnreceived && (
+              <div className="mt-1 flex items-center gap-1 text-[11px] text-red-600">
+                <span className="w-1 h-1 rounded-full bg-red-600" />未收款
+              </div>
+            )}
+            {isUnreturned && (
+              <div className="mt-1 flex items-center gap-1 text-[11px] text-red-600">
+                <span className="w-1 h-1 rounded-full bg-red-600" />未退回
+              </div>
+            )}
+          </div>
+        );
+      },
+    },
+    {
+      colKey: 'op', title: '操作', width: 240, fixed: 'right' as const,
+      cell: ({ row }: { row: OrderRecord }) => (
         <div className="flex gap-1 flex-wrap">
           <Button variant="text" theme="primary" size="small"
             onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleDetail(row); }}>
             详情
           </Button>
-          {false && isExpressApplicableStatus(row.status) && row.expressApplyStatus !== 'cancelled' && (
+          {row.needsOutbound && isPendingShipmentStatus(row.status) && !row.outboundRecordId && (
             <Button variant="text" theme="primary" size="small"
-              loading={applyingExpressId === row._id}
-              disabled={!!applyingExpressId && applyingExpressId !== row._id}
-              onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleApplyExpress(row); }}>
-              申请快递
-            </Button>
-          )}
-          {false && !row.trackingNumber && !['applied', 'cancelled'].includes(row.expressApplyStatus || '') && (
-            <Button variant="text" theme="primary" size="small"
-              loading={queryingSfResultId === row._id}
-              disabled={!!queryingSfResultId && queryingSfResultId !== row._id}
-              onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleQuerySfOrderResult(row); }}>
-              查顺丰
-            </Button>
-          )}
-          {row.expressApplyStatus === 'applied' && (row.sfOrderId || row.sfWaybillNo || row.trackingNumber) && (
-            <Button variant="text" theme="danger" size="small"
-              loading={cancelingSfId === row._id}
-              disabled={!!cancelingSfId && cancelingSfId !== row._id}
-              onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleCancelSfExpress(row); }}>
-              取消顺丰
-            </Button>
-          )}
-          <Button variant="text" theme="primary" size="small"
-            onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleEditOpen(row); }}>
-            编辑
-          </Button>
-          <Button
-            variant="text"
-            theme="primary"
-            size="small"
-            loading={generatingOutboundId === row._id}
-            disabled={hasOutbound || (!!generatingOutboundId && generatingOutboundId !== row._id)}
-            onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleGenerateOutbound(row); }}
-          >
-            {hasOutbound ? '已生成' : '生成出库'}
-          </Button>
-          {canCancelOutbound(row) && (
-            <Button
-              variant="text"
-              theme="danger"
-              size="small"
-              loading={cancelingOutboundId === row._id}
-              disabled={!!cancelingOutboundId && cancelingOutboundId !== row._id}
-              onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleCancelOutbound(row); }}
-            >
-              取消出库
+              onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleGenerateOutboundOpen(row); }}>
+              生成出库单
             </Button>
           )}
           {isPendingShipmentStatus(row.status) && (
@@ -1391,21 +1888,38 @@ export function Orders() {
               发货
             </Button>
           )}
-          {shouldShowAfterSaleInboundConfirm(row) && (
+          <Dropdown
+            trigger="hover"
+            options={[
+              { content: '简介', value: 'introduction' },
+              { content: '编辑', value: 'edit' },
+              ...(isAfterSaleEligible(row) && can('orders:create') ? [{ content: '生成售后订单', value: 'createAfterSale' }] : []),
+              ...(isAfterSaleEligible(row) ? [{ content: '售后记录', value: 'afterSaleHistory' }] : []),
+              { content: '修改快递单号', value: 'manualTracking' },
+              ...(row.outboundRecordId ? [{ content: '出库单', value: 'viewOutbound' }] : []),
+              ...(shouldShowAfterSaleInboundConfirm(row) ? [{ content: '售后回库确认', value: 'afterSaleInbound' }] : []),
+              { content: '删除', value: 'delete', theme: 'error' as const },
+            ]}
+            onClick={(item: DropdownOption) => {
+              if (item.value === 'introduction') handleIntroduction(row);
+              if (item.value === 'edit') handleEditOpen(row);
+              if (item.value === 'createAfterSale') handleAfterSaleOpen(row);
+              if (item.value === 'afterSaleHistory') handleAfterSaleHistoryOpen(row);
+              if (item.value === 'manualTracking') handleManualTrackingOpen(row);
+              if (item.value === 'viewOutbound') handleViewOutbound(row);
+              if (item.value === 'afterSaleInbound') handleAfterSaleInboundOpen(row);
+              if (item.value === 'delete') handleDeleteConfirm(row);
+            }}
+          >
             <Button variant="text" theme="primary" size="small"
-              onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleAfterSaleInboundOpen(row); }}>
-              售后回库确认
+              onClick={(e: React.MouseEvent) => e.stopPropagation()}>
+              更多
             </Button>
-          )}
-          <Button variant="text" theme="danger" size="small"
-            onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleDeleteConfirm(row); }}>
-            删除
-          </Button>
+          </Dropdown>
         </div>
-        );
-      },
+      ),
     },
-  ], [handleDetail, handleApplyExpress, handleQuerySfOrderResult, handleCancelSfExpress, handleEditOpen, handleGenerateOutbound, handleCancelOutbound, handleShipOpen, handleAfterSaleInboundOpen, handleDeleteConfirm, applyingExpressId, queryingSfResultId, cancelingSfId, generatingOutboundId, cancelingOutboundId]);
+  ], [handleDetail, handleViewOutbound, handleIntroduction, handleEditOpen, handleAfterSaleOpen, handleAfterSaleHistoryOpen, handleManualTrackingOpen, handleShipOpen, handleGenerateOutboundOpen, handleAfterSaleInboundOpen, handleDeleteConfirm, can, ORDER_TYPE_MAP, SALES_CHANNEL_MAP, ORDER_ATTRIBUTE_MAP, ORDER_STATUS_MAP]);
 
   const displayRecords = orders.getPageRecords(orders.currentPage);
   const hasLoadedNextPage = orders.currentPage * PAGE_SIZE < orders.records.length;
@@ -1428,7 +1942,12 @@ export function Orders() {
           <h1 className="text-2xl font-semibold text-gray-800">订单管理</h1>
           <p className="text-gray-500 mt-1">管理所有订单</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap justify-end gap-2">
+          {selectedRowKeys.length >= 2 && (
+            <Button theme="primary" variant="outline" onClick={handleMergeGenerateOpen}>
+              合并生成出库单（{selectedRowKeys.length}）
+            </Button>
+          )}
           <Button theme="primary" icon={<Plus size={16} />} onClick={handleAddOpen}>
             新增订单
           </Button>
@@ -1441,75 +1960,116 @@ export function Orders() {
             aria-label="导入订单 Excel"
             onChange={handleFileSelect}
           />
-          <Button theme="default" icon={<Upload size={16} />} onClick={() => fileInputRef.current?.click()}>
-            导入Excel
-          </Button>
-          <Button theme="default" icon={<Download size={16} />} onClick={handleExport}>
-            导出Excel
-          </Button>
+          <Dropdown
+            options={[
+              { content: '导入 Excel', value: 'import' },
+              { content: '导出 Excel', value: 'export' },
+            ]}
+            onClick={(item: DropdownOption) => {
+              if (item.value === 'import') fileInputRef.current?.click();
+              else handleExport();
+            }}
+          >
+            <Button theme="default" icon={<Upload size={16} />}>导入 / 导出</Button>
+          </Dropdown>
         </div>
       </div>
 
       {/* 筛选栏 */}
-      <div className="glass-card p-4">
-        <div className="flex flex-wrap gap-3 items-end">
-          <div className="w-48">
+      <div className="glass-card p-4 order-filter-panel">
+        <div className="grid grid-cols-1 items-end gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(19rem,1.5fr)_auto]">
+          <div className="min-w-0">
             <label className="block text-xs text-gray-500 mb-1">网店订单号</label>
             <Input placeholder="请输入网店订单号" value={filters.onlineOrderNumber || ''}
               onChange={(val) => setFilters(prev => ({ ...prev, onlineOrderNumber: val as string }))} />
           </div>
-          <div className="w-48">
+          <div className="min-w-0">
             <label className="block text-xs text-gray-500 mb-1">客户名称</label>
             <Input placeholder="请输入客户名称" value={filters.customerName || ''}
               onChange={(val) => setFilters(prev => ({ ...prev, customerName: val as string }))} />
           </div>
-          <div className="w-40">
-            <label className="block text-xs text-gray-500 mb-1">人员</label>
-            <Select placeholder="请选择人员" value={filters.salesperson || ''}
-              onChange={(val) => setFilters(prev => ({ ...prev, salesperson: val as string }))}
-              options={FILTER_SALESPERSON_OPTIONS} />
-          </div>
-          <div className="w-40">
-            <label className="block text-xs text-gray-500 mb-1">订单类型</label>
-            <Select placeholder="请选择订单类型" value={filters.orderType || ''}
-              onChange={(val) => setFilters(prev => ({ ...prev, orderType: val as string }))}
-              options={ORDER_TYPE_OPTIONS} />
-          </div>
-          <div className="w-40">
-            <label className="block text-xs text-gray-500 mb-1">订单状态</label>
-            <Select placeholder="请选择订单状态" value={filters.status || ''}
-              onChange={(val) => setFilters(prev => ({ ...prev, status: val as string }))}
-              options={FILTER_ORDER_STATUS_OPTIONS} />
-          </div>
-          <div className="w-40">
+          <div className="min-w-0 sm:col-span-2 xl:col-span-1">
             <label className="block text-xs text-gray-500 mb-1">日期</label>
-            <input type="date" className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-blue-500"
-              value={filters.startDate || ''}
-              onChange={(e) => setFilters(prev => ({ ...prev, startDate: e.target.value }))} />
+            <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-1">
+              <input type="date" className="order-filter-date-input w-full min-w-0 px-3 border border-gray-300 text-sm focus:outline-none focus:border-blue-500"
+                aria-label="开始日期" title="开始日期"
+                value={filters.startDate || ''}
+                onChange={(e) => setFilters(prev => ({ ...prev, startDate: e.target.value }))} />
+              <span className="text-gray-400 text-xs">至</span>
+              <input type="date" className="order-filter-date-input w-full min-w-0 px-3 border border-gray-300 text-sm focus:outline-none focus:border-blue-500"
+                aria-label="结束日期" title="结束日期"
+                value={filters.endDate || ''}
+                onChange={(e) => setFilters(prev => ({ ...prev, endDate: e.target.value }))} />
+            </div>
           </div>
-          <div className="flex items-end gap-2">
+          <div className="flex flex-wrap items-end gap-2 sm:col-span-2 xl:col-span-1 xl:justify-end xl:flex-nowrap">
             <Button theme="primary" icon={<Search size={16} />} onClick={handleSearch}>查询</Button>
             <Button variant="outline" icon={<RotateCcw size={16} />} onClick={handleReset}>重置</Button>
+            <Button variant="text" theme="primary" onClick={() => setShowMoreFilters(v => !v)}>
+              {showMoreFilters ? '收起筛选 ▴' : `更多筛选${moreFilterCount > 0 ? `(${moreFilterCount})` : ''} ▾`}
+            </Button>
           </div>
         </div>
+
+        {showMoreFilters && (
+          <div className="flex flex-wrap gap-3 items-end mt-3 pt-3 border-t border-dashed border-gray-200">
+            <div className="w-40">
+              <label className="block text-xs text-gray-500 mb-1">序号</label>
+              <Input type="number" placeholder="请输入序号" value={filters.serialNumber || ''}
+                onChange={(val) => setFilters(prev => ({ ...prev, serialNumber: val as string }))} />
+            </div>
+            <div className="w-40">
+              <label className="block text-xs text-gray-500 mb-1">人员</label>
+              <Select placeholder="请选择人员" value={filters.salesperson || ''}
+                onChange={(val) => setFilters(prev => ({ ...prev, salesperson: val as string }))}
+                options={FILTER_SALESPERSON_OPTIONS} />
+            </div>
+            <div className="w-40">
+              <label className="block text-xs text-gray-500 mb-1">订单类型</label>
+              <Select placeholder="请选择订单类型" value={filters.orderType || ''}
+                onChange={(val) => setFilters(prev => ({ ...prev, orderType: val as string }))}
+                options={ORDER_TYPE_OPTIONS} />
+            </div>
+            <div className="w-40">
+              <label className="block text-xs text-gray-500 mb-1">订单状态</label>
+              <Select placeholder="请选择订单状态" value={filters.status || ''}
+                onChange={(val) => setFilters(prev => ({ ...prev, status: val as string }))}
+                options={FILTER_ORDER_STATUS_OPTIONS} />
+            </div>
+            <div className="w-40">
+              <label className="block text-xs text-gray-500 mb-1">异常状态</label>
+              <Select placeholder="请选择异常状态" value={filters.abnormalStatus || ''}
+                onChange={(val) => setFilters(prev => ({ ...prev, abnormalStatus: val as string }))}
+                options={[
+                  { label: '全部', value: '' },
+                  { label: '未收款', value: 'unreceived' },
+                  { label: '未退回入库', value: 'unreturned' },
+                ]} />
+            </div>
+          </div>
+        )}
       </div>
 
       {/* 表格 */}
-      <div className="glass-card">
-        <Table
-          data={displayRecords}
-          columns={columns}
-          loading={orders.loading}
-          rowKey="_id"
-          tableLayout="fixed"
-          hover
-          stripe
-          rowClassName={({ row }: { row: OrderRecord }) => {
-            const isUnreceived = hasUnreceivedPayment(row);
-            const isUnreturned = row.returnStatus === 'notReturned' || row.returnStatus === 'inTransit';
-            return (isUnreceived || isUnreturned) ? 'order-row-unreceived' : '';
-          }}
-        />
+      <div className="glass-card min-w-0 overflow-hidden">
+        <div className="max-w-full overflow-x-auto">
+          <Table
+            data={displayRecords}
+            columns={columns}
+            loading={orders.loading}
+            rowKey="_id"
+            tableLayout="fixed"
+            selectedRowKeys={selectedRowKeys}
+            onSelectChange={(keys: Array<string | number>) => setSelectedRowKeys(keys)}
+            hover
+            stripe
+            rowClassName={({ row }: { row: OrderRecord }) => {
+              const isUnreceived = hasUnreceivedPayment(row);
+              const isUnreturned = row.returnStatus === 'notReturned' || row.returnStatus === 'inTransit';
+              return (isUnreceived || isUnreturned) ? 'order-row-unreceived' : '';
+            }}
+          />
+        </div>
         {/* 分页 */}
         <div className="flex justify-center items-center gap-2 py-4 border-t border-gray-100">
           <Button size="small" variant="outline" disabled={orders.currentPage <= 1}
@@ -1525,6 +2085,24 @@ export function Orders() {
         </div>
       </div>
 
+      {/* 简介预览弹窗 */}
+      <Dialog
+        header="简介预览"
+        visible={introductionVisible}
+        onClose={() => setIntroductionVisible(false)}
+        width="620px"
+        footer={(
+          <div className="flex justify-end gap-2">
+            <Button onClick={() => setIntroductionVisible(false)}>关闭</Button>
+            <Button theme="primary" onClick={handleCopyIntroduction}>复制简介</Button>
+          </div>
+        )}
+      >
+        <pre className="min-h-40 whitespace-pre-wrap break-words rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm leading-7 text-gray-800 select-text">
+          {introductionText}
+        </pre>
+      </Dialog>
+
       {/* 详情弹窗 */}
       <Dialog header="订单详情" visible={detailVisible} onClose={() => setDetailVisible(false)} width="700px"
         footer={<Button onClick={() => setDetailVisible(false)}>关闭</Button>}>
@@ -1532,40 +2110,59 @@ export function Orders() {
           <div className="space-y-2 text-sm">
             <DetailRow label="序号" value={currentRecord.serialNumber} />
             <DetailRow label="日期" value={formatDate(currentRecord.date, false)} />
-            <DetailRow label="订单来源" value={currentRecord.orderSource} />
-            <DetailRow label="订单属性" value={currentRecord.orderAttribute} />
-            <DetailRow label="订单类型" value={currentRecord.orderType} />
-            <DetailRow label="销售渠道" value={currentRecord.salesChannel} />
-            <DetailRow label="人员" value={currentRecord.salesperson} />
-            <DetailRow label="渠道类别" value={currentRecord.channelCategory} />
+            <DetailRow label="订单来源" value={getDictLabel(ORDER_SOURCE_MAP, currentRecord.orderSource)} />
+            <DetailRow label="订单属性" value={getDictLabel(ORDER_ATTRIBUTE_MAP, currentRecord.orderAttribute)} />
+            <DetailRow label="订单类型" value={getDictLabel(ORDER_TYPE_MAP, currentRecord.orderType)} />
+            {currentRecord.afterSaleSourceOrderId && (
+              <DetailRow
+                label="来源订单"
+                value={(
+                  <Button
+                    variant="text"
+                    theme="primary"
+                    size="small"
+                    onClick={() => handleAfterSaleSourceOpen(currentRecord)}
+                  >
+                    序号 {currentRecord.afterSaleSourceSerialNumber || '-'}
+                  </Button>
+                )}
+              />
+            )}
+            <DetailRow label="销售渠道" value={getDictLabel(SALES_CHANNEL_MAP, currentRecord.salesChannel)} />
+            <DetailRow label="人员" value={dictionaries.getLabel(DICT_CODES.salesperson, currentRecord.salesperson)} />
+            <DetailRow label="渠道类别" value={getDictLabel(CHANNEL_CATEGORY_MAP, currentRecord.channelCategory)} />
             {currentRecord.channelCategory === 'platform' && <DetailRow label="网店订单号" value={currentRecord.onlineOrderNumber} />}
-            <DetailRow label="品牌" value={getBrandLabel(currentRecord.brand)} />
-            <DetailRow label="货品名称" value={getProductLabel(currentRecord.productName)} />
-            <DetailRow label="规格" value={currentRecord.specification} />
-            <DetailRow label="数量" value={currentRecord.quantity} />
-            {shouldShowProductPaymentFields(currentRecord.orderSource, currentRecord.orderType, currentRecord.orderAttribute, currentRecord.brand) && <DetailRow label="单价" value={currentRecord.unitPrice ? `¥${currentRecord.unitPrice}` : '-'} />}
-            {shouldShowProductPaymentFields(currentRecord.orderSource, currentRecord.orderType, currentRecord.orderAttribute, currentRecord.brand) && <DetailRow label="金额" value={currentRecord.amount ? `¥${currentRecord.amount}` : '-'} />}
-            {shouldShowProductPaymentFields(currentRecord.orderSource, currentRecord.orderType, currentRecord.orderAttribute, currentRecord.brand) && <DetailRow label="收款账户" value={formatPaymentSplits(currentRecord)} />}
+            {getOrderProducts(currentRecord).map((product, index, items) => {
+              const showPayment = shouldShowProductPaymentFields(currentRecord.orderSource, currentRecord.orderType, currentRecord.orderAttribute, product.brand);
+              return (
+                <div key={index} className={items.length > 1 ? 'border-l-2 border-green-300 pl-3 my-1' : ''}>
+                  {items.length > 1 && <div className="text-xs text-green-600 font-medium mb-1">货品 {index + 1}</div>}
+                  <DetailRow label="品牌" value={getBrandLabel(product.brand)} />
+                  <DetailRow label="货品名称" value={getProductLabel(product.productName)} />
+                  <DetailRow label="规格" value={product.specification} />
+                  <DetailRow label="数量" value={product.quantity} />
+                  {showPayment && <DetailRow label="单价" value={product.unitPrice ? `¥${product.unitPrice}` : '-'} />}
+                  {showPayment && <DetailRow label="金额" value={product.amount ? `¥${product.amount}` : '-'} />}
+                </div>
+              );
+            })}
+            {/* 收款在订单级；旧数据货品级收款由 getOrderPaymentSplits 自动折算展示 */}
+            {shouldShowOrderPaymentSection({ ...currentRecord, products: getOrderProducts(currentRecord) }) && (() => {
+              const splits = getOrderPaymentSplits(currentRecord);
+              const text = splits.length === 0
+                ? '-'
+                : splits.length === 1
+                  ? (splits[0].account || '-')
+                  : splits.map(split => `${split.account || '-'} ¥${split.amount || 0}`).join('；');
+              return <DetailRow label="收款账户" value={text} />;
+            })()}
             <DetailRow label="收货人名称" value={currentRecord.consignee} />
             <DetailRow label="收货人电话" value={currentRecord.consigneePhone} />
             <DetailRow label="收货人地址" value={currentRecord.consigneeAddress} />
             {currentRecord.status === 'shipped' && <DetailRow label="邮寄结算方式" value={getDictLabel(SHIPPING_FEE_MAP, currentRecord.shippingFee)} />}
             {currentRecord.status === 'shipped' && <DetailRow label="物流单号" value={currentRecord.trackingNumber} />}
             <DetailRow label="订单状态" value={
-              <Tag theme={STATUS_TAG_THEME[currentRecord.status] || 'default'} variant="light">
-                {getDictLabel(ORDER_STATUS_MAP, currentRecord.status) || '--'}
-              </Tag>
-            } />
-            <DetailRow label="关联出库编号" value={currentRecord.linkedOutboundNumber || (currentRecord.linkedOutboundId ? currentRecord.linkedOutboundId : '-')} />
-            <DetailRow label="出库同步状态" value={
-              (() => {
-                const outboundStatus = resolveOutboundSyncStatus(currentRecord);
-                return (
-                  <Tag theme={getOutboundSyncStatusTheme(outboundStatus)} variant="light">
-                    {OUTBOUND_SYNC_STATUS_MAP[outboundStatus]}
-                  </Tag>
-                );
-              })()
+              <StatusPill theme={STATUS_TAG_THEME[currentRecord.status] || 'default'} label={getDictLabel(ORDER_STATUS_MAP, currentRecord.status) || '--'} />
             } />
             <DetailRow label="客服备注" value={currentRecord.customerRemark} />
             {/* 归还状态（租后发货/租后退货） */}
@@ -1606,6 +2203,44 @@ export function Orders() {
               }
               return null;
             })()}
+          </div>
+        )}
+      </Dialog>
+
+      {/* 关联出库单详情弹窗 */}
+      <Dialog
+        header="关联出库单"
+        visible={outboundDetailVisible}
+        onClose={() => { setOutboundDetailVisible(false); setOutboundDetail(null); }}
+        width="560px"
+        footer={<Button onClick={() => { setOutboundDetailVisible(false); setOutboundDetail(null); }}>关闭</Button>}
+      >
+        {outboundDetailLoading ? (
+          <div className="py-8 text-center text-gray-400">正在查询出库单...</div>
+        ) : !outboundDetail ? (
+          <div className="py-8 text-center text-gray-400">未找到关联的出库单（可能已被删除）</div>
+        ) : (
+          <div className="space-y-2 text-sm">
+            <DetailRow label="出库状态" value={(() => {
+              const status = OUTBOUND_STATUS_LABELS[outboundDetail.outboundStatus || ''];
+              return status
+                ? <StatusPill theme={status.theme} label={status.label} />
+                : <StatusPill theme="success" label="已出库" />;
+            })()} />
+            <DetailRow label="出库时间" value={formatDate(outboundDetail.outboundDate, false)} />
+            <DetailRow label="收件人" value={outboundDetail.consignee || outboundDetail.customerName || '-'} />
+            {outboundDetail.shippingMethod && <DetailRow label="快递方式" value={getDictLabel(SHIPPING_FEE_MAP, outboundDetail.shippingMethod)} />}
+            <DetailRow label="快递单号" value={outboundDetail.trackingNumber || '-'} />
+            <DetailRow label="手机型号" value={formatPhoneModels(outboundDetail.phoneModels)} />
+            <DetailRow label="出库数量" value={getOutboundPhoneTotal(outboundDetail) || '-'} />
+            {outboundDetail.remark && <DetailRow label="备注" value={outboundDetail.remark} />}
+            {(outboundDetail.phonePhotos?.length || 0) > 0 && (
+              <div className="pt-2">
+                <Button size="small" variant="outline" onClick={() => handlePreviewShipPhotos(outboundDetail)}>
+                  查看照片（{outboundDetail.phonePhotos?.length}）
+                </Button>
+              </div>
+            )}
           </div>
         )}
       </Dialog>
@@ -1705,6 +2340,58 @@ export function Orders() {
           </div>
           <div className="rounded-lg border border-blue-100 bg-blue-50/60 p-3 text-blue-700">
             确认后将订单状态改为“已发货”，邮寄结算方式设为“{getDictLabel(SHIPPING_FEE_MAP, shipShippingFee)}”，并写入该快递单号。
+          </div>
+        </div>
+      </Dialog>
+
+      {/* 生成出库单弹窗（单订单 / 合并多订单） */}
+      <Dialog
+        header={genOutOrders.length > 1 ? `合并生成出库单（${genOutOrders.length} 条订单）` : '生成出库单'}
+        visible={genOutVisible}
+        onClose={() => { if (!genOutSubmitting) { setGenOutVisible(false); setGenOutOrders([]); } }}
+        width="480px"
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button disabled={genOutSubmitting} onClick={() => { setGenOutVisible(false); setGenOutOrders([]); }}>取消</Button>
+            <Button theme="primary" loading={genOutSubmitting} onClick={handleConfirmGenerateOutbound}>确认生成</Button>
+          </div>
+        }
+      >
+        <div className="space-y-3 text-sm">
+          <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 space-y-2">
+            <div><span className="text-gray-400">客户：</span><span className="text-gray-800">{genOutOrders[0]?.customerName || '-'}</span></div>
+            <div><span className="text-gray-400">收货人：</span><span className="text-gray-800">{genOutOrders[0]?.consignee || '-'}</span></div>
+            <div>
+              <span className="text-gray-400">货品：</span>
+              <div className="mt-1 space-y-1">
+                {genOutOrders.flatMap(o => {
+                  const items = getOrderProducts(o);
+                  const rows = items.length > 0 ? items : [undefined];
+                  return rows.map((item, index) => (
+                    <div key={`${o._id}_${index}`} className="text-gray-800">
+                      {item ? ([item.brand, item.productName, item.specification].filter(Boolean).join(' / ') || '-') : '-'} × {item?.quantity ?? '-'}
+                      <span className="text-gray-400 ml-1">（单号 {o.serialNumber}）</span>
+                    </div>
+                  ));
+                })}
+              </div>
+            </div>
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">快递方式 <span className="text-red-500">*</span></label>
+            <Select
+              placeholder="请选择快递方式"
+              value={genOutShippingMethod}
+              onChange={val => setGenOutShippingMethod(val as string)}
+              options={dictToOptions(SHIPPING_FEE_MAP)}
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">备注</label>
+            <Textarea placeholder="可填写出库备注（选填）" value={genOutRemark} onChange={val => setGenOutRemark(val as string)} />
+          </div>
+          <div className="rounded-lg border border-blue-100 bg-blue-50/60 p-3 text-blue-700">
+            确认后生成一条<b>待出库</b>记录{genOutOrders.length > 1 ? '（合并上述订单货品）' : ''}，交由小程序端完成发货并回填物流单号。
           </div>
         </div>
       </Dialog>
@@ -1835,6 +2522,106 @@ export function Orders() {
         </div>
       </Dialog>
 
+      {/* 从租赁2原订单生成售后订单 */}
+      <Dialog
+        header="生成售后订单"
+        visible={afterSaleVisible}
+        onClose={handleAfterSaleRequestClose}
+        width="820px"
+        footer={(
+          <div className="flex justify-end gap-2">
+            <Button disabled={afterSaleSaving} onClick={handleAfterSaleRequestClose}>取消</Button>
+            <Button theme="primary" loading={afterSaleSaving} onClick={handleAfterSaleSave}>生成售后订单</Button>
+          </div>
+        )}
+      >
+        {afterSaleTarget && (
+          <AfterSaleOrderForm
+            source={afterSaleTarget}
+            form={afterSaleForm}
+            onChange={setAfterSaleForm}
+            onProductsChange={handleAfterSaleProductsChange}
+            outboundDecision={afterSaleOutboundDecision}
+            onOutboundDecisionChange={handleAfterSaleOutboundDecisionChange}
+            autoOutbound={afterSaleAutoOutbound}
+            onAutoOutboundChange={setAfterSaleAutoOutbound}
+            productModelBrands={productModels.brands}
+            productModelLoading={productModels.loading}
+            productModelLoadError={productModels.loadError}
+            shippingFeeOptions={SHIPPING_FEE_OPTIONS}
+          />
+        )}
+      </Dialog>
+
+      {/* 原订单关联的售后记录 */}
+      <Dialog
+        header="售后记录"
+        visible={afterSaleHistoryVisible}
+        onClose={() => { setAfterSaleHistoryVisible(false); setAfterSaleHistoryRecords([]); }}
+        width="720px"
+        footer={<Button onClick={() => { setAfterSaleHistoryVisible(false); setAfterSaleHistoryRecords([]); }}>关闭</Button>}
+      >
+        <div className="space-y-4">
+          <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+            <div><span className="text-gray-400">原订单序号：</span>{afterSaleHistorySource?.serialNumber || '-'}</div>
+            <div className="mt-1"><span className="text-gray-400">网店订单号：</span>{afterSaleHistorySource?.onlineOrderNumber || '-'}</div>
+            <div className="mt-1"><span className="text-gray-400">客户名称：</span>{afterSaleHistorySource?.customerName || '-'}</div>
+          </div>
+          {afterSaleHistoryLoading ? (
+            <div className="py-10 text-center text-gray-400">正在查询售后记录...</div>
+          ) : afterSaleHistoryRecords.length === 0 ? (
+            <div className="py-10 text-center text-gray-400">该订单暂未生成售后订单</div>
+          ) : (
+            <div className="max-h-[460px] space-y-2 overflow-auto">
+              {afterSaleHistoryRecords.map(record => (
+                <div key={record._id} className="rounded-lg border border-gray-200 p-3">
+                  <div className="grid grid-cols-1 gap-x-4 gap-y-1 text-sm md:grid-cols-2">
+                    <div><span className="text-gray-400">售后序号：</span>{record.serialNumber || '-'}</div>
+                    <div><span className="text-gray-400">创建日期：</span>{formatDate(record.date, false) || '-'}</div>
+                    <div><span className="text-gray-400">订单状态：</span>{getDictLabel(ORDER_STATUS_MAP, record.status) || '-'}</div>
+                    <div><span className="text-gray-400">收货人：</span>{record.consignee || '-'}</div>
+                    <div className="md:col-span-2">
+                      <span className="text-gray-400">售后货品：</span>
+                      {getOrderProducts(record).map(item => `${getProductLabel(item.productName)} ${item.specification || ''} × ${item.quantity}`).join('；') || '-'}
+                    </div>
+                    {record.customerRemark && <div className="md:col-span-2"><span className="text-gray-400">备注：</span>{record.customerRemark}</div>}
+                  </div>
+                  <div className="mt-2 flex justify-end">
+                    <Button
+                      size="small"
+                      variant="text"
+                      theme="primary"
+                      onClick={() => {
+                        setAfterSaleHistoryVisible(false);
+                        handleDetail(record);
+                      }}
+                    >
+                      查看详情
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </Dialog>
+
+      {/* 关闭售后确认表单 */}
+      <Dialog
+        header="提示"
+        visible={afterSaleCloseConfirmVisible}
+        onClose={() => setAfterSaleCloseConfirmVisible(false)}
+        width="420px"
+        footer={(
+          <div className="flex justify-end gap-2">
+            <Button onClick={() => setAfterSaleCloseConfirmVisible(false)}>继续填写</Button>
+            <Button theme="danger" onClick={resetAfterSaleDialog}>确认关闭</Button>
+          </div>
+        )}
+      >
+        <p className="text-gray-600">确定要关闭吗？已调整的售后信息将不会保存。</p>
+      </Dialog>
+
       {/* 导入预览弹窗 */}
       <Dialog
         header={`确认导入 (${importPreviewData.length} 条订单)`}
@@ -1857,9 +2644,12 @@ export function Orders() {
               { colKey: 'orderType', title: '订单类型', width: 90 },
               { colKey: 'salesChannel', title: '销售渠道', width: 90 },
               { colKey: 'customerName', title: '客户', width: 100 },
-              { colKey: 'productName', title: '货品名称', width: 120 },
-              { colKey: 'quantity', title: '数量', width: 60 },
-              { colKey: 'amount', title: '金额', width: 80 },
+              {
+                colKey: 'productName', title: '货品名称', width: 120,
+                cell: ({ row }: { row: OrderRecord }) => getOrderProducts(row).map(p => p.productName).filter(Boolean).join('、') || '-',
+              },
+              { colKey: 'quantity', title: '数量', width: 60, cell: ({ row }: { row: OrderRecord }) => getOrderTotalQuantity(row) || '-' },
+              { colKey: 'amount', title: '金额', width: 80, cell: ({ row }: { row: OrderRecord }) => getOrderTotalAmount(row) || '-' },
               { colKey: 'status', title: '状态', width: 80 },
             ]}
             rowKey="_id"
@@ -1908,6 +2698,10 @@ export function Orders() {
           productModelBrands={productModels.brands}
           productModelLoading={productModels.loading}
           productModelLoadError={productModels.loadError}
+          outboundDecision={addNeedsOutboundDecision}
+          onOutboundDecisionChange={handleAddOutboundDecisionChange}
+          autoOutbound={addAutoOutbound}
+          onAutoOutboundChange={setAddAutoOutbound}
         />
       </Dialog>
 
@@ -1948,6 +2742,54 @@ export function Orders() {
           productModelLoading={productModels.loading}
           productModelLoadError={productModels.loadError}
         />
+      </Dialog>
+
+      {/* 手工修改快递单号 */}
+      <Dialog
+        header="修改快递单号"
+        visible={manualTrackingVisible}
+        onClose={closeManualTrackingDialog}
+        width="480px"
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button disabled={manualTrackingSaving} onClick={closeManualTrackingDialog}>取消</Button>
+            <Button theme="primary" loading={manualTrackingSaving} onClick={handleManualTrackingSave}>保存</Button>
+          </div>
+        }
+      >
+        <div className="space-y-4">
+          <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+            <div><span className="text-gray-400">客户名称：</span>{manualTrackingTarget?.customerName || '-'}</div>
+            <div className="mt-1"><span className="text-gray-400">当前单号：</span>{manualTrackingTarget?.trackingNumber || '-'}</div>
+          </div>
+          {manualTrackingTarget?.outboundRecordId && (
+            <div className="rounded-lg border border-amber-100 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-700">
+              该订单已关联出库单。本次仅修改订单上的快递单号，不会改写出库单记录。
+            </div>
+          )}
+          <div>
+            <label className="mb-1 block text-xs text-gray-500">邮寄结算方式</label>
+            <Select
+              placeholder="请选择邮寄结算方式"
+              value={manualTrackingShippingFee}
+              onChange={val => setManualTrackingShippingFee(val as string)}
+              options={SHIP_CONFIRM_SHIPPING_FEE_OPTIONS}
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs text-gray-500">快递单号</label>
+            <Input
+              placeholder="输入新单号；留空保存可清除现有单号"
+              value={manualTrackingNumber}
+              maxlength={100}
+              onChange={val => setManualTrackingNumber(val as string)}
+              onEnter={handleManualTrackingSave}
+            />
+          </div>
+          <div className="rounded-lg border border-blue-100 bg-blue-50/60 px-3 py-2 text-xs leading-5 text-blue-700">
+            填写单号后订单自动标记为“已发货”；清空单号后，需出库订单恢复为“未发货”。
+          </div>
+        </div>
       </Dialog>
 
       {/* 删除确认弹窗 */}
@@ -2140,9 +2982,257 @@ export function Orders() {
   );
 }
 
+function AfterSaleOrderForm({
+  source,
+  form,
+  onChange,
+  onProductsChange,
+  outboundDecision,
+  onOutboundDecisionChange,
+  autoOutbound,
+  onAutoOutboundChange,
+  productModelBrands,
+  productModelLoading,
+  productModelLoadError,
+  shippingFeeOptions,
+}: {
+  source: OrderRecord;
+  form: AfterSaleFormData;
+  onChange: React.Dispatch<React.SetStateAction<AfterSaleFormData>>;
+  onProductsChange: (products: ProductItem[]) => void;
+  outboundDecision: boolean | null;
+  onOutboundDecisionChange: (value: boolean) => void;
+  autoOutbound: AutoOutboundOption;
+  onAutoOutboundChange: (value: AutoOutboundOption) => void;
+  productModelBrands: PhoneBrand[];
+  productModelLoading: boolean;
+  productModelLoadError: string;
+  shippingFeeOptions: Array<{ label: string; value: string }>;
+}) {
+  const runtimeBrandMap = useMemo(() => Object.fromEntries(
+    productModelBrands
+      .filter(brand => brand.enabled !== false)
+      .map(brand => [brand.brand, brand])
+  ) as Record<string, PhoneBrand>, [productModelBrands]);
+
+  const brandOptions = useMemo(() => [
+    PLACEHOLDER_OPTION,
+    ...productModelBrands
+      .filter(brand => brand.enabled !== false)
+      .sort((a, b) => (a.sort || 0) - (b.sort || 0) || a.brand.localeCompare(b.brand, 'zh-CN'))
+      .map(brand => ({ label: getBrandLabel(brand.brand), value: brand.brand })),
+  ], [productModelBrands]);
+
+  const getProductOptions = useCallback((brand: string) => [
+    PLACEHOLDER_OPTION,
+    ...(runtimeBrandMap[brand]?.products || [])
+      .filter(product => product.enabled !== false)
+      .sort((a, b) => (a.sort || 0) - (b.sort || 0) || a.name.localeCompare(b.name, 'zh-CN'))
+      .map(product => ({ label: getProductLabel(product.name), value: product.name })),
+  ], [runtimeBrandMap]);
+
+  const getSpecOptions = useCallback((brand: string, productName: string) => [
+    PLACEHOLDER_OPTION,
+    ...(runtimeBrandMap[brand]?.products || [])
+      .find(product => product.name === productName)?.specs
+      ?.filter(spec => spec.enabled !== false)
+      .sort((a, b) => (a.sort || 0) - (b.sort || 0) || a.name.localeCompare(b.name, 'zh-CN'))
+      .map(spec => ({ label: spec.name, value: spec.name })) || [],
+  ], [runtimeBrandMap]);
+
+  const updateProduct = useCallback((index: number, patch: Partial<ProductItem>) => {
+    onProductsChange(form.products.map((product, itemIndex) => itemIndex === index
+      ? { ...product, ...patch, unitPrice: 0, amount: 0 }
+      : product));
+  }, [form.products, onProductsChange]);
+
+  const virtualOnly = isVirtualProductOrder(form.products);
+  const outboundComplete = !!(
+    form.consignee.trim()
+    && CONSIGNEE_PHONE_PATTERN.test(form.consigneePhone.trim())
+    && form.consigneeAddress.trim()
+    && form.shippingFee
+  );
+
+  return (
+    <div className="max-h-[68vh] space-y-5 overflow-y-auto pr-1">
+      <div className="rounded-lg border border-blue-100 bg-blue-50/60 p-3 text-sm text-gray-700">
+        <div className="grid grid-cols-1 gap-x-4 gap-y-1 md:grid-cols-2">
+          <div><span className="text-gray-400">原订单序号：</span>{source.serialNumber || '-'}</div>
+          <div><span className="text-gray-400">网店订单号：</span>{source.onlineOrderNumber || '-'}</div>
+          <div><span className="text-gray-400">客户名称：</span>{source.customerName || '-'}</div>
+          <div><span className="text-gray-400">销售人员：</span>{source.salesperson || '-'}</div>
+          <div className="md:col-span-2">
+            <span className="text-gray-400">原订单货品：</span>
+            {getOrderProducts(source).map(item => `${getProductLabel(item.productName)} ${item.specification || ''} × ${item.quantity}`).join('；') || '-'}
+          </div>
+        </div>
+      </div>
+
+      <section>
+        <div className="mb-2 flex items-center justify-between">
+          <div>
+            <h4 className="text-sm font-medium text-gray-800">售后货品</h4>
+            <p className="mt-0.5 text-xs text-gray-400">可以从完整货品目录更换或新增型号；售后订单金额固定为 0。</p>
+          </div>
+          <Button
+            size="small"
+            variant="outline"
+            icon={<Plus size={14} />}
+            onClick={() => onProductsChange([...form.products, { ...EMPTY_PRODUCT }])}
+          >
+            添加货品
+          </Button>
+        </div>
+        {productModelLoading && <div className="mb-2 text-xs text-gray-400">正在加载货品目录...</div>}
+        {productModelLoadError && <div className="mb-2 text-xs text-red-500">{productModelLoadError}</div>}
+        <div className="space-y-3">
+          {form.products.map((product, index) => (
+            <div key={index} className="rounded-lg border border-gray-200 p-3">
+              <div className="mb-2 flex items-center justify-between">
+                <span className="text-xs font-medium text-gray-500">货品 {index + 1}</span>
+                <Button
+                  size="small"
+                  variant="text"
+                  theme="danger"
+                  icon={<Trash2 size={14} />}
+                  onClick={() => onProductsChange(form.products.filter((_, itemIndex) => itemIndex !== index))}
+                >
+                  删除
+                </Button>
+              </div>
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+                <div>
+                  <label className="mb-1 block text-xs text-gray-500">品牌 <span className="text-red-500">*</span></label>
+                  <Select
+                    value={product.brand || ''}
+                    options={brandOptions}
+                    onChange={value => updateProduct(index, { brand: value as string, productName: '', specification: '' })}
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-gray-500">货品名称 <span className="text-red-500">*</span></label>
+                  <Select
+                    value={product.productName || ''}
+                    options={getProductOptions(product.brand)}
+                    disabled={!product.brand}
+                    onChange={value => updateProduct(index, { productName: value as string, specification: '' })}
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-gray-500">规格 <span className="text-red-500">*</span></label>
+                  <Select
+                    value={product.specification || ''}
+                    options={getSpecOptions(product.brand, product.productName)}
+                    disabled={!product.productName}
+                    onChange={value => updateProduct(index, { specification: value as string })}
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-gray-500">数量 <span className="text-red-500">*</span></label>
+                  <Input
+                    type="number"
+                    value={product.quantity ? String(product.quantity) : ''}
+                    onChange={value => updateProduct(index, { quantity: Number(value) || 0 })}
+                  />
+                </div>
+              </div>
+            </div>
+          ))}
+          {form.products.length === 0 && (
+            <div className="rounded-lg border border-dashed border-gray-300 py-8 text-center text-sm text-gray-400">请添加至少一条售后货品</div>
+          )}
+        </div>
+      </section>
+
+      <section className="border-t border-gray-100 pt-4">
+        <h4 className="text-sm font-medium text-gray-800">是否需要出库 <span className="text-red-500">*</span></h4>
+        {virtualOnly ? (
+          <div className="mt-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-500">虚拟货品订单固定为无需出库</div>
+        ) : (
+          <div className="mt-2 flex gap-2">
+            <Button
+              theme={outboundDecision === true ? 'primary' : 'default'}
+              variant={outboundDecision === true ? 'base' : 'outline'}
+              onClick={() => onOutboundDecisionChange(true)}
+            >
+              需要出库
+            </Button>
+            <Button
+              theme={outboundDecision === false ? 'primary' : 'default'}
+              variant={outboundDecision === false ? 'base' : 'outline'}
+              onClick={() => onOutboundDecisionChange(false)}
+            >
+              无需出库
+            </Button>
+          </div>
+        )}
+
+        {!virtualOnly && outboundDecision === true && (
+          <div className="mt-4 space-y-3 rounded-lg border border-gray-200 p-3">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              <div>
+                <label className="mb-1 block text-xs text-gray-500">收货人 <span className="text-red-500">*</span></label>
+                <Input value={form.consignee} onChange={value => onChange(prev => ({ ...prev, consignee: value as string }))} />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs text-gray-500">收货人电话 <span className="text-red-500">*</span></label>
+                <Input value={form.consigneePhone} onChange={value => onChange(prev => ({ ...prev, consigneePhone: value as string }))} />
+              </div>
+              <div className="md:col-span-2">
+                <label className="mb-1 block text-xs text-gray-500">收货人地址 <span className="text-red-500">*</span></label>
+                <Input value={form.consigneeAddress} onChange={value => onChange(prev => ({ ...prev, consigneeAddress: value as string }))} />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs text-gray-500">快递方式 <span className="text-red-500">*</span></label>
+                <Select
+                  value={form.shippingFee || ''}
+                  options={shippingFeeOptions}
+                  onChange={value => onChange(prev => ({ ...prev, shippingFee: value as string }))}
+                />
+              </div>
+            </div>
+
+            {outboundComplete && (
+              <div className="border-t border-gray-100 pt-3">
+                <div className="text-sm font-medium text-gray-700">是否自动生成出库单 <span className="text-red-500">*</span></div>
+                <div className="mt-2 flex gap-2">
+                  <Button
+                    theme={autoOutbound.enabled === true ? 'primary' : 'default'}
+                    variant={autoOutbound.enabled === true ? 'base' : 'outline'}
+                    onClick={() => onAutoOutboundChange({ enabled: true })}
+                  >
+                    自动生成
+                  </Button>
+                  <Button
+                    theme={autoOutbound.enabled === false ? 'primary' : 'default'}
+                    variant={autoOutbound.enabled === false ? 'base' : 'outline'}
+                    onClick={() => onAutoOutboundChange({ enabled: false })}
+                  >
+                    暂不生成
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+
+      <section className="border-t border-gray-100 pt-4">
+        <label className="mb-1 block text-xs text-gray-500">客服备注</label>
+        <Textarea
+          placeholder="填写本次售后说明（选填）"
+          value={form.customerRemark}
+          onChange={value => onChange(prev => ({ ...prev, customerRemark: value as string }))}
+        />
+      </section>
+    </div>
+  );
+}
+
 /** 新增订单 6 步向导 */
 function AddOrderWizard({
-  step, form, attachFiles, attachInputRef, onChange, onAttachFilesChange, dictionaries, productModelBrands, productModelLoading = false, productModelLoadError = '', mode = 'add',
+  step, form, attachFiles, attachInputRef, onChange, onAttachFilesChange, dictionaries, productModelBrands, productModelLoading = false, productModelLoadError = '', mode = 'add', outboundDecision, onOutboundDecisionChange, autoOutbound, onAutoOutboundChange,
 }: {
   step: number;
   form: OrderFormData;
@@ -2155,6 +3245,10 @@ function AddOrderWizard({
   productModelLoading?: boolean;
   productModelLoadError?: string;
   mode?: 'add' | 'edit';
+  outboundDecision?: boolean | null;
+  onOutboundDecisionChange?: (value: boolean | null) => void;
+  autoOutbound?: AutoOutboundOption;
+  onAutoOutboundChange?: (value: AutoOutboundOption) => void;
 }) {
   const {
     ORDER_SOURCE_MAP,
@@ -2216,42 +3310,52 @@ function AddOrderWizard({
   const updateField = useCallback(<K extends keyof OrderFormData>(key: K, val: OrderFormData[K]) => {
     onChange(prev => ({ ...prev, [key]: val }));
   }, [onChange]);
+  /** 货品变更后统一收敛：清理隐藏字段、联动虚拟单状态、同步订单级收款金额 */
+  const applyProductsChange = useCallback((prev: OrderFormData, products: ProductItem[]): OrderFormData => {
+    const cleanedProducts = clearHiddenProductPaymentFields({ ...prev, products });
+    const next = applyVirtualProductStatus(prev, cleanedProducts);
+    return { ...next, paymentSplits: syncOrderPaymentSplits(next) };
+  }, []);
   const updateProduct = useCallback((index: number, patch: Partial<ProductItem>) => {
+    if (mode === 'add' && patch.brand !== undefined && patch.brand !== form.products[index]?.brand) {
+      onOutboundDecisionChange?.(null);
+    }
     onChange(prev => {
       const products = [...prev.products];
       products[index] = { ...products[index], ...patch };
-      const cleanedProducts = clearHiddenProductPaymentFields({ ...prev, products });
-      return applyVirtualProductStatus(prev, cleanedProducts);
+      return applyProductsChange(prev, products);
     });
-  }, [onChange]);
+  }, [mode, form.products, onChange, onOutboundDecisionChange, applyProductsChange]);
   const addProduct = useCallback(() => {
-    onChange(prev => applyVirtualProductStatus(prev, [...prev.products, { ...EMPTY_PRODUCT }]));
-  }, [onChange]);
+    if (mode === 'add') onOutboundDecisionChange?.(null);
+    onChange(prev => applyProductsChange(prev, [...prev.products, { ...EMPTY_PRODUCT }]));
+  }, [mode, onChange, onOutboundDecisionChange, applyProductsChange]);
   const removeProduct = useCallback((index: number) => {
+    if (mode === 'add' && form.products.length > 1) onOutboundDecisionChange?.(null);
     onChange(prev => {
       if (prev.products.length <= 1) return prev;
-      return applyVirtualProductStatus(prev, prev.products.filter((_, i) => i !== index));
+      return applyProductsChange(prev, prev.products.filter((_, i) => i !== index));
     });
-  }, [onChange]);
-  const updateProductPaymentSplits = useCallback((index: number, splits: PaymentSplit[]) => {
+  }, [mode, form.products.length, onChange, onOutboundDecisionChange, applyProductsChange]);
+  // 订单级收款拆分编辑
+  const updateOrderPaymentSplits = useCallback((splits: PaymentSplit[]) => {
     const cleanedSplits = splits.map(split => ({
       account: split.account,
       amount: Math.max(0, Number(split.amount) || 0),
     }));
-    updateProduct(index, {
+    onChange(prev => ({
+      ...prev,
       paymentSplits: cleanedSplits,
       paymentAccount: getPaymentAccountValue(cleanedSplits),
-    });
-  }, [updateProduct]);
-  const addProductPaymentSplit = useCallback((index: number) => {
-    const product = form.products[index];
-    updateProductPaymentSplits(index, [...getEditablePaymentSplits(product), { account: '', amount: 0 }]);
-  }, [form.products, updateProductPaymentSplits]);
-  const removeProductPaymentSplit = useCallback((index: number, splitIndex: number) => {
-    const product = form.products[index];
-    const nextSplits = getEditablePaymentSplits(product).filter((_, i) => i !== splitIndex);
-    updateProductPaymentSplits(index, nextSplits.length > 0 ? nextSplits : [{ account: '', amount: product.amount || 0 }]);
-  }, [form.products, updateProductPaymentSplits]);
+    }));
+  }, [onChange]);
+  const addOrderPaymentSplit = useCallback(() => {
+    updateOrderPaymentSplits([...getEditableOrderPaymentSplits(form), { account: '', amount: 0 }]);
+  }, [form, updateOrderPaymentSplits]);
+  const removeOrderPaymentSplit = useCallback((splitIndex: number) => {
+    const nextSplits = getEditableOrderPaymentSplits(form).filter((_, i) => i !== splitIndex);
+    updateOrderPaymentSplits(nextSplits.length > 0 ? nextSplits : [{ account: '', amount: getFormTotalAmount(form) }]);
+  }, [form, updateOrderPaymentSplits]);
 
   // 转租赁2货品 CRUD
   const updateTransferProduct = useCallback((index: number, patch: Partial<TransferProductItem>) => {
@@ -2339,6 +3443,8 @@ function AddOrderWizard({
   const virtualProductOrder = useMemo(() => {
     return isVirtualProductOrder(form.products);
   }, [form.products.map(p => p.brand).join(',')]);
+  const needsOutboundForStep = mode === 'add' ? outboundDecision === true : form.needsOutbound;
+  const outboundDetailsComplete = hasCompleteOutboundDetails(form);
 
   useEffect(() => {
     if (!virtualProductOrder || form.status === 'noShip') return;
@@ -2450,9 +3556,10 @@ function AddOrderWizard({
               }} options={ORDER_ATTRIBUTE_OPTIONS} />
             </div>
             <div>
-              <label className="block text-xs text-gray-500 mb-1">订单类型</label>
+              <label className="block text-xs text-gray-500 mb-1">订单类型 <span className="text-red-500">*</span></label>
               <Select placeholder="请选择" value={form.orderType || ''} onChange={val => {
                 const newType = val as string;
+                if (mode === 'add' && newType !== form.orderType) onOutboundDecisionChange?.(null);
                 onChange(prev => {
                   const updated = { ...prev, orderType: newType };
                   // 如果当前有虚拟产品/无品牌的货品，且货品名称不在新订单类型白名单内，清空选择（仅租赁1生效）
@@ -2466,7 +3573,8 @@ function AddOrderWizard({
                     });
                   }
                   updated.products = clearHiddenProductPaymentFields({ ...updated, products: updated.products || prev.products });
-                  return updated;
+                  // 新建订单必须在收件人步骤显式选择；编辑订单保留原有智能联动。
+                  return applyNeedsOutbound(updated, mode === 'add' ? false : defaultNeedsOutbound(newType, updated.products));
                 });
               }} options={filteredOrderTypeOptions} />
             </div>
@@ -2546,8 +3654,7 @@ function AddOrderWizard({
                       <Input type="number" placeholder="数量"
                         value={product.quantity ? String(product.quantity) : ''} onChange={val => {
                           const q = Math.max(0, Number(val));
-                          const amount = q * product.unitPrice;
-                          updateProduct(idx, { quantity: q, amount, paymentSplits: syncSinglePaymentSplitAmount(product, amount) });
+                          updateProduct(idx, { quantity: q, amount: q * product.unitPrice });
                         }} />
                     </div>
                     {shouldShowPaymentFields && (
@@ -2556,8 +3663,7 @@ function AddOrderWizard({
                         <Input type="number" placeholder="单价"
                           value={product.unitPrice ? String(product.unitPrice) : ''} onChange={val => {
                             const p = Math.max(0, Number(val));
-                            const amount = product.quantity * p;
-                            updateProduct(idx, { unitPrice: p, amount, paymentSplits: syncSinglePaymentSplitAmount(product, amount) });
+                            updateProduct(idx, { unitPrice: p, amount: product.quantity * p });
                           }} />
                       </div>
                     )}
@@ -2568,46 +3674,49 @@ function AddOrderWizard({
                           value={product.amount ? String(product.amount) : ''} readOnly />
                       </div>
                     )}
-                    {shouldShowPaymentFields && (
-                      <div className="grid grid-cols-1 gap-2 md:col-span-3">
-                        <div className="flex items-center justify-between">
-                          <label className="block text-xs text-gray-500">收款账户 <span className="text-red-500">*</span></label>
-                          <Button size="small" variant="outline" icon={<Plus size={14} />} onClick={() => addProductPaymentSplit(idx)}>添加收款</Button>
-                        </div>
-                        {getEditablePaymentSplits(product).map((split, splitIndex) => {
-                          const splits = getEditablePaymentSplits(product);
-                          const splitTotal = splits.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
-                          const diff = (product.amount || 0) - splitTotal;
-                          return (
-                            <div key={splitIndex} className="grid grid-cols-[1fr_160px_36px] items-center gap-2">
-                              <Select placeholder="请选择收款账户" value={split.account || ''}
-                                onChange={val => {
-                                  const nextSplits = [...splits];
-                                  nextSplits[splitIndex] = { ...nextSplits[splitIndex], account: val as string };
-                                  updateProductPaymentSplits(idx, nextSplits);
-                                }} options={PAYMENT_ACCOUNT_OPTIONS} />
-                              <Input type="number" placeholder="金额" value={split.amount ? String(split.amount) : ''}
-                                onChange={val => {
-                                  const nextSplits = [...splits];
-                                  nextSplits[splitIndex] = { ...nextSplits[splitIndex], amount: Math.max(0, Number(val) || 0) };
-                                  updateProductPaymentSplits(idx, nextSplits);
-                                }} />
-                              <Button size="small" variant="text" theme="danger" icon={<Minus size={14} />} disabled={splits.length <= 1} onClick={() => removeProductPaymentSplit(idx, splitIndex)} />
-                              {splitIndex === splits.length - 1 && (
-                                <div className={`col-span-3 text-xs ${Math.abs(diff) < 0.01 ? 'text-gray-400' : 'text-red-500'}`}>
-                                  收款合计 ¥{splitTotal || 0}，货品金额 ¥{product.amount || 0}{Math.abs(diff) >= 0.01 ? `，差额 ¥${diff}` : ''}
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
                   </div>
                 </div>
               );
             })()
           ))}
+
+          {/* 订单级收款：与货品解耦，只填一次，拆分合计对齐订单总金额 */}
+          {shouldShowOrderPaymentSection(form) && (
+            <div className="mt-4 pt-4 border-t-2 border-gray-200">
+              <div className="flex items-center justify-between mb-2">
+                <h4 className="text-sm font-medium text-gray-600">订单收款 <span className="text-red-500">*</span></h4>
+                <Button size="small" variant="outline" icon={<Plus size={14} />} onClick={addOrderPaymentSplit}>添加收款</Button>
+              </div>
+              {getEditableOrderPaymentSplits(form).map((split, splitIndex) => {
+                const splits = getEditableOrderPaymentSplits(form);
+                const splitTotal = splits.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+                const orderTotal = getFormTotalAmount(form);
+                const diff = orderTotal - splitTotal;
+                return (
+                  <div key={splitIndex} className="grid grid-cols-[1fr_160px_36px] items-center gap-2 mb-2">
+                    <Select placeholder="请选择收款账户" value={split.account || ''}
+                      onChange={val => {
+                        const nextSplits = [...splits];
+                        nextSplits[splitIndex] = { ...nextSplits[splitIndex], account: val as string };
+                        updateOrderPaymentSplits(nextSplits);
+                      }} options={PAYMENT_ACCOUNT_OPTIONS} />
+                    <Input type="number" placeholder="金额" value={split.amount ? String(split.amount) : ''}
+                      onChange={val => {
+                        const nextSplits = [...splits];
+                        nextSplits[splitIndex] = { ...nextSplits[splitIndex], amount: Math.max(0, Number(val) || 0) };
+                        updateOrderPaymentSplits(nextSplits);
+                      }} />
+                    <Button size="small" variant="text" theme="danger" icon={<Minus size={14} />} disabled={splits.length <= 1} onClick={() => removeOrderPaymentSplit(splitIndex)} />
+                    {splitIndex === splits.length - 1 && (
+                      <div className={`col-span-3 text-xs ${Math.abs(diff) < 0.01 ? 'text-gray-400' : 'text-red-500'}`}>
+                        收款合计 ¥{splitTotal || 0}，订单总金额 ¥{orderTotal || 0}{Math.abs(diff) >= 0.01 ? `，差额 ¥${diff}` : ''}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
           {/* 条件显示的转租赁字段 */}
           {hasTransferProduct && (
@@ -2665,61 +3774,129 @@ function AddOrderWizard({
       {step === 4 && (
         <div className="py-4">
           <h4 className="text-sm font-medium text-gray-600 mb-4">收件人信息</h4>
-          <div className="mb-3 p-3 bg-blue-50/50 rounded-lg border border-blue-100">
-            <div className="flex items-center gap-2 mb-2">
-              <span className="text-xs text-blue-600 font-medium">🧠 粘贴识别</span>
-              <span className="text-xs text-gray-400">粘贴包含姓名、电话、地址的文本，AI 自动识别填入</span>
-            </div>
-            <div className="flex gap-2">
-              <Textarea placeholder="例：张三 13800138000 北京市朝阳区建国路88号" value={pasteText}
-                onChange={val => setPasteText(val as string)} autosize={{ minRows: 1, maxRows: 3 }} className="flex-1" />
-              <Button theme="primary" size="small" loading={parsing} onClick={handleSmartParse}>识别</Button>
-            </div>
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">收货人名称</label>
-              <Input placeholder="收货人名称"
-                value={form.consignee} onChange={val => updateField('consignee', val as string)} />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">收货人电话</label>
-              <Input placeholder="收货人电话"
-                value={form.consigneePhone} onChange={val => updateField('consigneePhone', val as string)} />
-            </div>
-            <div className="col-span-2">
-              <label className="block text-xs text-gray-500 mb-1">收货人地址</label>
-              <Input placeholder="收货人地址"
-                value={form.consigneeAddress} onChange={val => updateField('consigneeAddress', val as string)} />
-            </div>
-            {!virtualProductOrder && (
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">订单状态</label>
-                <Select placeholder="请选择" value={form.status || ''} onChange={val => {
-                  const newStatus = val as string;
-                  onChange(prev => ({
-                    ...prev,
-                    status: newStatus,
-                    shippingFee: newStatus === 'shipped' ? prev.shippingFee : '',
-                    trackingNumber: newStatus === 'shipped' ? prev.trackingNumber : '',
-                  }));
-                }} options={ORDER_STATUS_OPTIONS} />
-              </div>
-            )}
-            {form.status === 'shipped' && (
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">邮寄结算方式 <span className="text-red-500">*</span></label>
-                <Select placeholder="请选择" value={form.shippingFee || ''} onChange={val => updateField('shippingFee', val as string)} options={SHIPPING_FEE_OPTIONS} />
-              </div>
-            )}
-            {form.status === 'shipped' && (
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">物流单号 <span className="text-red-500">*</span></label>
-                <Input placeholder="物流单号"
-                  value={form.trackingNumber} onChange={val => updateField('trackingNumber', val as string)} />
+
+          {/* 第一步：明确确认是否需要出库 */}
+          <div className="mb-4 p-3 rounded-lg border border-gray-200 bg-gray-50">
+            {mode === 'add' ? (
+              <>
+                <div>
+                  <div className="text-sm text-gray-700">第一步：该订单是否需要出库？ <span className="text-red-500">*</span></div>
+                  <div className="text-xs text-gray-400 mt-0.5">
+                    {virtualProductOrder ? '虚拟货品单固定为无需出库' : '请主动选择，不会根据订单类型自动确认'}
+                  </div>
+                </div>
+                {virtualProductOrder ? (
+                  <div className="mt-3 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-500">无需出库（订单状态：不用发货）</div>
+                ) : (
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      aria-pressed={outboundDecision === true}
+                      className={`rounded-lg border px-3 py-2 text-sm transition-colors ${outboundDecision === true ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-200 bg-white text-gray-600 hover:border-blue-300'}`}
+                      onClick={() => onOutboundDecisionChange?.(true)}
+                    >
+                      需要出库
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={outboundDecision === false}
+                      className={`rounded-lg border px-3 py-2 text-sm transition-colors ${outboundDecision === false ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-200 bg-white text-gray-600 hover:border-blue-300'}`}
+                      onClick={() => onOutboundDecisionChange?.(false)}
+                    >
+                      无需出库
+                    </button>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-sm text-gray-700">需要出库</div>
+                  <div className="text-xs text-gray-400 mt-0.5">
+                    {virtualProductOrder
+                      ? '虚拟货品单，无需出库（订单状态：不用发货）'
+                      : (form.needsOutbound ? '需生成出库单发货（订单状态：未发货）' : '无需出库（订单状态：不用发货）')}
+                  </div>
+                </div>
+                <Switch value={!!form.needsOutbound} disabled={virtualProductOrder} onChange={val => onChange(prev => applyNeedsOutbound(prev, !!val))} />
               </div>
             )}
           </div>
+
+          {needsOutboundForStep ? (
+            <>
+              <div className="mb-3 p-3 bg-blue-50/50 rounded-lg border border-blue-100">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-xs text-blue-600 font-medium">🧠 粘贴识别</span>
+                  <span className="text-xs text-gray-400">粘贴包含姓名、电话、地址的文本，AI 自动识别填入</span>
+                </div>
+                <div className="flex gap-2">
+                  <Textarea placeholder="例：张三 13800138000 北京市朝阳区建国路88号" value={pasteText}
+                    onChange={val => setPasteText(val as string)} autosize={{ minRows: 1, maxRows: 3 }} className="flex-1" />
+                  <Button theme="primary" size="small" loading={parsing} onClick={handleSmartParse}>识别</Button>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">收货人名称 {mode === 'add' && <span className="text-red-500">*</span>}</label>
+                  <Input placeholder="收货人名称"
+                    value={form.consignee} onChange={val => updateField('consignee', val as string)} />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">收货人电话 {mode === 'add' && <span className="text-red-500">*</span>}</label>
+                  <Input placeholder="收货人电话"
+                    value={form.consigneePhone} onChange={val => updateField('consigneePhone', val as string)} />
+                </div>
+                <div className="col-span-2">
+                  <label className="block text-xs text-gray-500 mb-1">收货人地址 {mode === 'add' && <span className="text-red-500">*</span>}</label>
+                  <Input placeholder="收货人地址"
+                    value={form.consigneeAddress} onChange={val => updateField('consigneeAddress', val as string)} />
+                </div>
+                {mode === 'add' && (
+                  <div className="col-span-2">
+                    <label className="block text-xs text-gray-500 mb-1">快递方式 <span className="text-red-500">*</span></label>
+                    <Select placeholder="请选择快递方式" value={form.shippingFee || ''}
+                      onChange={val => updateField('shippingFee', val as string)}
+                      options={SHIPPING_FEE_OPTIONS} />
+                  </div>
+                )}
+              </div>
+
+              {/* 第二步：收件信息完整后明确确认是否自动生成出库单 */}
+              {mode === 'add' && autoOutbound && onAutoOutboundChange && (
+                outboundDetailsComplete ? (
+                  <div className="mt-4 p-3 rounded-lg border border-gray-200 bg-gray-50">
+                    <div className="text-sm text-gray-700">第二步：是否自动生成出库单？ <span className="text-red-500">*</span></div>
+                    <div className="text-xs text-gray-400 mt-0.5">自动生成时将复用上方选择的快递方式</div>
+                    <div className="mt-3 grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        aria-pressed={autoOutbound.enabled === true}
+                        className={`rounded-lg border px-3 py-2 text-sm transition-colors ${autoOutbound.enabled === true ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-200 bg-white text-gray-600 hover:border-blue-300'}`}
+                        onClick={() => onAutoOutboundChange({ enabled: true })}
+                      >
+                        自动生成
+                      </button>
+                      <button
+                        type="button"
+                        aria-pressed={autoOutbound.enabled === false}
+                        className={`rounded-lg border px-3 py-2 text-sm transition-colors ${autoOutbound.enabled === false ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-200 bg-white text-gray-600 hover:border-blue-300'}`}
+                        onClick={() => onAutoOutboundChange({ enabled: false })}
+                      >
+                        暂不生成
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mt-4 rounded-lg border border-dashed border-gray-200 px-3 py-2 text-xs text-gray-400">
+                    请先完整填写收货人、有效电话、地址和快递方式，再选择是否自动生成出库单。
+                  </div>
+                )
+              )}
+            </>
+          ) : mode === 'edit' || outboundDecision === false || virtualProductOrder ? (
+            <div className="text-xs text-gray-400 p-3">该订单无需出库，无需填写收件人信息。</div>
+          ) : null}
         </div>
       )}
 
@@ -2839,10 +4016,17 @@ function AddOrderWizard({
                 return (
                   <div key={i} className="text-xs text-gray-600 ml-2 border-l-2 border-blue-200 pl-2 mb-1">
                     货品{i + 1}：{p.brand ? getBrandLabel(p.brand) : '-'} / {p.productName ? getProductLabel(p.productName) : '-'} / {p.specification || '-'}，
-                    数量 {p.quantity || 0}{shouldShowPaymentFields ? `，单价 ¥${p.unitPrice || 0}，金额 ¥${p.amount || 0}，收款账户 ${formatPaymentSplits(p as unknown as OrderRecord)}` : ''}
+                    数量 {p.quantity || 0}{shouldShowPaymentFields ? `，单价 ¥${p.unitPrice || 0}，金额 ¥${p.amount || 0}` : ''}
                   </div>
                 );
               })}
+              {shouldShowOrderPaymentSection(form) && (
+                <PreviewItem label="收款账户" value={formatPaymentSplits({
+                  paymentAccount: form.paymentAccount,
+                  amount: getFormTotalAmount(form),
+                  paymentSplits: form.paymentSplits,
+                })} />
+              )}
             </PreviewSection>
             {hasTransferProduct && form.transferProducts.length > 0 && (
               <PreviewSection title="转租赁2 信息">
@@ -2856,11 +4040,22 @@ function AddOrderWizard({
               </PreviewSection>
             )}
             <PreviewSection title="收件人信息">
-              <PreviewItem label="收货人名称" value={form.consignee} />
-              <PreviewItem label="收货人电话" value={form.consigneePhone} />
-              <PreviewItem label="收货人地址" value={form.consigneeAddress} />
-              {form.status === 'shipped' && <PreviewItem label="邮寄结算方式" value={getDictLabel(SHIPPING_FEE_MAP, form.shippingFee)} />}
-              {form.status === 'shipped' && <PreviewItem label="物流单号" value={form.trackingNumber} />}
+              {mode === 'add' && <PreviewItem label="是否需要出库" value={needsOutboundForStep ? '是' : '否'} />}
+              {(mode === 'edit' || needsOutboundForStep) && (
+                <>
+                  <PreviewItem label="收货人名称" value={form.consignee} />
+                  <PreviewItem label="收货人电话" value={form.consigneePhone} />
+                  <PreviewItem label="收货人地址" value={form.consigneeAddress} />
+                </>
+              )}
+              {mode === 'add' && needsOutboundForStep && (
+                <>
+                  <PreviewItem label="快递方式" value={getDictLabel(SHIPPING_FEE_MAP, form.shippingFee)} />
+                  <PreviewItem label="自动生成出库单" value={autoOutbound?.enabled === true ? '是' : '否'} />
+                </>
+              )}
+              {mode === 'edit' && form.status === 'shipped' && <PreviewItem label="邮寄结算方式" value={getDictLabel(SHIPPING_FEE_MAP, form.shippingFee)} />}
+              {mode === 'edit' && form.status === 'shipped' && <PreviewItem label="物流单号" value={form.trackingNumber} />}
               <PreviewItem label="订单状态" value={getDictLabel(ORDER_STATUS_MAP, form.status)} />
             </PreviewSection>
             {showReturnStatus && form.returnStatus && (

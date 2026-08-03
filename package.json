@@ -7,10 +7,15 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test:sf-token": "node --test cloud_functions/sendWechatNotification/functions/getSfAccessToken/index.test.cjs"
+    "test:sf-token": "node --test cloud_functions/getSfAccessToken/index.test.cjs",
+    "test:sf-print": "node --test cloud_functions/printSfWaybill/index.test.cjs",
+    "test:sf-plugin-print": "node --test cloud_functions/manageSfPluginPrint/index.test.cjs",
+    "test:sf-data-model": "node --test cloud_functions/sfDataModel.test.cjs",
+    "test:purchases": "node --test cloud_functions/managePurchases/index.test.cjs"
   },
   "dependencies": {
     "@cloudbase/js-sdk": "^2.28.5",
+    "fflate": "^0.8.2",
     "lucide-react": "^0.462.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

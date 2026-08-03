@@ -11,9 +11,10 @@ interface RecordEditProps {
   type: 'inbound' | 'outbound';
   onClose: () => void;
   onSave: (recordId: string, updateData: Record<string, unknown>) => Promise<boolean>;
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
-export function RecordEdit({ visible, record, type, onClose, onSave }: RecordEditProps) {
+export function RecordEdit({ visible, record, type, onClose, onSave, onDirtyChange }: RecordEditProps) {
   const { loadAllModels } = usePhoneModels();
   const dictionaries = useDictionaries();
   const channelTypeOptions = dictionaries.getOptions(DICT_CODES.channelType);
@@ -41,6 +42,24 @@ export function RecordEdit({ visible, record, type, onClose, onSave }: RecordEdi
       setPhoneModels(record.phoneModels?.map(m => ({ ...m })) || [{ model: '', quantity: 1 }]);
     }
   }, [record, isInbound]);
+
+  useEffect(() => {
+    if (!visible || !record) {
+      onDirtyChange?.(false);
+      return;
+    }
+    const initialModels = record.phoneModels?.map(item => ({ ...item })) || [{ model: '', quantity: 1 }];
+    const initialDate = isInbound ? (record as InboundRecord).inboundDate || '' : (record as OutboundRecord).outboundDate || '';
+    const dirty = customerName !== (record.customerName || '')
+      || date !== initialDate
+      || trackingNumber !== (record.trackingNumber || '')
+      || (isInbound && (
+        channelType !== ((record as InboundRecord).type || '')
+        || shopName !== ((record as InboundRecord).shopName || '')
+      ))
+      || JSON.stringify(phoneModels) !== JSON.stringify(initialModels);
+    onDirtyChange?.(dirty);
+  }, [channelType, customerName, date, isInbound, onDirtyChange, phoneModels, record, shopName, trackingNumber, visible]);
 
   useEffect(() => {
     loadAllModels().then(models => setModelOptions(models));
@@ -86,6 +105,7 @@ export function RecordEdit({ visible, record, type, onClose, onSave }: RecordEdi
       const success = await onSave(record!._id, updateData);
 
       if (success) {
+        onDirtyChange?.(false);
         MessagePlugin.success('保存成功');
         onClose();
       } else {
