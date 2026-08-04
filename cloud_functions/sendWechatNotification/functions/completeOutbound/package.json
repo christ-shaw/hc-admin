@@ -1,0 +1,9 @@
+{
+  "name": "completeOutbound",
+  "version": "1.0.0",
+  "description": "完成出库并回写订单物流信息",
+  "main": "index.js",
+  "dependencies": {
+    "wx-server-sdk": "~2.6.3"
+  }
+}

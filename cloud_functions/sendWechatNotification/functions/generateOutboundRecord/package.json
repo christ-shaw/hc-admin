@@ -1,0 +1,9 @@
+{
+  "name": "generateOutboundRecord",
+  "version": "1.0.0",
+  "description": "根据订单手动生成关联出库单",
+  "main": "index.js",
+  "dependencies": {
+    "wx-server-sdk": "~2.6.3"
+  }
+}
