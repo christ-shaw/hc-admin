@@ -230,7 +230,8 @@
     {
       "name": "importOrderFromAssist",
       "handler": "index.main",
-      "runtime": "Nodejs18.15"
+      "runtime": "Nodejs18.15",
+      "timeout": 30
     },
     {
       "name": "sendWechatNotification",

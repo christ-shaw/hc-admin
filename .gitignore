@@ -8,6 +8,9 @@ dist
 tmp/
 /outputs/
 
+# CloudBase SKU 迁移报告包含真实标题和 SKU，不提交到仓库
+/output/sku-mapping-*.json
+
 # 本地设计交付产物（login.html 实际为 ZIP 包副本）
 /Orders list redesign.zip
 /login.html

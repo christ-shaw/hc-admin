@@ -19,6 +19,7 @@ exports.main = async (event, context) => {
   const {
     limit = 20,
     cursor,
+    orderId,
     serialNumber,
     customerName,
     salesperson,
@@ -28,6 +29,7 @@ exports.main = async (event, context) => {
     orderAttribute,
     status,
     onlineOrderNumber,
+    outboundRecordId,
     startDate,
     endDate,
     abnormalStatus,
@@ -36,6 +38,28 @@ exports.main = async (event, context) => {
   const maxLimit = Math.min(limit, 100);
 
   try {
+    // 出库记录等关联业务直接按数据库 ID 定位，不受分页和排序影响。
+    if (orderId && String(orderId).trim()) {
+      try {
+        const orderResult = await db.collection('orders').doc(String(orderId).trim()).get();
+        const order = orderResult && orderResult.data || null;
+        return {
+          success: true,
+          data: order ? [order] : [],
+          cursor: null,
+          hasMore: false,
+          total: order ? 1 : 0,
+          errMsg: order ? '查询成功' : '订单不存在',
+        };
+      } catch (error) {
+        const message = String(error && error.message || '').toLowerCase();
+        if (message.includes('not exist') || message.includes('does not exist')) {
+          return { success: true, data: [], cursor: null, hasMore: false, total: 0, errMsg: '订单不存在' };
+        }
+        throw error;
+      }
+    }
+
     // 构建查询条件
     const conditions = {};
 
@@ -85,6 +109,10 @@ exports.main = async (event, context) => {
       });
     }
 
+    if (outboundRecordId) {
+      conditions.outboundRecordId = String(outboundRecordId).trim();
+    }
+
     // 日期范围筛选
     if (startDate || endDate) {
       const dateCondition = {};
@@ -131,12 +159,12 @@ exports.main = async (event, context) => {
     const total = countResult.total;
 
     // 查询数据
-    const result = await query
-      .orderBy('date', 'desc')
-      .orderBy('serialNumber', 'desc')
-      .skip(skipCount)
-      .limit(maxLimit)
-      .get();
+    // 关联出库单为精确定位，结果量小且不需要复合排序索引。
+    let resultQuery = query;
+    if (!outboundRecordId) {
+      resultQuery = resultQuery.orderBy('date', 'desc').orderBy('serialNumber', 'desc');
+    }
+    const result = await resultQuery.skip(skipCount).limit(maxLimit).get();
 
     const records = result.data;
     const nextSkip = skipCount + records.length;

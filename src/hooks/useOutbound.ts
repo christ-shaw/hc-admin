@@ -21,6 +21,14 @@ interface OutboundState {
   loading: boolean;
 }
 
+interface SyncModelsResult {
+  success: boolean;
+  phoneModels?: OutboundRecord['phoneModels'];
+  remark?: string;
+  changed?: boolean;
+  errMsg?: string;
+}
+
 export function useOutbound() {
   const [state, setState] = useState<OutboundState>({
     records: [],
@@ -87,6 +95,29 @@ export function useOutbound() {
     }
   }, []);
 
+  const syncModelsFromOrders = useCallback(async (recordId: string): Promise<SyncModelsResult> => {
+    try {
+      const currentUser = await getCurrentPermissionUserPayload().catch(() => null);
+      const result = await callFunction<{
+        success: boolean;
+        errMsg?: string;
+        data?: { phoneModels?: OutboundRecord['phoneModels']; remark?: string; changed?: boolean };
+      }>('updateRecord', {
+        data: { recordId, type: 'outbound', syncFromOrders: true, currentUser },
+      });
+      return {
+        success: !!result?.success,
+        phoneModels: result?.data?.phoneModels,
+        remark: result?.data?.remark,
+        changed: result?.data?.changed,
+        errMsg: result?.errMsg,
+      };
+    } catch (err) {
+      console.error('从订单同步出库型号失败:', err);
+      return { success: false, errMsg: err instanceof Error ? err.message : String(err) };
+    }
+  }, []);
+
   const deleteRecord = useCallback(async (recordId: string) => {
     try {
       const currentUser = await getCurrentPermissionUserPayload().catch(() => null);
@@ -149,5 +180,5 @@ export function useOutbound() {
     return allRecords.slice(0, 10000);
   }, []);
 
-  return { ...state, fetchRecords, fetchAllRecords, updateRecord, deleteRecord, resetFilters, getPageRecords, setCurrentPage };
+  return { ...state, fetchRecords, fetchAllRecords, updateRecord, syncModelsFromOrders, deleteRecord, resetFilters, getPageRecords, setCurrentPage };
 }

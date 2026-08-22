@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Dialog, MessagePlugin, Select, Tag } from 'tdesign-react';
 import { Download, Eye, FileText, LoaderCircle, Printer, RefreshCw } from 'lucide-react';
 import type { SfExpressWorkbenchRow } from '../types';
@@ -49,8 +49,10 @@ interface RecordResult {
 interface SfPrintDialogProps {
   record: SfExpressWorkbenchRow | null;
   batchRecords?: SfExpressWorkbenchRow[];
+  autoStartBatch?: boolean;
+  preparedPdfWindows?: Array<Window | null>;
   onClose: () => void;
-  onPdfPrint: (record: SfExpressWorkbenchRow) => Promise<void>;
+  onPdfPrint: (record: SfExpressWorkbenchRow, preparedWindow?: Window | null) => Promise<boolean>;
   onPluginPrinted: () => void;
 }
 
@@ -59,6 +61,7 @@ interface BatchPrintResult {
   orderLabel: string;
   waybillNo: string;
   success: boolean;
+  successLabel?: string;
   errMsg?: string;
 }
 
@@ -78,6 +81,8 @@ function getOrderLabel(record: SfExpressWorkbenchRow) {
 export function SfPrintDialog({
   record,
   batchRecords = [],
+  autoStartBatch = false,
+  preparedPdfWindows = [],
   onClose,
   onPdfPrint,
   onPluginPrinted,
@@ -88,7 +93,7 @@ export function SfPrintDialog({
   );
   const primaryRecord = records[0] || null;
   const recordsKey = records.map(item => item.currentSfOrder?._id || item.order._id).join('|');
-  const isBatch = records.length > 1;
+  const isBatch = batchRecords.length > 0;
   const [bootstrap, setBootstrap] = useState<BootstrapResult | null>(null);
   const [bootstrapError, setBootstrapError] = useState('');
   const [pluginResult, setPluginResult] = useState<SfSdkResult | null>(null);
@@ -96,10 +101,11 @@ export function SfPrintDialog({
   const [printerName, setPrinterName] = useState('');
   const [initializing, setInitializing] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [working, setWorking] = useState<'print' | 'preview' | 'pdf' | 'batch' | ''>('');
+  const [working, setWorking] = useState<'print' | 'preview' | 'pdf' | 'batch' | 'batchPdf' | ''>('');
   const [batchProgress, setBatchProgress] = useState(0);
   const [batchPrintingOrderId, setBatchPrintingOrderId] = useState('');
   const [batchResults, setBatchResults] = useState<BatchPrintResult[]>([]);
+  const autoStartedKeyRef = useRef('');
 
   const pluginUsable = platform === 'windows'
     && bootstrap?.pluginPrintEnabled === true
@@ -136,7 +142,10 @@ export function SfPrintDialog({
   };
 
   useEffect(() => {
-    if (!primaryRecord) return;
+    if (!primaryRecord) {
+      autoStartedKeyRef.current = '';
+      return;
+    }
     let active = true;
     setBootstrap(null);
     setBootstrapError('');
@@ -283,9 +292,65 @@ export function SfPrintDialog({
     if (!primaryRecord || working) return;
     setWorking('pdf');
     try {
-      await onPdfPrint(primaryRecord);
-      onClose();
+      const succeeded = await onPdfPrint(primaryRecord);
+      if (succeeded) onClose();
     } finally {
+      setWorking('');
+    }
+  };
+
+  const handleBatchPdf = async (preparedWindows?: Array<Window | null>) => {
+    if (!isBatch || working) return;
+
+    // 必须在用户点击事件中一次性创建窗口，避免逐条异步生成时被浏览器拦截弹窗。
+    const printWindows: Window[] = [];
+    for (let index = 0; index < records.length; index += 1) {
+      const printWindow = preparedWindows?.[index] || window.open('', '_blank');
+      if (!printWindow) {
+        if (!preparedWindows) printWindows.forEach(openedWindow => openedWindow.close());
+        MessagePlugin.warning('浏览器已拦截批量打印窗口，请允许本站弹出多个窗口后重试');
+        return;
+      }
+      printWindow.document.title = '正在生成顺丰丰密面单';
+      printWindow.document.body.innerHTML = '<p style="font:14px sans-serif;padding:24px;color:#4b5563">正在生成顺丰丰密面单，请稍候…</p>';
+      printWindows.push(printWindow);
+    }
+
+    setWorking('batchPdf');
+    setBatchProgress(0);
+    setBatchPrintingOrderId('');
+    setBatchResults([]);
+
+    const results: BatchPrintResult[] = [];
+    try {
+      for (let index = 0; index < records.length; index += 1) {
+        const target = records[index];
+        const sourceOrderId = target.order._id;
+        setBatchPrintingOrderId(sourceOrderId);
+        const succeeded = await onPdfPrint(target, printWindows[index]);
+        results.push({
+          sourceOrderId,
+          orderLabel: getOrderLabel(target),
+          waybillNo: target.currentSfOrder?.waybillNo || '',
+          success: succeeded,
+          ...(succeeded ? { successLabel: '已打开' } : {}),
+          ...(!succeeded ? { errMsg: '面单生成失败' } : {}),
+        });
+        setBatchProgress(index + 1);
+        setBatchResults([...results]);
+      }
+
+      setBatchPrintingOrderId('');
+      const succeeded = results.filter(result => result.success).length;
+      const failed = results.length - succeeded;
+      if (succeeded > 0) onPluginPrinted();
+      if (failed > 0) {
+        MessagePlugin.warning(`免插件批量打印完成：成功 ${succeeded} 张，失败 ${failed} 张`);
+      } else {
+        MessagePlugin.success(`已生成 ${succeeded} 张面单并打开系统打印窗口`);
+      }
+    } finally {
+      setBatchPrintingOrderId('');
       setWorking('');
     }
   };
@@ -345,6 +410,33 @@ export function SfPrintDialog({
     }
   };
 
+  useEffect(() => {
+    if (!isBatch || !autoStartBatch || working || batchResults.length > 0) return;
+    if (autoStartedKeyRef.current === recordsKey) return;
+
+    if (platform === 'windows') {
+      if (initializing || !pluginUsable || !printerName) return;
+      autoStartedKeyRef.current = recordsKey;
+      void handleBatchPluginPrint();
+      return;
+    }
+
+    if (preparedPdfWindows.length !== records.length || preparedPdfWindows.some(item => !item)) return;
+    autoStartedKeyRef.current = recordsKey;
+    void handleBatchPdf(preparedPdfWindows);
+  }, [
+    autoStartBatch,
+    batchResults.length,
+    initializing,
+    isBatch,
+    pluginUsable,
+    preparedPdfWindows,
+    printerName,
+    records.length,
+    recordsKey,
+    working,
+  ]);
+
   const installerUrl = pluginResult?.downloadUrl && isTrustedSfDownloadUrl(pluginResult.downloadUrl)
     ? pluginResult.downloadUrl
     : '';
@@ -353,7 +445,7 @@ export function SfPrintDialog({
 
   return (
     <Dialog
-      header={isBatch ? `串行打印顺丰面单（${records.length}）` : '打印顺丰丰密面单'}
+      header={isBatch ? `批量打印顺丰面单（${records.length}）` : '打印顺丰丰密面单'}
       visible={records.length > 0}
       onClose={() => !working && onClose()}
       width={isBatch ? '760px' : '620px'}
@@ -363,10 +455,22 @@ export function SfPrintDialog({
         <div className="space-y-4 text-sm">
           {isBatch ? (
             <>
-              <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-blue-800">
-                已选择 {records.length} 张面单。系统会等待当前面单发送完成，再处理下一张。
+              <div className="flex items-center justify-between gap-4 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-blue-800">
+                <div>
+                  <div className="font-medium">已选择 {records.length} 张面单</div>
+                  <div className="mt-1 text-xs">免插件打印会依次生成面单，并分别打开系统打印窗口。</div>
+                </div>
+                <Button
+                  theme="primary"
+                  icon={<FileText size={16} />}
+                  loading={working === 'batchPdf'}
+                  disabled={!!working}
+                  onClick={() => handleBatchPdf()}
+                >
+                  {batchResults.length === records.length ? '再次免插件批量打印' : '免插件批量打印'}（{records.length}）
+                </Button>
               </div>
-              {working === 'batch' && currentBatchRecord && (
+              {(working === 'batch' || working === 'batchPdf') && currentBatchRecord && (
                 <div className="space-y-2 rounded-lg border border-blue-100 bg-blue-50 px-3 py-3 text-blue-700">
                   <div className="flex items-center justify-between gap-3">
                     <div className="flex min-w-0 items-center gap-2">
@@ -386,7 +490,8 @@ export function SfPrintDialog({
               <div className="max-h-[36vh] space-y-2 overflow-auto pr-1">
                 {records.map(item => {
                   const result = batchResults.find(entry => entry.sourceOrderId === item.order._id);
-                  const isPrinting = working === 'batch' && batchPrintingOrderId === item.order._id;
+                  const isPrinting = (working === 'batch' || working === 'batchPdf')
+                    && batchPrintingOrderId === item.order._id;
                   return (
                     <div
                       key={item.order._id}
@@ -411,7 +516,7 @@ export function SfPrintDialog({
                         </Tag>
                       ) : result ? (
                         <Tag theme={result.success ? 'success' : 'danger'} variant="light">
-                          {result.success ? '已发送' : '失败'}
+                          {result.success ? result.successLabel || '已发送' : '失败'}
                         </Tag>
                       ) : (
                         <Tag theme="default" variant="light">等待中</Tag>
@@ -506,10 +611,10 @@ export function SfPrintDialog({
                     theme="primary"
                     icon={<Printer size={16} />}
                     loading={working === 'batch'}
-                    disabled={!pluginUsable || !printerName || !!working || batchResults.length === records.length}
+                    disabled={!pluginUsable || !printerName || !!working}
                     onClick={handleBatchPluginPrint}
                   >
-                    开始串行打印（{records.length}）
+                    {batchResults.length === records.length ? '再次串行打印' : '开始串行打印'}（{records.length}）
                   </Button>
                 ) : (
                   <>
@@ -538,7 +643,7 @@ export function SfPrintDialog({
           ) : (
             <div className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3 text-blue-700">
               {isBatch
-                ? `批量串行打印需要 Windows 顺丰云打印插件，${platform === 'macos' ? 'macOS' : '当前系统'}可逐单使用免插件打印。`
+                ? `${platform === 'macos' ? 'macOS' : '当前系统'}可使用上方免插件批量打印，无需安装顺丰云打印插件。`
                 : `${platform === 'macos' ? 'macOS' : '当前系统'}请使用上方免插件打印。`}
             </div>
           )}

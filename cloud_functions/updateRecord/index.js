@@ -7,6 +7,7 @@ const db = cloud.database();
 const _ = db.command;
 const { requireMiniappPermission, deniedResult } = require('./miniappAuth');
 const { getCurrentUser } = require('./permissionAuth');
+const { aggregateOutboundModels, replaceOrderModelsRemark } = require('./outboundModels');
 
 const ROLE_COLLECTION = 'roles';
 const USER_ROLE_COLLECTION = 'user_roles';
@@ -105,10 +106,95 @@ async function requireRecordPermission(payload, requiredPermission) {
   return await requireWebPermission(currentUser, [requiredPermission]);
 }
 
+async function getTransactionDocument(transaction, collectionName, id) {
+  try {
+    const result = await transaction.collection(collectionName).doc(id).get();
+    return result && result.data || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function syncOrderLinkedOutboundModels(recordId, operator, auth) {
+  const transaction = await db.startTransaction();
+  try {
+    const outbound = await getTransactionDocument(transaction, 'outbound_records', recordId);
+    if (!outbound) {
+      await transaction.rollback();
+      return { success: false, code: 'RECORD_NOT_FOUND', errMsg: '出库记录不存在' };
+    }
+    if (outbound.source !== 'order' || !Array.isArray(outbound.orderIds) || outbound.orderIds.length === 0) {
+      await transaction.rollback();
+      return { success: false, code: 'NOT_ORDER_LINKED', errMsg: '该出库记录没有关联订单' };
+    }
+    if (outbound.outboundStatus !== 'pending') {
+      await transaction.rollback();
+      return { success: false, code: 'SNAPSHOT_LOCKED', errMsg: '已完成出库的型号快照不能重新同步' };
+    }
+
+    const orderIds = unique(outbound.orderIds).map(value => String(value).trim()).filter(Boolean);
+    const orders = [];
+    const missingOrderIds = [];
+    for (const orderId of orderIds) {
+      const order = await getTransactionDocument(transaction, 'orders', orderId);
+      if (order) orders.push(order);
+      else missingOrderIds.push(orderId);
+    }
+    if (missingOrderIds.length > 0) {
+      await transaction.rollback();
+      return {
+        success: false,
+        code: 'LINKED_ORDER_NOT_FOUND',
+        errMsg: `有 ${missingOrderIds.length} 个关联订单已不存在，未执行同步`,
+      };
+    }
+
+    const phoneModels = aggregateOutboundModels(orders);
+    if (phoneModels.length === 0) {
+      await transaction.rollback();
+      return { success: false, code: 'NO_ORDER_PRODUCTS', errMsg: '关联订单中没有可同步的货品' };
+    }
+    const remark = replaceOrderModelsRemark(outbound.remark, phoneModels);
+    const changes = [];
+    if (JSON.stringify(outbound.phoneModels || []) !== JSON.stringify(phoneModels)) {
+      changes.push({ field: 'phoneModels', oldValue: outbound.phoneModels || [], newValue: phoneModels });
+    }
+    if (String(outbound.remark || '') !== remark) {
+      changes.push({ field: 'remark', oldValue: outbound.remark || '', newValue: remark });
+    }
+
+    await transaction.collection('outbound_records').doc(recordId).update({
+      data: { phoneModels, remark, updateTime: db.serverDate() },
+    });
+    if (changes.length > 0) {
+      await transaction.collection('record_history').add({
+        data: {
+          recordId,
+          recordType: 'outbound',
+          modifiedBy: operator || '未知用户',
+          modifiedByOpenid: auth.openid || '',
+          modifiedAt: db.serverDate(),
+          changes,
+        },
+      });
+    }
+    await transaction.commit();
+    return {
+      success: true,
+      errMsg: changes.length > 0 ? '已从关联订单同步型号和数量' : '型号和数量已是最新',
+      data: { recordId, phoneModels, remark, changed: changes.length > 0 },
+    };
+  } catch (error) {
+    try { await transaction.rollback(); } catch (_) { /* ignore rollback error */ }
+    throw error;
+  }
+}
+
 exports.main = async (event, context) => {
   try {
     const payload = event.data || {};
     const { recordId, type, updateData, operator } = payload;
+    const syncFromOrders = payload.syncFromOrders === true;
 
     // 参数校验
     console.log('data=  ',event.data )
@@ -131,6 +217,13 @@ exports.main = async (event, context) => {
     const auth = await requireRecordPermission(payload, requiredPermission);
     if (!auth.allowed) return deniedResult(auth);
 
+    if (syncFromOrders) {
+      if (type !== 'outbound') {
+        return { success: false, code: 'INVALID_SYNC_TYPE', errMsg: '仅出库记录支持从订单同步' };
+      }
+      return await syncOrderLinkedOutboundModels(recordId, operator, auth);
+    }
+
     if (!updateData || Object.keys(updateData).length === 0) {
       return {
         success: false,
@@ -148,6 +241,21 @@ exports.main = async (event, context) => {
       return {
         success: false,
         errMsg: '记录不存在'
+      };
+    }
+
+    const editsOrderLinkedModels = type === 'outbound'
+      && existingRecord.data.source === 'order'
+      && Array.isArray(existingRecord.data.orderIds)
+      && existingRecord.data.orderIds.length > 0
+      && Object.prototype.hasOwnProperty.call(updateData, 'phoneModels');
+    if (editsOrderLinkedModels) {
+      return {
+        success: false,
+        code: 'LINKED_MODELS_READ_ONLY',
+        errMsg: existingRecord.data.outboundStatus === 'pending'
+          ? '订单关联的待出库型号请在订单中修改，系统会自动同步'
+          : '已完成出库的型号是历史快照，不能直接修改',
       };
     }
 

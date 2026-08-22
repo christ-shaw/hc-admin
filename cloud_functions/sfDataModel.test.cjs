@@ -636,6 +636,14 @@ test('工作台状态只使用当前环境关联结果并识别切换日前历�
   );
 });
 
+test('顺丰工作台隐藏无需顺丰的订单并保留其他物流状态', () => {
+  assert.equal(workbench.shouldDisplaySfStatus('not_required'), false);
+  assert.equal(workbench.shouldDisplaySfStatus('not_created'), true);
+  assert.equal(workbench.shouldDisplaySfStatus('applied'), true);
+  assert.equal(workbench.shouldDisplaySfStatus('other_express'), true);
+  assert.equal(workbench.shouldDisplaySfStatus('legacy_unmanaged'), true);
+});
+
 test('同一导出批次与来源订单生成同一幂等日志 ID', () => {
   const first = exportLog.buildExportLogId('batch-1', 'order-1');
   assert.equal(first, exportLog.buildExportLogId('batch-1', 'order-1'));

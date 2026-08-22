@@ -1,0 +1,105 @@
+name: Release deployment
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: '要发布的 Git 引用（分支、标签或提交 SHA；留空则发布当前引用）'
+        required: false
+        type: string
+
+# 同一时间只允许一个生产发布，避免两个版本交叉覆盖 CloudBase 或 Cloudflare。
+concurrency:
+  group: production-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  deployments: write
+
+jobs:
+  deploy:
+    name: Build and deploy production
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      TCB_ENV_ID: ${{ secrets.TCB_ENV_ID }}
+      VITE_CLOUDBASE_ENV: ${{ secrets.VITE_CLOUDBASE_ENV }}
+      VITE_CLOUDBASE_ACCESS_KEY: ${{ secrets.VITE_CLOUDBASE_ACCESS_KEY }}
+
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run cloud function tests
+        run: |
+          npm run test:sf-token
+          npm run test:sf-print
+          npm run test:sf-plugin-print
+          npm run test:sf-data-model
+          npm run test:purchases
+
+      # 此文件仅在 CI 工作目录生成，并随同一份 dist 上传到两个静态站点，
+      # 用于在发布末尾确认两端实际提供的是同一提交。
+      - name: Create release manifest
+        env:
+          RELEASE_REF: ${{ inputs.ref || github.ref_name }}
+        run: |
+          mkdir -p public
+          RELEASE_SHA="$(git rev-parse HEAD)"
+          export RELEASE_SHA
+          node --input-type=module -e 'import { writeFileSync } from "node:fs"; writeFileSync("public/release.json", JSON.stringify({ sha: process.env.RELEASE_SHA, ref: process.env.RELEASE_REF, deployedAt: new Date().toISOString() }))'
+
+      - name: Build frontend once
+        run: npm run build
+
+      - name: Install CloudBase CLI
+        run: npm install --global @cloudbase/cli@3
+
+      - name: Authenticate with CloudBase
+        run: cloudbase login --apiKeyId "$TCB_SECRET_ID" --apiKey "$TCB_SECRET_KEY"
+        env:
+          TCB_SECRET_ID: ${{ secrets.TCB_SECRET_ID }}
+          TCB_SECRET_KEY: ${{ secrets.TCB_SECRET_KEY }}
+
+      # 云函数先于静态资源发布，避免前端先引用尚未上线的接口。
+      - name: Deploy CloudBase functions
+        run: cloudbase --env-id "$TCB_ENV_ID" functions:deploy --all --force
+
+      - name: Deploy CloudBase static site
+        run: cloudbase hosting:deploy dist / --env-id "$TCB_ENV_ID"
+
+      - name: Deploy the same build to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy dist --project-name=hc-admin --branch=codex/cloudflare-deploy
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+
+      # 只有两个地址都返回当前提交的 release.json，工作流才标记为发布成功。
+      - name: Verify both sites serve this release
+        env:
+          TCB_STATIC_SITE_URL: ${{ secrets.TCB_STATIC_SITE_URL }}
+          CLOUDFLARE_PAGES_URL: ${{ secrets.CLOUDFLARE_PAGES_URL }}
+        run: |
+          RELEASE_SHA="$(git rev-parse HEAD)"
+          export RELEASE_SHA
+          for site_url in "$TCB_STATIC_SITE_URL" "$CLOUDFLARE_PAGES_URL"; do
+            curl --fail --silent --show-error --retry 8 --retry-delay 5 "${site_url%/}/release.json?version=$RELEASE_SHA" \
+              | node --input-type=module -e 'import { readFileSync } from "node:fs"; const release = JSON.parse(readFileSync(0, "utf8")); if (release.sha !== process.env.RELEASE_SHA) { throw new Error(`unexpected release: ${release.sha}`) }; console.log(`verified ${release.sha}`)'
+          done

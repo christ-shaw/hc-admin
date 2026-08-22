@@ -201,6 +201,10 @@ function deriveSfStatus(order, currentSfOrder, cutoverDate) {
   return 'not_created';
 }
 
+function shouldDisplaySfStatus(status) {
+  return trimString(status) !== 'not_required';
+}
+
 async function resolveSfConfig() {
   const config = await getDoc(CONFIG_COLLECTION, SF_CONFIG_DOC_ID);
   const env = normalizeSfEnv(config && config.env);
@@ -351,6 +355,43 @@ function publicSfOrder(record, fallbackOrder) {
   };
 }
 
+async function buildWorkbenchRows(orders, config) {
+  const sourceOrderIds = orders.map(order => trimString(order._id)).filter(Boolean);
+  const referencedSfRecordIds = orders
+    .map(order => trimString(order.sfExpressOrderRecordId))
+    .filter(Boolean);
+  const [sourceSfRecords, referencedSfRecords] = await Promise.all([
+    fetchByIds(SF_ORDERS_COLLECTION, sourceOrderIds),
+    fetchDocumentsByIds(SF_ORDERS_COLLECTION, referencedSfRecordIds),
+  ]);
+  const sfRecords = Array.from(new Map(
+    [...sourceSfRecords, ...referencedSfRecords].map(record => [record._id, record])
+  ).values());
+  const sfBySource = new Map();
+  for (const record of sfRecords) {
+    for (const linkedOrderId of normalizeShipmentMeta(record).linkedOrderIds) {
+      const list = sfBySource.get(linkedOrderId) || [];
+      list.push(record);
+      sfBySource.set(linkedOrderId, list);
+    }
+  }
+
+  return orders.map(rawOrder => {
+    const order = stripLegacySfFields(rawOrder);
+    const related = sfBySource.get(order._id) || [];
+    const currentSfOrder = selectLatestCurrent(
+      related.filter(record => normalizeSfEnv(record.env) === config.env)
+    );
+    return {
+      order,
+      sfStatus: deriveSfStatus(order, currentSfOrder, config.dataModelCutoverDate),
+      currentSfOrder: publicSfOrder(currentSfOrder, order),
+      otherEnvSummary: buildOtherEnvSummary(related, config.env),
+      exportSummary: { count: 0, lastExportTime: '' },
+    };
+  });
+}
+
 exports.main = async (event) => {
   const payload = event && event.data || {};
   const pageLimit = Math.max(1, Math.min(Number(payload.limit) || 20, 100));
@@ -382,12 +423,12 @@ exports.main = async (event) => {
     if (trimString(payload.salesperson)) conditions.salesperson = trimString(payload.salesperson);
 
     const query = db.collection(ORDERS_COLLECTION).where(conditions);
-    const matchingOrders = [];
+    const matchingRows = [];
     let scanned = 0;
     let exhausted = false;
     const shippingFeeFilter = normalizeShippingFee(payload.shippingFee);
 
-    while (!exhausted && matchingOrders.length <= pageLimit && scanned < MAX_DATE_SCAN) {
+    scanLoop: while (!exhausted && matchingRows.length <= pageLimit && scanned < MAX_DATE_SCAN) {
       const page = await query
         .orderBy('serialNumber', 'desc')
         .skip(rawOffset)
@@ -396,39 +437,27 @@ exports.main = async (event) => {
       const rawOrders = page.data || [];
       if (rawOrders.length === 0) break;
       const orders = await enrichShippingFees(rawOrders);
+      const candidateOrders = shippingFeeFilter
+        ? orders.filter(order => normalizeShippingFee(order.shippingFee) === shippingFeeFilter)
+        : orders;
+      const candidateRows = await buildWorkbenchRows(candidateOrders, config);
+      const rowByOrderId = new Map(candidateRows.map(row => [row.order._id, row]));
       for (const order of orders) {
         rawOffset += 1;
         scanned += 1;
         if (shippingFeeFilter && normalizeShippingFee(order.shippingFee) !== shippingFeeFilter) continue;
-        matchingOrders.push(order);
-        if (matchingOrders.length > pageLimit) break;
+        const row = rowByOrderId.get(order._id);
+        if (!row || !shouldDisplaySfStatus(row.sfStatus)) continue;
+        matchingRows.push(row);
+        if (matchingRows.length > pageLimit) break scanLoop;
       }
       exhausted = rawOrders.length < RAW_PAGE_SIZE;
     }
 
-    const hasMore = matchingOrders.length > pageLimit;
-    const pageOrders = matchingOrders.slice(0, pageLimit);
-    const sourceOrderIds = pageOrders.map(order => trimString(order._id)).filter(Boolean);
-    const referencedSfRecordIds = pageOrders
-      .map(order => trimString(order.sfExpressOrderRecordId))
-      .filter(Boolean);
-    const [sourceSfRecords, referencedSfRecords] = await Promise.all([
-      fetchByIds(SF_ORDERS_COLLECTION, sourceOrderIds),
-      fetchDocumentsByIds(SF_ORDERS_COLLECTION, referencedSfRecordIds),
-    ]);
-    const sfRecords = Array.from(new Map(
-      [...sourceSfRecords, ...referencedSfRecords].map(record => [record._id, record])
-    ).values());
+    const hasMore = matchingRows.length > pageLimit;
+    const pageRows = matchingRows.slice(0, pageLimit);
+    const sourceOrderIds = pageRows.map(row => trimString(row.order._id)).filter(Boolean);
     const exportLogs = await fetchByIds(SF_EXPORT_LOGS_COLLECTION, sourceOrderIds);
-
-    const sfBySource = new Map();
-    for (const record of sfRecords) {
-      for (const linkedOrderId of normalizeShipmentMeta(record).linkedOrderIds) {
-        const list = sfBySource.get(linkedOrderId) || [];
-        list.push(record);
-        sfBySource.set(linkedOrderId, list);
-      }
-    }
     const exportBySource = new Map();
     for (const log of exportLogs) {
       const current = exportBySource.get(log.sourceOrderId) || { count: 0, lastExportTime: '' };
@@ -438,20 +467,10 @@ exports.main = async (event) => {
       exportBySource.set(log.sourceOrderId, current);
     }
 
-    const data = pageOrders.map(rawOrder => {
-      const order = stripLegacySfFields(rawOrder);
-      const related = sfBySource.get(order._id) || [];
-      const currentSfOrder = selectLatestCurrent(
-        related.filter(record => normalizeSfEnv(record.env) === config.env)
-      );
-      return {
-        order,
-        sfStatus: deriveSfStatus(order, currentSfOrder, config.dataModelCutoverDate),
-        currentSfOrder: publicSfOrder(currentSfOrder, order),
-        otherEnvSummary: buildOtherEnvSummary(related, config.env),
-        exportSummary: exportBySource.get(order._id) || { count: 0, lastExportTime: '' },
-      };
-    });
+    const data = pageRows.map(row => ({
+      ...row,
+      exportSummary: exportBySource.get(row.order._id) || { count: 0, lastExportTime: '' },
+    }));
 
     return {
       success: true,
@@ -481,6 +500,7 @@ exports.__test__ = {
   normalizeShipmentMeta,
   stripLegacySfFields,
   deriveSfStatus,
+  shouldDisplaySfStatus,
   selectLatestCurrent,
   buildOtherEnvSummary,
 };

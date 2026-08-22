@@ -14,12 +14,18 @@ interface PhoneModelsResult<T = unknown> {
 function normalizeBrands(data: PhoneBrand[] = []): PhoneBrand[] {
   return data.map(brand => ({
     ...brand,
-    products: brand.products || (brand.models || []).map((name, index) => ({
+    aliases: brand.aliases || [],
+    products: (brand.products || (brand.models || []).map((name, index) => ({
       name,
+      aliases: [],
       enabled: true,
       sort: (index + 1) * 10,
       systemItem: false,
-      specs: [{ name: '默认', enabled: true, sort: 10, systemItem: false }],
+      specs: [{ name: '默认', aliases: [], enabled: true, sort: 10, systemItem: false }],
+    }))).map(product => ({
+      ...product,
+      aliases: product.aliases || [],
+      specs: (product.specs || []).map(spec => ({ ...spec, aliases: spec.aliases || [] })),
     })),
   }));
 }

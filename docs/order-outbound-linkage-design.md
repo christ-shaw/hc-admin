@@ -177,7 +177,7 @@
 | `remark` | string | 可填 | 可补填 |
 | `customerName` | string | 取订单 | 不变 |
 | `consignee`/`consigneePhone`/`consigneeAddress` | string | 取订单 | 不变 |
-| `phoneModels` | PhoneModelItem[] | 聚合(见 8.2) | 不变 |
+| `phoneModels` | PhoneModelItem[] | 聚合(见 8.2) | 完成时固化为历史快照 |
 | `outboundDate` | string | `''` | 完成当天 |
 | `trackingNumber` | string | `''` | 录入 |
 | `phonePhotos` | string[] | `[]` | 录入 |
@@ -187,6 +187,9 @@
 - 每个订单货品 → `model` 字符串，规则**与小程序一致**：
   `规格 !== '默认' ? '品牌 / 货品 / 规格' : '品牌 / 货品'`，`quantity` 取订单 `quantity`。
 - 合并多订单：相同 `model` **累加 quantity**；不同 `model`（含跨品牌）**各保留一条**。
+- 订单关联的待出库记录不直接编辑 `phoneModels`；修改关联订单后，`updateOrder` 在同一事务中重新聚合并同步。
+- 对既有待出库记录，编辑弹窗提供“从订单同步”；点击后事务化读取全部 `orderIds`，同步型号、数量及“客户下单”备注摘要，并记录修改历史。
+- 已完成的订单关联出库记录保留完成时快照，不随订单后续修改；手工出库记录继续独立维护。
 
 ### 8.3 云函数接口
 

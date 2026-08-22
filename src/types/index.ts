@@ -135,15 +135,27 @@ export interface LogFilters {
 }
 
 /** 手机品牌 */
+export interface PhoneModelAttributes {
+  storage?: string;
+  color?: string;
+  network?: string;
+  [key: string]: unknown;
+}
+
 export interface PhoneModelSpec {
+  skuId?: string;
   name: string;
+  aliases?: string[];
+  attributes?: PhoneModelAttributes;
   enabled?: boolean;
   sort?: number;
   systemItem?: boolean;
 }
 
 export interface PhoneProduct {
+  productId?: string;
   name: string;
+  aliases?: string[];
   enabled?: boolean;
   sort?: number;
   systemItem?: boolean;
@@ -152,7 +164,9 @@ export interface PhoneProduct {
 
 export interface PhoneBrand {
   _id?: string;
+  brandId?: string;
   brand: string;
+  aliases?: string[];
   enabled?: boolean;
   sort?: number;
   systemBrand?: boolean;
@@ -321,6 +335,12 @@ export interface OrderRecord {
   afterSaleSourceSerialNumber?: number; // 原订单序号快照（原订单删除后仍可追溯）
   afterSaleRequestId?: string;      // 售后创建请求 ID（提交重试幂等）
   afterSaleCreatedBy?: string;      // 售后订单创建人 ID
+  renewalSourceOrderId?: string;    // 续租订单关联的来源订单 ID
+  renewalSourceSerialNumber?: number; // 来源订单序号快照（来源订单删除后仍可追溯）
+  renewalRequestId?: string;        // 插件续租请求 ID（用于提交重试幂等）
+  rental2TransferSourceOrderId?: string; // 转租赁2订单关联的来源订单 ID
+  rental2TransferSourceSerialNumber?: number; // 转租赁2来源订单序号快照
+  rental2TransferMode?: 'partial' | 'full'; // 转租赁2方式：部分 / 全部
   attachments: OrderAttachment[];   // 订单附件
   returnStatus?: string;            // 归还状态（租后发货/租后退货时使用）
   returnTrackingNumbers?: string;   // 归还物流单号（多个逗号分隔，归还状态=运输途中时必填）
@@ -356,6 +376,8 @@ export interface ProductItem {
 
 /** 订单筛选条件 */
 export interface OrderFilters {
+  /** 从关联业务跳转时，按数据库 ID 精确打开订单。 */
+  orderId?: string;
   serialNumber?: string;
   customerName?: string;
   salesperson?: string;
@@ -365,6 +387,8 @@ export interface OrderFilters {
   orderAttribute?: string;
   status?: string;
   onlineOrderNumber?: string;
+  /** 从出库记录跳转时，精确查看关联订单。 */
+  outboundRecordId?: string;
   startDate?: string;
   endDate?: string;
   /** 异常状态筛选：unreceived=未收款，unreturned=未退回入库 */

@@ -8,12 +8,26 @@
 const cloud = require('wx-server-sdk');
 const { getCurrentUser } = require('./permissionAuth');
 const { requireMiniappPermission } = require('./miniappAuth');
+const {
+  ID_PREFIXES,
+  ensureStableId,
+  countMissingStableIds,
+  findDuplicateStableIds,
+  hasDuplicateStableIds,
+} = require('./stableIds');
+const {
+  normalizeAliases,
+  normalizeAttributes,
+  shouldIncrementCatalogVersion,
+} = require('./modelFields');
 
 cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 
 const db = cloud.database();
 
 const COLLECTION = 'product_models';
+const COUNTER_COLLECTION = 'system_counters';
+const CATALOG_VERSION_COUNTER = 'skuCatalogVersion';
 const CONFIG_COLLECTION = 'system_config';
 const CONFIG_ID = 'permission_system';
 const ROLE_COLLECTION = 'roles';
@@ -66,46 +80,62 @@ function sortBySortAndName(items, nameKey = 'name') {
 }
 
 function normalizeSpec(spec, index) {
-  const name = cleanName(typeof spec === 'string' ? spec : spec && spec.name);
+  const source = spec && typeof spec === 'object' ? spec : { name: spec };
+  const { attributes: rawAttributes, ...sourceWithoutAttributes } = source;
+  const name = cleanName(source.name);
   if (!name) return null;
+  const attributes = normalizeAttributes(rawAttributes);
   return {
+    ...sourceWithoutAttributes,
+    skuId: ensureStableId(source.skuId, ID_PREFIXES.sku),
     name,
-    enabled: spec && typeof spec === 'object' && spec.enabled === false ? false : true,
-    sort: Number(spec && spec.sort) || (index + 1) * 10,
-    systemItem: spec && typeof spec === 'object' ? !!spec.systemItem : false,
+    aliases: normalizeAliases(source.aliases),
+    enabled: source.enabled === false ? false : true,
+    sort: Number(source.sort) || (index + 1) * 10,
+    systemItem: !!source.systemItem,
+    ...(attributes ? { attributes } : {}),
   };
 }
 
 function normalizeProduct(product, index) {
-  const name = cleanName(typeof product === 'string' ? product : product && product.name);
+  const source = product && typeof product === 'object' ? product : { name: product };
+  const name = cleanName(source.name);
   if (!name) return null;
-  const sourceSpecs = Array.isArray(product && product.specs) ? product.specs : ['默认'];
+  const sourceSpecs = Array.isArray(source.specs) ? source.specs : ['默认'];
   const specs = sourceSpecs.map(normalizeSpec).filter(Boolean);
   return {
+    ...source,
+    productId: ensureStableId(source.productId, ID_PREFIXES.product),
     name,
-    enabled: product && typeof product === 'object' && product.enabled === false ? false : true,
-    sort: Number(product && product.sort) || (index + 1) * 10,
-    systemItem: product && typeof product === 'object' ? !!product.systemItem : false,
-    specs: specs.length > 0 ? specs : [{ name: '默认', enabled: true, sort: 10, systemItem: false }],
+    aliases: normalizeAliases(source.aliases),
+    enabled: source.enabled === false ? false : true,
+    sort: Number(source.sort) || (index + 1) * 10,
+    systemItem: !!source.systemItem,
+    specs: specs.length > 0 ? specs : [normalizeSpec({ name: '默认', enabled: true, sort: 10, systemItem: false }, 0)],
   };
 }
 
 function normalizeBrand(brand, index) {
-  const brandName = cleanName(brand && brand.brand);
+  const source = brand && typeof brand === 'object' ? brand : { brand };
+  const { _id, ...persistedSource } = source;
+  const brandName = cleanName(source.brand);
   if (!brandName) return null;
-  const sourceProducts = Array.isArray(brand.products)
-    ? brand.products
-    : (Array.isArray(brand.models) ? brand.models : []);
+  const sourceProducts = Array.isArray(source.products) && source.products.length > 0
+    ? source.products
+    : (Array.isArray(source.models) ? source.models : []);
   const products = sourceProducts.map(normalizeProduct).filter(Boolean);
   const timestamp = now();
   return {
+    ...persistedSource,
+    brandId: ensureStableId(source.brandId, ID_PREFIXES.brand),
     brand: brandName,
-    enabled: brand.enabled === false ? false : true,
-    sort: Number(brand.sort) || (index + 1) * 10,
-    systemBrand: !!brand.systemBrand,
+    aliases: normalizeAliases(source.aliases),
+    enabled: source.enabled === false ? false : true,
+    sort: Number(source.sort) || (index + 1) * 10,
+    systemBrand: !!source.systemBrand,
     products,
     models: buildLegacyModels(products),
-    createdAt: brand.createdAt || timestamp,
+    createdAt: source.createdAt || timestamp,
     updatedAt: timestamp,
   };
 }
@@ -132,10 +162,19 @@ function toClientBrand(doc) {
     }));
   const products = sortBySortAndName(sourceProducts).map(product => ({
     ...product,
-    specs: sortBySortAndName(product.specs || []),
+    aliases: normalizeAliases(product.aliases),
+    specs: sortBySortAndName(product.specs || []).map(spec => {
+      const attributes = normalizeAttributes(spec.attributes);
+      return {
+        ...spec,
+        aliases: normalizeAliases(spec.aliases),
+        ...(attributes ? { attributes } : {}),
+      };
+    }),
   }));
   return {
     ...doc,
+    aliases: normalizeAliases(doc.aliases),
     products,
     models: buildLegacyModels(products),
   };
@@ -238,6 +277,52 @@ async function fetchBrands() {
   return sortBySortAndName(list.map(toClientBrand), 'brand');
 }
 
+async function getCatalogVersion() {
+  try {
+    const result = await db.collection(COUNTER_COLLECTION).doc(CATALOG_VERSION_COUNTER).get();
+    return Math.max(0, Number(result.data && result.data.value) || 0);
+  } catch (err) {
+    if (notFound(err)) return 0;
+    throw err;
+  }
+}
+
+async function incrementCatalogVersion() {
+  const collection = db.collection(COUNTER_COLLECTION);
+  try {
+    await collection.doc(CATALOG_VERSION_COUNTER).update({
+      data: {
+        value: db.command.inc(1),
+        updatedAt: db.serverDate(),
+      },
+    });
+  } catch (err) {
+    if (!notFound(err)) throw err;
+    try {
+      await collection.add({
+        data: {
+          _id: CATALOG_VERSION_COUNTER,
+          value: 1,
+          updatedAt: db.serverDate(),
+        },
+      });
+    } catch (createErr) {
+      const message = String(createErr && createErr.message || '').toLowerCase();
+      const duplicate = createErr && createErr.errCode === -502001
+        || message.includes('duplicate')
+        || message.includes('already exists');
+      if (!duplicate) throw createErr;
+      await collection.doc(CATALOG_VERSION_COUNTER).update({
+        data: {
+          value: db.command.inc(1),
+          updatedAt: db.serverDate(),
+        },
+      });
+    }
+  }
+  return getCatalogVersion();
+}
+
 async function getBrandDoc(brand) {
   const brandName = cleanName(brand);
   if (!brandName) return null;
@@ -255,10 +340,13 @@ async function getBrandDoc(brand) {
 }
 
 async function saveBrandDoc(doc) {
-  const { _id, ...rest } = doc;
-  const products = rest.products || [];
+  const { _id } = doc;
+  if (!_id) throw new Error('缺少品牌文档 _id');
+  const normalized = normalizeBrand(doc, 0);
+  if (!normalized) throw new Error('品牌数据无效');
+  const products = normalized.products || [];
   const data = {
-    ...rest,
+    ...normalized,
     models: buildLegacyModels(products),
     updatedAt: now(),
   };
@@ -267,14 +355,67 @@ async function saveBrandDoc(doc) {
 }
 
 async function addBrandDoc(doc) {
-  const { _id, ...rest } = doc;
-  const products = rest.products || [];
-  await db.collection(COLLECTION).add({
+  const normalized = normalizeBrand(doc, 0);
+  if (!normalized) throw new Error('品牌数据无效');
+  const products = normalized.products || [];
+  const result = await db.collection(COLLECTION).add({
     data: {
-      ...rest,
+      ...normalized,
       models: buildLegacyModels(products),
     },
   });
+  return { _id: result._id, ...normalized };
+}
+
+async function backfillSkuIds(payload) {
+  await ensureCollection();
+  const dryRun = payload.dryRun !== false;
+  const docs = await fetchAll(COLLECTION);
+  const before = countMissingStableIds(docs);
+  const duplicatesBefore = findDuplicateStableIds(docs);
+
+  if (hasDuplicateStableIds(duplicatesBefore)) {
+    return {
+      success: false,
+      errMsg: '检测到重复稳定 ID，请先修复后再执行回填',
+      data: { dryRun, documentCount: docs.length, missing: before, duplicates: duplicatesBefore },
+    };
+  }
+
+  if (dryRun) {
+    return {
+      success: true,
+      data: { dryRun: true, documentCount: docs.length, missing: before, duplicates: duplicatesBefore },
+    };
+  }
+
+  let updatedDocuments = 0;
+  for (const doc of docs) {
+    const missing = countMissingStableIds([doc]);
+    if (missing.brands || missing.products || missing.specs) {
+      await saveBrandDoc(doc);
+      updatedDocuments += 1;
+    }
+  }
+
+  const afterDocs = await fetchAll(COLLECTION);
+  const after = countMissingStableIds(afterDocs);
+  const duplicatesAfter = findDuplicateStableIds(afterDocs);
+  if (after.brands || after.products || after.specs || hasDuplicateStableIds(duplicatesAfter)) {
+    throw new Error('稳定 ID 回填后校验失败');
+  }
+
+  return {
+    success: true,
+    data: {
+      dryRun: false,
+      documentCount: afterDocs.length,
+      updatedDocuments,
+      before,
+      after,
+      duplicates: duplicatesAfter,
+    },
+  };
 }
 
 function mergeProducts(existingProducts, seedProducts) {
@@ -346,6 +487,7 @@ async function addBrand(payload) {
   const total = (await fetchAll(COLLECTION)).length;
   await addBrandDoc({
     brand,
+    aliases: normalizeAliases(payload.aliases),
     enabled: true,
     sort: (total + 1) * 10,
     systemBrand: false,
@@ -364,12 +506,17 @@ async function updateBrand(payload) {
   const doc = await getBrandDoc(brand);
   if (!doc) return { success: false, errMsg: '品牌不存在' };
 
+  const aliases = Object.prototype.hasOwnProperty.call(payload, 'aliases')
+    ? normalizeAliases(payload.aliases)
+    : doc.aliases;
+
   if (brand !== nextBrand) {
     const duplicated = await getBrandDoc(nextBrand);
     if (duplicated) return { success: false, errMsg: '品牌已存在' };
     await saveBrandDoc({
       ...doc,
       brand: nextBrand,
+      aliases,
       enabled: payload.enabled === false ? false : true,
     });
     return { success: true };
@@ -377,6 +524,7 @@ async function updateBrand(payload) {
 
   await saveBrandDoc({
     ...doc,
+    aliases,
     enabled: payload.enabled === false ? false : true,
   });
   return { success: true };
@@ -405,9 +553,23 @@ async function addProduct(payload) {
   const products = [...(doc.products || [])];
   if (products.some(product => product.name === productName)) return { success: false, errMsg: '货品已存在' };
 
-  const specs = uniqueNames(payload.specs).map((name, index) => ({ name, enabled: true, sort: (index + 1) * 10, systemItem: false }));
+  const specs = [];
+  for (const [index, input] of (Array.isArray(payload.specs) ? payload.specs : []).entries()) {
+    const source = input && typeof input === 'object' ? input : { name: input };
+    const name = cleanName(source.name);
+    if (!name || specs.some(spec => spec.name === name)) continue;
+    specs.push({
+      ...source,
+      name,
+      aliases: normalizeAliases(source.aliases),
+      enabled: source.enabled === false ? false : true,
+      sort: Number(source.sort) || (index + 1) * 10,
+      systemItem: !!source.systemItem,
+    });
+  }
   products.push({
     name: productName,
+    aliases: normalizeAliases(payload.aliases),
     enabled: true,
     sort: (products.length + 1) * 10,
     systemItem: false,
@@ -445,6 +607,9 @@ async function updateProduct(payload) {
 
   product.name = nextProductName;
   product.enabled = payload.enabled === false ? false : true;
+  if (Object.prototype.hasOwnProperty.call(payload, 'aliases')) {
+    product.aliases = normalizeAliases(payload.aliases);
+  }
   await saveBrandDoc({ ...doc, products });
   return { success: true };
 }
@@ -481,7 +646,15 @@ async function addSpec(payload) {
 
   const specs = [...(product.specs || [])];
   if (specs.some(spec => spec.name === specName)) return { success: false, errMsg: '规格已存在' };
-  specs.push({ name: specName, enabled: true, sort: (specs.length + 1) * 10, systemItem: false });
+  const attributes = normalizeAttributes(payload.attributes);
+  specs.push({
+    name: specName,
+    aliases: normalizeAliases(payload.aliases),
+    enabled: true,
+    sort: (specs.length + 1) * 10,
+    systemItem: false,
+    ...(attributes ? { attributes } : {}),
+  });
   product.specs = specs;
   await saveBrandDoc({ ...doc, products });
   return { success: true };
@@ -510,6 +683,14 @@ async function updateSpec(payload) {
 
   spec.name = nextSpecName;
   spec.enabled = payload.enabled === false ? false : true;
+  if (Object.prototype.hasOwnProperty.call(payload, 'aliases')) {
+    spec.aliases = normalizeAliases(payload.aliases);
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, 'attributes')) {
+    const attributes = normalizeAttributes(payload.attributes);
+    if (attributes) spec.attributes = attributes;
+    else delete spec.attributes;
+  }
   product.specs = specs;
   await saveBrandDoc({ ...doc, products });
   return { success: true };
@@ -552,6 +733,7 @@ exports.main = async (event) => {
     'addSpec',
     'updateSpec',
     'deleteSpec',
+    'backfillSkuIds',
   ]);
 
   try {
@@ -576,32 +758,46 @@ exports.main = async (event) => {
 
     // 统一入口：返回完整品牌树（品牌→货品→规格），hc-admin 与小程序共用
     if (action === 'getProductTree') {
-      return { success: true, data: await fetchBrands() };
+      const [brands, catalogVersion] = await Promise.all([fetchBrands(), getCatalogVersion()]);
+      return { success: true, data: brands, catalogVersion };
     }
 
     if (action === 'getAllModels') {
-      const brands = await fetchBrands();
+      const [brands, catalogVersion] = await Promise.all([fetchBrands(), getCatalogVersion()]);
       const models = Array.from(new Set(brands.flatMap(brand => brand.models || [])))
         .sort((a, b) => a.localeCompare(b, 'zh-CN'));
-      return { success: true, data: models };
+      return { success: true, data: models, catalogVersion };
     }
 
     if (action === 'getModelsByBrand') {
-      const doc = await getBrandDoc(payload.brand);
-      return { success: true, data: doc ? buildLegacyModels(doc.products || []) : [] };
+      const [doc, catalogVersion] = await Promise.all([getBrandDoc(payload.brand), getCatalogVersion()]);
+      return { success: true, data: doc ? buildLegacyModels(doc.products || []) : [], catalogVersion };
     }
 
-    if (action === 'initializeDefault') return initializeDefault(payload.seed);
-    if (action === 'addBrand') return addBrand(payload);
-    if (action === 'updateBrand') return updateBrand(payload);
-    if (action === 'deleteBrand') return deleteBrand(payload);
-    if (action === 'addModels') return addModels(payload);
-    if (action === 'addProduct') return addProduct(payload);
-    if (action === 'updateProduct') return updateProduct(payload);
-    if (action === 'deleteProduct') return deleteProduct(payload);
-    if (action === 'addSpec') return addSpec(payload);
-    if (action === 'updateSpec') return updateSpec(payload);
-    if (action === 'deleteSpec') return deleteSpec(payload);
+    if (action === 'getCatalogVersion') {
+      return { success: true, data: { catalogVersion: await getCatalogVersion() } };
+    }
+
+    let result = null;
+    if (action === 'initializeDefault') result = await initializeDefault(payload.seed);
+    else if (action === 'addBrand') result = await addBrand(payload);
+    else if (action === 'updateBrand') result = await updateBrand(payload);
+    else if (action === 'deleteBrand') result = await deleteBrand(payload);
+    else if (action === 'addModels') result = await addModels(payload);
+    else if (action === 'addProduct') result = await addProduct(payload);
+    else if (action === 'updateProduct') result = await updateProduct(payload);
+    else if (action === 'deleteProduct') result = await deleteProduct(payload);
+    else if (action === 'addSpec') result = await addSpec(payload);
+    else if (action === 'updateSpec') result = await updateSpec(payload);
+    else if (action === 'deleteSpec') result = await deleteSpec(payload);
+    else if (action === 'backfillSkuIds') result = await backfillSkuIds(payload);
+
+    if (result) {
+      const catalogVersion = shouldIncrementCatalogVersion(action, payload, result)
+        ? await incrementCatalogVersion()
+        : await getCatalogVersion();
+      return { ...result, catalogVersion };
+    }
 
     return { success: false, errMsg: `未知操作: ${action}` };
   } catch (error) {

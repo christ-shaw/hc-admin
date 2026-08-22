@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Dialog, Input, MessagePlugin, Select, Table, Tag } from 'tdesign-react';
 import { Link2, LoaderCircle, PackageCheck, Printer, RotateCcw, Search, Truck, Unlink, Unlock } from 'lucide-react';
 import { useLocation } from 'react-router-dom';
 import type {
   OrderRecord,
+  SfExpressOrderRecord,
   SfExpressWorkbenchRow,
   SfShipmentStatus,
   SfWorkbenchStatus,
@@ -16,6 +17,7 @@ import { getBrandLabel, getProductLabel } from '../data/dict';
 import { usePermission } from '../hooks/usePermission';
 import { SfPrintDialog } from '../components/SfPrintDialog';
 import { useTabWorkspace } from '../contexts/TabWorkspaceContext';
+import { detectSfPrintPlatform } from '../utils/sfPrintPlugin';
 
 interface SfFilters {
   date: string;
@@ -105,6 +107,7 @@ interface ShipmentActionResult {
 }
 
 const PAGE_SIZE = 20;
+const SF_PRINT_PLATFORM = detectSfPrintPlatform();
 
 const STATUS_META: Record<SfWorkbenchStatus, {
   label: string;
@@ -197,6 +200,22 @@ function canBatchPrint(row: SfExpressWorkbenchRow) {
     && row.currentSfOrder.sourceOrderId === row.order._id;
 }
 
+function createAppliedPrintRow(row: TableRow, result: SfActionResult): TableRow | null {
+  if (!result.success || !result.sfExpressOrderId || !result.waybillNo) return null;
+  return {
+    ...row,
+    sfStatus: 'applied',
+    currentSfOrder: {
+      ...(row.currentSfOrder || {}),
+      _id: result.sfExpressOrderId,
+      sourceOrderId: row.order._id,
+      sfOrderId: result.sfOrderId || '',
+      status: 'applied',
+      waybillNo: result.waybillNo,
+    } as SfExpressOrderRecord,
+  };
+}
+
 function createPdfBlob(base64: string, mimeType = 'application/pdf') {
   const binary = window.atob(base64);
   const bytes = new Uint8Array(binary.length);
@@ -219,14 +238,15 @@ export function SfExpress() {
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [selectedRows, setSelectedRows] = useState<Record<string, TableRow>>({});
-  const selectedApplyOrders = useMemo(
-    () => Object.values(selectedRows).filter(canBatchApply).map(row => row.order),
+  const selectedApplyRows = useMemo(
+    () => Object.values(selectedRows).filter(canBatchApply),
     [selectedRows],
   );
   const selectedPrintRows = useMemo(
     () => Object.values(selectedRows).filter(canBatchPrint),
     [selectedRows],
   );
+  const selectedBatchCount = selectedApplyRows.length + selectedPrintRows.length;
   const [sfEnv, setSfEnv] = useState<'sandbox' | 'production' | ''>('');
   const [dataModelVersion, setDataModelVersion] = useState(1);
   const [cutoverDate, setCutoverDate] = useState('');
@@ -234,7 +254,8 @@ export function SfExpress() {
   const [applyTarget, setApplyTarget] = useState<TableRow | null>(null);
   const [applying, setApplying] = useState(false);
   const [batchApplyVisible, setBatchApplyVisible] = useState(false);
-  const [batchApplyTargets, setBatchApplyTargets] = useState<OrderRecord[]>([]);
+  const [batchApplyTargets, setBatchApplyTargets] = useState<TableRow[]>([]);
+  const [batchExistingPrintTargets, setBatchExistingPrintTargets] = useState<TableRow[]>([]);
   const [batchApplying, setBatchApplying] = useState(false);
   const [batchApplyProgress, setBatchApplyProgress] = useState(0);
   const [batchApplyingOrderId, setBatchApplyingOrderId] = useState('');
@@ -243,6 +264,8 @@ export function SfExpress() {
   const [printingId, setPrintingId] = useState('');
   const [printTarget, setPrintTarget] = useState<TableRow | null>(null);
   const [batchPrintTargets, setBatchPrintTargets] = useState<TableRow[]>([]);
+  const [batchPrintAutoStart, setBatchPrintAutoStart] = useState(false);
+  const preparedPdfWindowsRef = useRef<Record<string, Window>>({});
   const [cancelTarget, setCancelTarget] = useState<TableRow | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const [reuseTarget, setReuseTarget] = useState<TableRow | null>(null);
@@ -267,7 +290,9 @@ export function SfExpress() {
         data: { limit: PAGE_SIZE, cursor, ...targetFilters },
       });
       if (result.success === false) throw new Error(result.errMsg || '查询失败');
-      setRows((result.data || []).map(row => ({ ...row, _id: row.order._id })));
+      setRows((result.data || [])
+        .filter(row => row.sfStatus !== 'not_required')
+        .map(row => ({ ...row, _id: row.order._id })));
       setNextCursor(result.cursor || null);
       setHasMore(!!result.hasMore && !!result.cursor);
       setPageIndex(targetPageIndex);
@@ -320,6 +345,26 @@ export function SfExpress() {
   };
 
   const reloadCurrentPage = () => loadRows(filters, pageCursors[pageIndex] || null, pageIndex);
+
+  const prepareBatchPdfWindows = (targets: TableRow[]): boolean => {
+    preparedPdfWindowsRef.current = {};
+    if (SF_PRINT_PLATFORM === 'windows') return true;
+
+    const prepared: Record<string, Window> = {};
+    for (const target of targets) {
+      const printWindow = window.open('', '_blank');
+      if (!printWindow) {
+        Object.values(prepared).forEach(openedWindow => openedWindow.close());
+        MessagePlugin.warning('浏览器已拦截批量打印窗口，请允许本站弹出多个窗口后重试');
+        return false;
+      }
+      printWindow.document.title = '等待生成顺丰丰密面单';
+      printWindow.document.body.innerHTML = '<p style="font:14px sans-serif;padding:24px;color:#4b5563">正在生成顺丰单号，完成后将自动生成面单…</p>';
+      prepared[target.order._id] = printWindow;
+    }
+    preparedPdfWindowsRef.current = prepared;
+    return true;
+  };
 
   const handleOpenMasterShipment = (shipment: NonNullable<TableRow['currentSfOrder']>) => {
     const masterFilters: SfFilters = {
@@ -402,8 +447,19 @@ export function SfExpress() {
   };
 
   const handleOpenBatchApply = () => {
-    if (selectedApplyOrders.length < 2) {
-      MessagePlugin.warning('请至少勾选 2 条可申请订单');
+    if (selectedBatchCount < 2) {
+      MessagePlugin.warning('请至少勾选 2 条可生成或打印的订单');
+      return;
+    }
+    if (!canPrintWaybill) {
+      MessagePlugin.warning('当前角色没有顺丰面单打印权限');
+      return;
+    }
+    if (selectedApplyRows.length === 0) {
+      if (!prepareBatchPdfWindows(selectedPrintRows)) return;
+      setSelectedRows({});
+      setBatchPrintAutoStart(true);
+      setBatchPrintTargets([...selectedPrintRows]);
       return;
     }
     if (!sfEnv) {
@@ -414,14 +470,15 @@ export function SfExpress() {
       MessagePlugin.error('顺丰独立订单模型尚未启用');
       return;
     }
-    const invalidOrder = selectedApplyOrders.find(order => getMissingFields(order).length > 0);
-    if (invalidOrder) {
+    const invalidRow = selectedApplyRows.find(row => getMissingFields(row.order).length > 0);
+    if (invalidRow) {
       MessagePlugin.warning(
-        `${getOrderLabel(invalidOrder)} 请先补全：${getMissingFields(invalidOrder).join('、')}`
+        `${getOrderLabel(invalidRow.order)} 请先补全：${getMissingFields(invalidRow.order).join('、')}`
       );
       return;
     }
-    setBatchApplyTargets([...selectedApplyOrders]);
+    setBatchApplyTargets([...selectedApplyRows]);
+    setBatchExistingPrintTargets([...selectedPrintRows]);
     setBatchApplyProgress(0);
     setBatchApplyResults([]);
     setBatchApplyVisible(true);
@@ -431,6 +488,7 @@ export function SfExpress() {
     if (batchApplying) return;
     setBatchApplyVisible(false);
     setBatchApplyTargets([]);
+    setBatchExistingPrintTargets([]);
     setBatchApplyProgress(0);
     setBatchApplyingOrderId('');
     setBatchApplyResults([]);
@@ -438,6 +496,8 @@ export function SfExpress() {
 
   const handleBatchApply = async () => {
     if (!batchApplyTargets.length || batchApplying) return;
+    const pendingPrintTargets = [...batchExistingPrintTargets, ...batchApplyTargets];
+    if (!prepareBatchPdfWindows(pendingPrintTargets)) return;
     setBatchApplying(true);
     setBatchApplyProgress(0);
     setBatchApplyingOrderId('');
@@ -446,7 +506,8 @@ export function SfExpress() {
     const results = new Array<SfBatchApplyResult>(batchApplyTargets.length);
     try {
       for (let index = 0; index < batchApplyTargets.length; index += 1) {
-        const order = batchApplyTargets[index];
+        const row = batchApplyTargets[index];
+        const order = row.order;
         setBatchApplyingOrderId(order._id);
         try {
           const result = await callFunction<SfActionResult>('applySfExpress', {
@@ -474,10 +535,19 @@ export function SfExpress() {
       const succeeded = results.filter(result => result.success);
       const failed = results.filter(result => !result.success);
       const conflicts = succeeded.filter(result => result.outboundSync?.action === 'conflict');
-      const succeededIds = new Set(succeeded.map(result => result.sourceOrderId));
-      setSelectedRows(previous => Object.fromEntries(
-        Object.entries(previous).filter(([orderId]) => !succeededIds.has(orderId))
-      ));
+      const resultByOrderId = new Map(results.map(result => [result.sourceOrderId, result]));
+      const newlyPrintableRows = batchApplyTargets
+        .map(row => createAppliedPrintRow(row, resultByOrderId.get(row.order._id)!))
+        .filter((row): row is TableRow => !!row);
+      const printTargets = [...batchExistingPrintTargets, ...newlyPrintableRows];
+      const printableOrderIds = new Set(printTargets.map(row => row.order._id));
+      Object.entries(preparedPdfWindowsRef.current).forEach(([orderId, printWindow]) => {
+        if (!printableOrderIds.has(orderId)) {
+          printWindow.close();
+          delete preparedPdfWindowsRef.current[orderId];
+        }
+      });
+      setSelectedRows({});
 
       if (failed.length > 0) {
         MessagePlugin.warning(`批量申请完成：成功 ${succeeded.length} 条，失败 ${failed.length} 条`);
@@ -487,6 +557,15 @@ export function SfExpress() {
         MessagePlugin.success(`已成功生成 ${succeeded.length} 个顺丰运单号`);
       }
       await reloadCurrentPage();
+      if (printTargets.length > 0) {
+        setBatchApplyVisible(false);
+        setBatchApplyTargets([]);
+        setBatchExistingPrintTargets([]);
+        setBatchApplyProgress(0);
+        setBatchApplyResults([]);
+        setBatchPrintAutoStart(true);
+        setBatchPrintTargets(printTargets);
+      }
     } finally {
       setBatchApplyingOrderId('');
       setBatchApplying(false);
@@ -626,16 +705,23 @@ export function SfExpress() {
     }
   };
 
-  const handlePdfPrint = async (row: SfExpressWorkbenchRow) => {
-    if (!row.currentSfOrder || printingId) return;
-    if (row.currentSfOrder.sourceOrderId !== row.order._id) {
-      MessagePlugin.warning('子订单不单独打印面单，请在主顺丰单上打印');
-      return;
+  const handlePdfPrint = async (
+    row: SfExpressWorkbenchRow,
+    preparedWindow?: Window | null,
+  ): Promise<boolean> => {
+    if (!row.currentSfOrder || printingId) {
+      preparedWindow?.close();
+      return false;
     }
-    const printWindow = window.open('', '_blank');
+    if (row.currentSfOrder.sourceOrderId !== row.order._id) {
+      preparedWindow?.close();
+      MessagePlugin.warning('子订单不单独打印面单，请在主顺丰单上打印');
+      return false;
+    }
+    const printWindow = preparedWindow || window.open('', '_blank');
     if (!printWindow) {
       MessagePlugin.warning('浏览器已拦截打印窗口，请允许本站弹出窗口后重试');
-      return;
+      return false;
     }
     printWindow.document.title = '正在生成顺丰丰密面单';
     printWindow.document.body.innerHTML = '<p style="font:14px sans-serif;padding:24px;color:#4b5563">正在生成顺丰丰密面单，请稍候…</p>';
@@ -653,11 +739,15 @@ export function SfExpress() {
         }, 500);
       }, { once: true });
       window.setTimeout(() => URL.revokeObjectURL(pdfUrl), 5 * 60 * 1000);
-      MessagePlugin.success(`丰密面单已生成：${result.waybillNo || row.currentSfOrder.waybillNo}`);
-      await reloadCurrentPage();
+      if (!preparedWindow) {
+        MessagePlugin.success(`丰密面单已生成：${result.waybillNo || row.currentSfOrder.waybillNo}`);
+        await reloadCurrentPage();
+      }
+      return true;
     } catch (error) {
       printWindow.close();
       MessagePlugin.error('丰密面单打印失败：' + (error instanceof Error ? error.message : String(error)));
+      return false;
     } finally {
       setPrintingId('');
     }
@@ -929,20 +1019,18 @@ export function SfExpress() {
           <Tag theme="primary" variant="light">包裹关联：只读</Tag>
           <Button
             theme="primary"
-            icon={<Truck size={16} />}
-            disabled={selectedApplyOrders.length < 2 || applying || batchApplying || dataModelVersion !== 2}
+            icon={<Printer size={16} />}
+            disabled={
+              !canPrintWaybill
+              || selectedBatchCount < 2
+              || applying
+              || batchApplying
+              || (selectedApplyRows.length > 0 && dataModelVersion !== 2)
+            }
+            title={!canPrintWaybill ? '当前角色没有顺丰面单打印权限' : ''}
             onClick={handleOpenBatchApply}
           >
-            批量申请单号（{selectedApplyOrders.length}）
-          </Button>
-          <Button
-            variant="outline"
-            icon={<Printer size={16} />}
-            disabled={!canPrintWaybill || selectedPrintRows.length < 2 || batchApplying}
-            title={!canPrintWaybill ? '当前角色没有顺丰面单打印权限' : ''}
-            onClick={() => setBatchPrintTargets([...selectedPrintRows])}
-          >
-            串行打印面单（{selectedPrintRows.length}）
+            {selectedApplyRows.length > 0 ? '批量生成并打印' : '重复批量打印'}（{selectedBatchCount}）
           </Button>
         </div>
       </div>
@@ -1016,13 +1104,13 @@ export function SfExpress() {
       </Dialog>
 
       <Dialog
-        header={batchApplyResults.length > 0 ? '批量申请结果' : '确认批量申请顺丰单号'}
+        header={batchApplyResults.length > 0 ? '批量生成结果' : '确认批量生成并打印'}
         visible={batchApplyVisible}
         width="760px"
         onClose={closeBatchApply}
         onConfirm={batchApplyResults.length > 0 ? closeBatchApply : handleBatchApply}
         confirmBtn={{
-          content: batchApplyResults.length > 0 ? '关闭' : `确认申请（${batchApplyTargets.length}）`,
+          content: batchApplyResults.length > 0 ? '关闭' : `生成并继续打印（${batchApplyTargets.length + batchExistingPrintTargets.length}）`,
           loading: batchApplying,
         }}
         cancelBtn={{
@@ -1034,7 +1122,8 @@ export function SfExpress() {
         <div className="space-y-4 text-sm">
           <div className={`rounded-lg border px-3 py-2 ${sfEnv === 'production' ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
             本次将在<strong>{sfEnv === 'production' ? '生产环境（将生成真实运单）' : '沙箱测试环境'}</strong>
-            为 {batchApplyTargets.length} 条订单申请单号，系统将按勾选顺序逐条处理。
+            为 {batchApplyTargets.length} 条订单申请单号，随后连续打印共 {batchApplyTargets.length + batchExistingPrintTargets.length} 张面单。
+            系统将按勾选顺序逐条处理，生成失败的订单会跳过打印。
           </div>
           {batchApplying && (
             <div className="space-y-2 rounded-lg border border-blue-100 bg-blue-50 px-3 py-3 text-blue-700">
@@ -1043,8 +1132,8 @@ export function SfExpress() {
                   <LoaderCircle className="shrink-0 animate-spin" size={16} />
                   <span className="truncate">
                     正在处理：{getOrderLabel(
-                      batchApplyTargets.find(order => order._id === batchApplyingOrderId)
-                        || batchApplyTargets[Math.min(batchApplyProgress, batchApplyTargets.length - 1)]
+                      (batchApplyTargets.find(row => row.order._id === batchApplyingOrderId)
+                        || batchApplyTargets[Math.min(batchApplyProgress, batchApplyTargets.length - 1)]).order
                     )}
                   </span>
                 </div>
@@ -1065,7 +1154,8 @@ export function SfExpress() {
             </div>
           )}
           <div className="max-h-[48vh] space-y-2 overflow-auto pr-1">
-            {batchApplyTargets.map(order => {
+            {batchApplyTargets.map(row => {
+              const order = row.order;
               const result = batchApplyResults.find(item => item.sourceOrderId === order._id);
               const isApplying = batchApplying && batchApplyingOrderId === order._id;
               return (
@@ -1117,9 +1207,13 @@ export function SfExpress() {
       <SfPrintDialog
         record={printTarget}
         batchRecords={batchPrintTargets}
+        autoStartBatch={batchPrintAutoStart}
+        preparedPdfWindows={batchPrintTargets.map(row => preparedPdfWindowsRef.current[row.order._id] || null)}
         onClose={() => {
           setPrintTarget(null);
           setBatchPrintTargets([]);
+          setBatchPrintAutoStart(false);
+          preparedPdfWindowsRef.current = {};
         }}
         onPdfPrint={handlePdfPrint}
         onPluginPrinted={handlePluginPrinted}

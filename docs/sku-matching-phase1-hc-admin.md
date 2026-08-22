@@ -1,5 +1,7 @@
 # SKU 智能匹配·阶段一 hc-admin 侧改造清单（评审稿）
 
+> 历史说明：本文记录 `rule-v1` 阶段设计，其中“商家参与 SKU 匹配”的结论已被 `HC_ADMIN_SKU_RULE_V2_CHANGE_GUIDE.md` 取代。当前实现以 rule-v2 文档和 `docs/sku-matching-collections.md` 为准。
+
 - 文档状态：评审稿
 - 上游方案：`hc-order-assist/docs/SKU_MATCHING_DESIGN.md`（赞晨租商品与 hc-admin SKU 智能匹配方案）
 - 本文范围：阶段一（数据基础与规则推荐，**不接 LLM**）中 hc-admin 侧的全部改造项
@@ -164,6 +166,16 @@
   - 反查不唯一（货品改过名）、SKU 已停用、数据残缺 → 降为 `candidate` 或跳过，输出清单供人工核对
 - 执行方式：先 dryRun 输出统计（可 verified / 降级 / 跳过 各多少条）再落库
 - 效果：历史映射上线第一天即有命中率，同款商品重复导入直接秒填
+
+实现脚本：`scripts/backfill-source-sku-mappings.cjs`。脚本只投影日志里的商品标题与商户，不读取或输出收件人、手机号、地址；默认 dry-run，报告写入 `output/`。已有映射使用确定性 `_id` 检查并跳过，不覆盖线上反馈。
+
+```bash
+# 预览（默认 dry-run）
+npm run sku-mapping:backfill
+
+# 确认报告后正式写入；必须显式确认目标环境
+npm run sku-mapping:backfill -- --apply --confirm cloud1-8gvbotkt966e5e19
+```
 
 ### G2. 规则可测性
 

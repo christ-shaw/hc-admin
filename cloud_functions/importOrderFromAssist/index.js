@@ -8,7 +8,32 @@
  * 设计见 docs/order-assist-import-design.md
  */
 
+const crypto = require('crypto');
 const cloud = require('wx-server-sdk');
+const { mapProductModelDocs } = require('./productModelsCatalog');
+const {
+  analyzeTitle,
+  buildHistoryCandidate,
+  buildRuleMatch,
+  createMatchRequestId,
+  createSourceMappingIdV2,
+  flattenCatalog,
+  isMultiProductTitle,
+  normalizeTitle,
+  selectConsistentLegacyMapping,
+} = require('./skuMatcher');
+const {
+  buildNextMapping,
+  isLearningFeedback,
+  normalizeFeedbackType,
+  normalizeSelectedItems,
+} = require('./skuFeedback');
+const {
+  buildRenewalIntroduction,
+  buildRenewalOrderDoc,
+  isRentIntroductionOrder,
+  normalizePositiveAmount,
+} = require('./renewalOrder');
 
 cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 
@@ -20,8 +45,12 @@ const OUTBOUND_COLLECTION = 'outbound_records';
 const LOG_COLLECTION = 'order_import_logs';
 const COUNTER_COLLECTION = 'system_counters';
 const PRODUCT_MODELS_COLLECTION = 'product_models';
+const SOURCE_MAPPING_COLLECTION = 'source_sku_mapping';
+const MATCH_LOG_COLLECTION = 'sku_match_log';
+const CATALOG_VERSION_COUNTER = 'skuCatalogVersion';
 const ORDER_SERIAL_COUNTER = 'orderSerialNumber';
 const SOURCE = 'zanchenzu';
+const SKU_MATCH_ALGORITHM_VERSION = 'rule-v2';
 const PENDING_SHIPMENT_TEXT = '待发货';
 // 货品三级（brand/productName/specification）、销售渠道、人员（responsiblePerson）由插件选择后传入
 // 订单级必填（公共字段）与货品级必填（items[] 每项）分开校验
@@ -29,6 +58,14 @@ const REQUIRED_ORDER_FIELDS = ['sourceOrderNo', 'recipient', 'recipientPhone', '
 const REQUIRED_ITEM_FIELDS = ['sourceOrderItemNo', 'brand', 'productName', 'specification'];
 
 const SALESPERSON_DICT_GROUP = 'salesperson';
+const PAYMENT_ACCOUNT_DICT_GROUP = 'payment_account';
+const RENEWAL_ATTACHMENT_MAX_COUNT = 5;
+const RENEWAL_ATTACHMENT_MAX_FILE_SIZE = 4 * 1024 * 1024;
+const RENEWAL_ATTACHMENT_MAX_TOTAL_SIZE = 4 * 1024 * 1024;
+const RENEWAL_ATTACHMENT_EXTENSIONS = new Set([
+  'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'heic', 'heif',
+  'pdf', 'doc', 'docx', 'xls', 'xlsx', 'csv', 'txt',
+]);
 
 // 自动生成出库单的快递方式（与 dict.ts SHIPPING_FEE_MAP 的 key 一致），非法值回退寄付
 const SHIPPING_METHOD_KEYS = new Set(['prepaid', 'cod', 'pickup']);
@@ -89,6 +126,14 @@ function fail(statusCode, code, message) {
   return httpResponse(statusCode, { success: false, code, message });
 }
 
+function normalizeHttpHeaders(value) {
+  const headers = {};
+  Object.keys(value || {}).forEach((key) => {
+    headers[key.toLowerCase()] = value[key];
+  });
+  return headers;
+}
+
 // 解析 HTTP 访问服务的请求体；兼容直接 callFunction（event 即为业务参数）
 function parseEvent(event) {
   const isHttp = event && (event.httpMethod || event.headers || typeof event.body === 'string');
@@ -96,10 +141,7 @@ function parseEvent(event) {
     return { isHttp: false, headers: {}, payload: event || {} };
   }
 
-  const headers = {};
-  Object.keys(event.headers || {}).forEach((k) => {
-    headers[k.toLowerCase()] = event.headers[k];
-  });
+  const headers = normalizeHttpHeaders(event.headers);
 
   let raw = event.body || '';
   if (raw && event.isBase64Encoded) {
@@ -226,10 +268,15 @@ function getBrandLabel(brand) {
 }
 
 function buildOrderIntroduction(order) {
+  const products = getOrderProducts(order);
+  if (isRentIntroductionOrder(order, products)) {
+    return buildRenewalIntroduction(order, SALES_CHANNEL_MAP);
+  }
+
   const consigneeLine = [order.consignee, order.consigneePhone, order.consigneeAddress]
     .map((value) => String(value || '').trim() || '-')
     .join('，');
-  const phoneSummary = getOrderProducts(order)
+  const phoneSummary = products
     .map((product) => {
       const productName = getProductLabel(product.productName) || getBrandLabel(product.brand) || '-';
       const specification = product.specification && product.specification !== '默认'
@@ -327,20 +374,292 @@ async function fetchProductModels() {
     .orderBy('sort', 'asc')
     .limit(1000)
     .get();
-  const docs = (res.data || []);
-  return docs.map((doc) => {
-    const products = (doc.products || [])
-      .filter((p) => p && p.enabled !== false)
-      .sort((a, b) => (Number(a.sort) || 0) - (Number(b.sort) || 0))
-      .map((p) => ({
-        name: p.name,
-        specs: (p.specs || [])
-          .filter((s) => s && s.enabled !== false)
-          .sort((a, b) => (Number(a.sort) || 0) - (Number(b.sort) || 0))
-          .map((s) => s.name),
-      }));
-    return { brand: doc.brand, products };
-  }).filter((b) => b.brand && b.products.length > 0);
+  return mapProductModelDocs(res.data || []);
+}
+
+async function fetchCatalogVersion() {
+  try {
+    const result = await db.collection(COUNTER_COLLECTION).doc(CATALOG_VERSION_COUNTER).get();
+    return Math.max(0, Number(result.data && result.data.value) || 0);
+  } catch (err) {
+    if (isNotFound(err)) return 0;
+    throw err;
+  }
+}
+
+async function fetchHistoryMapping(source, titleFingerprint, normalizedTitle, activeSkuIds, goodsQuantity) {
+  try {
+    const mappingId = createSourceMappingIdV2(source, titleFingerprint);
+    const result = await db.collection(SOURCE_MAPPING_COLLECTION).doc(mappingId).get();
+    const mapping = result.data || null;
+    if (mapping && mapping.source === source && mapping.title_fingerprint === titleFingerprint) return mapping;
+  } catch (err) {
+    if (!isNotFound(err)) throw err;
+  }
+
+  // rule-v1 过渡双读：忽略商家维度，仅在所有旧版 verified 映射指向同一有效 SKU 时采用。
+  const legacyResult = await db.collection(SOURCE_MAPPING_COLLECTION)
+    .where({ source, normalized_title: normalizedTitle, status: 'verified' })
+    .limit(100)
+    .get();
+  const legacyMappings = (legacyResult.data || []).filter(mapping => !mapping.title_fingerprint);
+  return selectConsistentLegacyMapping(legacyMappings, activeSkuIds, goodsQuantity);
+}
+
+async function matchProductModels(payload) {
+  const goodsTitle = String(payload && payload.goodsTitle || '').trim();
+  if (!goodsTitle) return fail(422, 'MISSING_FIELDS', '缺少 goodsTitle');
+
+  const source = String(payload && payload.source || SOURCE).trim().toLowerCase() || SOURCE;
+  const merchant = String(payload && payload.merchant || '').trim();
+  const goodsQuantity = Math.max(1, Number.parseInt(payload && payload.goodsQuantity, 10) || 1);
+  const requestId = createMatchRequestId();
+  const startedAt = Date.now();
+
+  const [brands, catalogVersion] = await Promise.all([
+    fetchProductModels(),
+    fetchCatalogVersion(),
+  ]);
+  const analysis = analyzeTitle(goodsTitle, brands);
+  const normalizedTitle = analysis.normalizedTitle;
+  const titleFingerprint = analysis.titleFingerprint;
+  const common = {
+    requestId,
+    normalizedTitle,
+    titleFingerprint,
+    catalogVersion,
+    algorithmVersion: SKU_MATCH_ALGORITHM_VERSION,
+    needsConfirmation: true,
+  };
+
+  const finish = async (message, matchData) => {
+    const durationMs = Date.now() - startedAt;
+    const responseData = { ...common, ...matchData, durationMs };
+    await db.collection(MATCH_LOG_COLLECTION).add({
+      data: {
+        _id: requestId,
+        source,
+        source_order_no: String(payload && payload.sourceOrderNo || '').trim(),
+        source_title: goodsTitle,
+        normalized_title: normalizedTitle,
+        title_fingerprint: titleFingerprint,
+        merchant,
+        merchant_ignored_for_matching: true,
+        scene: payload && payload.scene === 'afterSale' ? 'afterSale' : 'import',
+        goods_quantity: goodsQuantity,
+        catalog_version: catalogVersion,
+        algorithm_version: SKU_MATCH_ALGORITHM_VERSION,
+        match_type: responseData.matchType,
+        candidates: responseData.candidates || [],
+        missing_attributes: responseData.missingAttributes || [],
+        mapping_promotable: matchData.promotable !== false && analysis.promotable !== false,
+        ambiguity_reason: matchData.ambiguityReason || analysis.ambiguityReason || '',
+        duration_ms: durationMs,
+        feedback_processed: false,
+        created_at: new Date().toISOString(),
+      },
+    });
+    return ok('OK', message, responseData);
+  };
+
+  if (isMultiProductTitle(goodsTitle)) {
+    return finish('需要人工选择', {
+      matchType: 'none',
+      candidates: [],
+      missingAttributes: [],
+      promotable: false,
+      ambiguityReason: '套装或多商品标题不进入自动学习映射',
+      message: '识别到套装或多商品标题，阶段一不自动拆分，请人工选择。',
+    });
+  }
+
+  const activeSkuIds = new Set(analysis.skus.map(sku => sku.skuId));
+  const historyMapping = await fetchHistoryMapping(
+    source,
+    titleFingerprint,
+    normalizedTitle,
+    activeSkuIds,
+    goodsQuantity,
+  );
+  const historyCandidate = buildHistoryCandidate(historyMapping, activeSkuIds, goodsQuantity);
+  if (historyCandidate) {
+    return finish('命中历史映射', {
+      matchType: 'history',
+      candidates: [historyCandidate],
+      missingAttributes: [],
+      promotable: true,
+    });
+  }
+
+  const ruleResult = buildRuleMatch({ goodsTitle, goodsQuantity, brands, analysis });
+  return finish(ruleResult.matchType === 'rule' ? '规则匹配完成' : '未找到可靠推荐', ruleResult);
+}
+
+async function verifySuccessfulImport(sourceOrderNo) {
+  let logs;
+  try {
+    const result = await db.collection(LOG_COLLECTION)
+      .where({ sourceOrderNo })
+      .limit(100)
+      .get();
+    logs = (result.data || []).filter(log => (
+      log.source === SOURCE && log.status === 'success' && String(log.createdOrderId || '').trim()
+    ));
+  } catch (err) {
+    if (isNotFound(err)) return null;
+    throw err;
+  }
+
+  for (const log of logs) {
+    try {
+      const orderResult = await db.collection(ORDERS_COLLECTION).doc(log.createdOrderId).get();
+      const order = orderResult.data || null;
+      if (
+        order
+        && order.importSource === 'hc-order-assist'
+        && String(order.onlineOrderNumber || '').trim() === sourceOrderNo
+      ) return { logId: log._id, orderId: order._id || log.createdOrderId };
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+    }
+  }
+  return null;
+}
+
+function cleanOperator(value) {
+  const operator = value && typeof value === 'object' ? value : {};
+  return {
+    uid: String(operator.uid || '').trim(),
+    username: String(operator.username || '').trim(),
+    loginType: String(operator.loginType || '').trim(),
+  };
+}
+
+async function submitProductMatchFeedback(payload) {
+  const requestId = String(payload && payload.requestId || '').trim();
+  const feedbackType = normalizeFeedbackType(payload && payload.feedbackType);
+  if (!requestId) return fail(422, 'MISSING_FIELDS', '缺少 requestId');
+  if (!feedbackType) return fail(422, 'INVALID_FIELD', 'feedbackType 非法');
+
+  let initialLog;
+  try {
+    const result = await db.collection(MATCH_LOG_COLLECTION).doc(requestId).get();
+    initialLog = result.data || null;
+  } catch (err) {
+    if (isNotFound(err)) return fail(404, 'MATCH_REQUEST_NOT_FOUND', '匹配请求不存在或已过期');
+    throw err;
+  }
+
+  const source = String(payload && payload.source || SOURCE).trim().toLowerCase() || SOURCE;
+  const sourceOrderNo = String(payload && payload.sourceOrderNo || '').trim();
+  const goodsTitle = String(payload && payload.goodsTitle || '').trim();
+  const normalizedTitle = normalizeTitle(goodsTitle);
+  if (
+    initialLog.source !== source
+    || initialLog.source_order_no !== sourceOrderNo
+    || initialLog.normalized_title !== normalizedTitle
+  ) return fail(409, 'MATCH_CONTEXT_MISMATCH', '反馈内容与原匹配请求不一致');
+
+  const selectedItems = normalizeSelectedItems(payload && payload.selectedItems);
+  const learning = isLearningFeedback(feedbackType);
+  let importEvidence = null;
+  let feedbackAnalysis = null;
+  if (learning) {
+    if (!sourceOrderNo) return fail(422, 'MISSING_FIELDS', '学习反馈缺少 sourceOrderNo');
+    if (selectedItems.length === 0) return fail(422, 'MISSING_FIELDS', '学习反馈缺少 selectedItems');
+    const selectedQuantity = selectedItems.reduce((sum, item) => sum + item.quantity, 0);
+    if (selectedQuantity > Math.max(1, Number(initialLog.goods_quantity) || 1)) {
+      return fail(422, 'INVALID_FIELD', '选择数量超过来源商品数量');
+    }
+
+    const brands = await fetchProductModels();
+    feedbackAnalysis = analyzeTitle(goodsTitle, brands);
+    const activeSkuIds = new Set(flattenCatalog(brands).map(sku => sku.skuId));
+    const invalidSkuIds = selectedItems.map(item => item.skuId).filter(skuId => !activeSkuIds.has(skuId));
+    if (invalidSkuIds.length > 0) return fail(422, 'SKU_INVALID', `SKU 不存在或已停用: ${invalidSkuIds.join(', ')}`);
+
+    importEvidence = await verifySuccessfulImport(sourceOrderNo);
+    if (!importEvidence) return fail(409, 'IMPORT_NOT_CONFIRMED', '来源订单尚未成功导入，不能计入学习映射');
+  }
+
+  const operator = cleanOperator(payload && payload.operator);
+  const recommendedSkuIds = Array.from(new Set(
+    (Array.isArray(payload && payload.recommendedSkuIds) ? payload.recommendedSkuIds : [])
+      .map(value => String(value || '').trim())
+      .filter(Boolean)
+  ));
+  const now = new Date().toISOString();
+  const titleFingerprint = String(initialLog.title_fingerprint || feedbackAnalysis && feedbackAnalysis.titleFingerprint || '').trim();
+  const mappingPromotable = initialLog.mapping_promotable !== undefined
+    ? initialLog.mapping_promotable !== false
+    : !!(feedbackAnalysis && feedbackAnalysis.promotable);
+  const ambiguityReason = String(initialLog.ambiguity_reason || feedbackAnalysis && feedbackAnalysis.ambiguityReason || '').trim();
+  const mappingId = learning ? createSourceMappingIdV2(source, titleFingerprint) : '';
+  const transaction = await db.startTransaction();
+  try {
+    const logResult = await transaction.collection(MATCH_LOG_COLLECTION).doc(requestId).get();
+    const log = logResult.data || null;
+    if (!log) {
+      await transaction.rollback();
+      return fail(404, 'MATCH_REQUEST_NOT_FOUND', '匹配请求不存在或已过期');
+    }
+    if (log.feedback_processed) {
+      await transaction.rollback();
+      return ok('DUPLICATED', '反馈已处理', { requestId, duplicated: true });
+    }
+
+    let mapping = null;
+    let nextMapping = null;
+    if (learning) {
+      try {
+        const mappingResult = await transaction.collection(SOURCE_MAPPING_COLLECTION).doc(mappingId).get();
+        mapping = mappingResult.data || null;
+      } catch (err) {
+        if (!isNotFound(err)) throw err;
+      }
+      nextMapping = buildNextMapping(mapping, {
+        source,
+        goodsTitle,
+        normalizedTitle,
+        titleFingerprint,
+        promotable: mappingPromotable,
+        ambiguityReason,
+        selectedItems,
+        sourceOrderNo,
+        operator,
+        requestId,
+        now,
+      });
+      if (mapping) {
+        await transaction.collection(SOURCE_MAPPING_COLLECTION).doc(mappingId).update({ data: nextMapping });
+      } else {
+        await transaction.collection(SOURCE_MAPPING_COLLECTION).add({ data: { _id: mappingId, ...nextMapping } });
+      }
+    }
+
+    await transaction.collection(MATCH_LOG_COLLECTION).doc(requestId).update({
+      data: {
+        feedback_processed: true,
+        feedback_type: feedbackType,
+        recommended_sku_ids: recommendedSkuIds,
+        selected_items: selectedItems,
+        operator,
+        import_evidence: importEvidence,
+        feedback_at: now,
+      },
+    });
+    await transaction.commit();
+    return ok('OK', '反馈已记录', {
+      requestId,
+      mappingId: learning ? mappingId : '',
+      mappingStatus: nextMapping && nextMapping.status || '',
+      confirmedCount: nextMapping && nextMapping.confirmed_count || 0,
+      correctedCount: nextMapping && nextMapping.corrected_count || 0,
+    });
+  } catch (err) {
+    try { await transaction.rollback(); } catch (_) {}
+    throw err;
+  }
 }
 
 // 归一化货品明细：新契约 order.items[] 一次多货品；不带 items 时兼容旧形态（顶层货品字段视为唯一条目）
@@ -533,6 +852,207 @@ async function createAfterSaleOrder(payload) {
   }
 }
 
+function isRenewalSourceOrder(order) {
+  if (!order || order.afterSaleSourceOrderId || order.importSource === 'manual-after-sale') return false;
+  const rental = ['rental1', '租赁1', 'rental2', '租赁2'].includes(order.orderAttribute);
+  const newBusiness = ['newBusiness', '新增业务'].includes(order.orderType);
+  return rental && newBusiness;
+}
+
+async function findRenewalSourceOrder(sourceOrderNo) {
+  const result = await db.collection(ORDERS_COLLECTION)
+    .where({ onlineOrderNumber: sourceOrderNo })
+    .limit(100)
+    .get();
+  const candidates = (result.data || []).filter(isRenewalSourceOrder);
+  candidates.sort((a, b) => {
+    const aRoot = a.importSource === 'hc-order-assist' ? 1 : 0;
+    const bRoot = b.importSource === 'hc-order-assist' ? 1 : 0;
+    if (aRoot !== bRoot) return bRoot - aRoot;
+    const aRenewal = a.importSource === 'hc-order-assist-renewal' || a.renewalSourceOrderId ? 1 : 0;
+    const bRenewal = b.importSource === 'hc-order-assist-renewal' || b.renewalSourceOrderId ? 1 : 0;
+    if (aRenewal !== bRenewal) return aRenewal - bRenewal;
+    return Number(a.serialNumber || 0) - Number(b.serialNumber || 0);
+  });
+  return candidates[0] || null;
+}
+
+function getRenewalAttachmentExtension(fileName, contentType) {
+  const extensionMatch = String(fileName || '').toLowerCase().match(/\.([a-z0-9]+)$/);
+  const extension = extensionMatch ? extensionMatch[1] : '';
+  if (RENEWAL_ATTACHMENT_EXTENSIONS.has(extension)) return extension;
+  return ({
+    'application/pdf': 'pdf',
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+    'image/gif': 'gif',
+    'image/webp': 'webp',
+    'image/bmp': 'bmp',
+    'image/heic': 'heic',
+    'image/heif': 'heif',
+    'application/msword': 'doc',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+    'application/vnd.ms-excel': 'xls',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+    'text/csv': 'csv',
+    'text/plain': 'txt',
+  })[String(contentType || '').toLowerCase()] || '';
+}
+
+function getRenewalAttachmentRequestHash(requestId) {
+  return crypto.createHash('sha256').update(requestId).digest('hex').slice(0, 24);
+}
+
+function normalizeRenewalAttachmentRefs(value, requestId) {
+  const attachments = Array.isArray(value) ? value : [];
+  if (attachments.length > RENEWAL_ATTACHMENT_MAX_COUNT) {
+    throw new Error(`续租附件最多上传 ${RENEWAL_ATTACHMENT_MAX_COUNT} 个`);
+  }
+  const expectedPath = `/orders_attachments/renewals/${getRenewalAttachmentRequestHash(requestId)}/`;
+  let totalSize = 0;
+  return attachments.map((attachment, index) => {
+    const fileID = String(attachment && attachment.fileID || '').trim();
+    const fileName = String(attachment && attachment.fileName || '').trim().slice(0, 200);
+    const size = Number(attachment && attachment.size) || 0;
+    if (!fileID.startsWith('cloud://') || !fileID.includes(expectedPath) || !fileName
+      || size <= 0 || size > RENEWAL_ATTACHMENT_MAX_FILE_SIZE) {
+      throw new Error(`续租附件[${index + 1}]引用无效`);
+    }
+    totalSize += size;
+    if (totalSize > RENEWAL_ATTACHMENT_MAX_TOTAL_SIZE) {
+      throw new Error('续租附件总大小不能超过 4MB');
+    }
+    return { fileID, fileName };
+  });
+}
+
+async function cleanupRenewalAttachments(attachments) {
+  if (!attachments.length) return;
+  await cloud.deleteFile({ fileList: attachments.map((attachment) => attachment.fileID) })
+    .catch((cleanupErr) => console.error('[importOrderFromAssist] 清理续租附件失败:', cleanupErr));
+}
+
+async function handleRenewalAttachmentUpload(event, headers) {
+  let fileName = '';
+  try {
+    fileName = decodeURIComponent(String(headers['x-hc-file-name'] || '')).trim().slice(0, 200);
+  } catch (_) {
+    return fail(422, 'INVALID_ATTACHMENT', '续租附件名称无效');
+  }
+  const requestId = String(headers['x-hc-renewal-request-id'] || '').trim();
+  const contentType = String(headers['x-hc-file-content-type'] || '').trim().toLowerCase();
+  const extension = getRenewalAttachmentExtension(fileName, contentType);
+  if (!fileName || !requestId || requestId.length > 100 || !extension) {
+    return fail(422, 'INVALID_ATTACHMENT', '续租附件信息或格式无效');
+  }
+
+  const rawBody = event && event.body || '';
+  const fileContent = event && event.isBase64Encoded
+    ? Buffer.from(rawBody, 'base64')
+    : Buffer.from(rawBody, 'latin1');
+  if (!fileContent.length || fileContent.length > RENEWAL_ATTACHMENT_MAX_FILE_SIZE) {
+    return fail(422, 'INVALID_ATTACHMENT', '单个续租附件不能超过 4MB');
+  }
+
+  try {
+    const requestHash = getRenewalAttachmentRequestHash(requestId);
+    const fileHash = crypto.createHash('sha256').update(fileContent).digest('hex').slice(0, 12);
+    const cloudPath = `orders_attachments/renewals/${requestHash}/${fileHash}.${extension}`;
+    const result = await cloud.uploadFile({ cloudPath, fileContent });
+    if (!result || !result.fileID) throw new Error('云存储未返回 fileID');
+    return ok('UPLOADED', '续租附件上传成功', { fileID: result.fileID, fileName, size: fileContent.length });
+  } catch (err) {
+    console.error('[importOrderFromAssist] 上传续租附件失败:', err);
+    return fail(500, 'ATTACHMENT_UPLOAD_FAILED', err.message || '续租附件上传失败');
+  }
+}
+
+async function createRenewalOrder(payload) {
+  const order = (payload && payload.order) || {};
+  const sourceOrderNo = String(order.sourceOrderNo || '').trim();
+  const requestId = String(order.renewalRequestId || '').trim();
+  const paymentAccount = String(order.paymentAccount || '').trim();
+  const amount = normalizePositiveAmount(order.renewalAmount);
+
+  if (!sourceOrderNo || !requestId || !paymentAccount || !amount) {
+    return fail(422, 'MISSING_FIELDS', '请完整填写网店订单号、续租金额和收款账户');
+  }
+  if (requestId.length > 100) return fail(422, 'INVALID_FIELD', '续租请求标识无效');
+  let uploadedAttachments;
+  try {
+    uploadedAttachments = normalizeRenewalAttachmentRefs(order.renewalAttachments, requestId);
+  } catch (err) {
+    return fail(422, 'INVALID_ATTACHMENT', err.message || '续租附件无效');
+  }
+
+  try {
+    const paymentAccounts = await fetchDictItems(PAYMENT_ACCOUNT_DICT_GROUP);
+    const validAccounts = new Set(paymentAccounts.map((item) => item.value));
+    if (!validAccounts.has(paymentAccount)) {
+      await cleanupRenewalAttachments(uploadedAttachments);
+      return fail(422, 'INVALID_FIELD', `收款账户无效: ${paymentAccount}`);
+    }
+
+    const existing = await queryFirst(ORDERS_COLLECTION, {
+      importSource: 'hc-order-assist-renewal',
+      renewalRequestId: requestId,
+    });
+    if (existing) {
+      const attachmentCount = Array.isArray(existing.attachments) ? existing.attachments.length : 0;
+      return ok('DUPLICATED', '续租订单已存在', {
+        orderId: existing._id,
+        duplicated: true,
+        introduction: buildOrderIntroduction(existing),
+        attachmentCount,
+        uploadedAttachmentCount: Number(existing.renewalUploadedAttachmentCount) || 0,
+      });
+    }
+
+    const source = await findRenewalSourceOrder(sourceOrderNo);
+    if (!source) {
+      await cleanupRenewalAttachments(uploadedAttachments);
+      return fail(404, 'SOURCE_ORDER_NOT_FOUND', 'hc-admin 未找到可续租的原订单，请先导入原订单');
+    }
+
+    const now = db.serverDate();
+    const serialNumber = await getNextSerialNumber();
+    const orderDoc = buildRenewalOrderDoc(source, {
+      requestId,
+      amount,
+      paymentAccount,
+      remark: order.remark,
+      attachments: uploadedAttachments,
+    }, serialNumber, now, todayInBeijing());
+    orderDoc._id = `renewal_${crypto.createHash('sha256').update(requestId).digest('hex').slice(0, 24)}`;
+    const addResult = await db.collection(ORDERS_COLLECTION).add({ data: orderDoc });
+    return ok('CREATED', '续租订单创建成功', {
+      orderId: addResult._id,
+      duplicated: false,
+      introduction: buildOrderIntroduction({ _id: addResult._id, ...orderDoc }),
+      attachmentCount: orderDoc.attachments.length,
+      uploadedAttachmentCount: uploadedAttachments.length,
+    });
+  } catch (err) {
+    const concurrent = await queryFirst(ORDERS_COLLECTION, {
+      importSource: 'hc-order-assist-renewal',
+      renewalRequestId: requestId,
+    }).catch(() => null);
+    if (concurrent) {
+      const attachmentCount = Array.isArray(concurrent.attachments) ? concurrent.attachments.length : 0;
+      return ok('DUPLICATED', '续租订单已存在', {
+        orderId: concurrent._id,
+        duplicated: true,
+        introduction: buildOrderIntroduction(concurrent),
+        attachmentCount,
+        uploadedAttachmentCount: Number(concurrent.renewalUploadedAttachmentCount) || 0,
+      });
+    }
+    await cleanupRenewalAttachments(uploadedAttachments);
+    console.error('[importOrderFromAssist] 创建续租订单失败:', err);
+    return fail(500, 'INTERNAL_ERROR', err.message || '创建续租订单失败');
+  }
+}
+
 // ============ 出库单联动 ============
 
 // 货品条目 → model 字符串（与 generateOutboundFromOrders / 小程序拼法一致：规格非"默认"时带规格）
@@ -643,6 +1163,18 @@ async function syncOutboundAfterImport({ orderId, orderDoc, appendedProducts, au
 // ============ 主流程 ============
 
 exports.main = async (event) => {
+  const binaryHeaders = normalizeHttpHeaders(event && event.headers);
+  if (binaryHeaders['x-hc-order-assist-action'] === 'upload-renewal-attachment') {
+    if (event && event.httpMethod && String(event.httpMethod).toUpperCase() !== 'POST') {
+      return fail(405, 'METHOD_NOT_ALLOWED', '仅支持 POST');
+    }
+    const expectedToken = process.env.HC_ORDER_ASSIST_TOKEN || '';
+    if (!expectedToken) return fail(500, 'INTERNAL_ERROR', '服务端未配置鉴权 token');
+    const token = getBearerToken(binaryHeaders);
+    if (!token || token !== expectedToken) return fail(401, 'LOGIN_REQUIRED', 'token 无效');
+    return handleRenewalAttachmentUpload(event, binaryHeaders);
+  }
+
   const { isHttp, headers, payload } = parseEvent(event);
 
   // 只接受 POST（HTTP 模式）
@@ -731,20 +1263,51 @@ exports.main = async (event) => {
   // 取货品三级结构（供插件下拉选择）；与销售渠道枚举一并返回
   if (payload && payload.action === 'getProductModels') {
     try {
-      const [brands, salespersons] = await Promise.all([
+      const [brands, salespersons, paymentAccounts, catalogVersion] = await Promise.all([
         fetchProductModels(),
         fetchDictItems(SALESPERSON_DICT_GROUP),
+        fetchDictItems(PAYMENT_ACCOUNT_DICT_GROUP),
+        fetchCatalogVersion(),
       ]);
-      return ok('OK', '获取成功', { brands, salesChannels: SALES_CHANNEL_OPTIONS, salespersons });
+      return ok('OK', '获取成功', {
+        brands,
+        salesChannels: SALES_CHANNEL_OPTIONS,
+        salespersons,
+        paymentAccounts,
+        catalogVersion,
+      });
     } catch (err) {
       console.error('[importOrderFromAssist] 获取货品失败:', err);
       return fail(500, 'INTERNAL_ERROR', err.message || '获取货品失败');
     }
   }
 
+  if (payload && payload.action === 'matchProductModels') {
+    try {
+      return await matchProductModels(payload);
+    } catch (err) {
+      console.error('[importOrderFromAssist] SKU 匹配失败:', err);
+      return fail(500, 'INTERNAL_ERROR', err.message || 'SKU 匹配失败');
+    }
+  }
+
+  if (payload && payload.action === 'submitProductMatchFeedback') {
+    try {
+      return await submitProductMatchFeedback(payload);
+    } catch (err) {
+      console.error('[importOrderFromAssist] SKU 匹配反馈失败:', err);
+      return fail(500, 'INTERNAL_ERROR', err.message || 'SKU 匹配反馈失败');
+    }
+  }
+
   // 由插件“申请售后”发起，创建独立的售后服务订单；不要求赞晨订单处于待发货状态。
   if (payload && payload.action === 'createAfterSaleOrder') {
     return createAfterSaleOrder(payload);
+  }
+
+  // 由插件“申请续租”发起，继承原订单渠道、人员、网店单号和附件，创建虚拟续期租金订单。
+  if (payload && payload.action === 'createRenewalOrder') {
+    return createRenewalOrder(payload);
   }
 
   const order = (payload && payload.order) || {};

@@ -101,6 +101,14 @@ interface AutoOutboundOption {
   enabled: boolean | null;
 }
 
+type Rental2TransferMode = 'partial' | 'full';
+
+interface Rental2TransferSource {
+  _id: string;
+  serialNumber: number;
+  mode: Rental2TransferMode;
+}
+
 interface AfterSaleFormData {
   products: ProductItem[];
   consignee: string;
@@ -134,6 +142,26 @@ function isAfterSaleEligible(record: OrderRecord): boolean {
   const rental2 = record.orderAttribute === 'rental2' || record.orderAttribute === '租赁2';
   const shipped = record.status === 'shipped' || record.status === '已发货';
   return rental2 && shipped && !record.afterSaleSourceOrderId && record.importSource !== 'manual-after-sale';
+}
+
+/** 新增业务的租赁订单可以作为续租来源；售后订单不进入续租链路。 */
+function isRenewalEligible(record: OrderRecord): boolean {
+  const rental = ['rental1', '租赁1', 'rental2', '租赁2'].includes(record.orderAttribute);
+  const newBusiness = ['newBusiness', '新增业务'].includes(record.orderType);
+  return rental && newBusiness && !record.afterSaleSourceOrderId && record.importSource !== 'manual-after-sale';
+}
+
+/** 新增业务的租赁1实体货品订单可以快捷转为租赁2。 */
+function isRental2TransferEligible(record: OrderRecord): boolean {
+  const rental1 = record.orderAttribute === 'rental1' || record.orderAttribute === '租赁1';
+  const newBusiness = record.orderType === 'newBusiness' || record.orderType === '新增业务';
+  const hasPhysicalProduct = getOrderProducts(record).some(product => product.brand && product.brand !== '虚拟产品');
+  return rental1
+    && newBusiness
+    && hasPhysicalProduct
+    && !record.afterSaleSourceOrderId
+    && !record.rental2TransferSourceOrderId
+    && record.importSource !== 'manual-after-sale';
 }
 
 function normalizeShippingFeeValue(value: string | undefined): string {
@@ -334,12 +362,41 @@ function mergeCustomerRemarks(records: Array<Pick<OrderRecord, 'customerRemark'>
   )).join('；');
 }
 
-/** 生成订单简介：收件信息、租赁手机与备注、下单人与订单编号 */
-function buildOrderIntroduction(record: OrderRecord): string {
+function formatIntroductionAmount(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+function formatIntroductionAccount(value: string): string {
+  return String(value || '').trim().replace(/(微信|支付宝)$/u, ' $1');
+}
+
+/** 租金简介：渠道、网店单号、客户、租金及收款去向。 */
+function buildRenewalIntroduction(record: OrderRecord, salesChannelMap: Record<string, string>): string {
+  const channel = getDictLabel(salesChannelMap, record.salesChannel) || '-';
+  const orderNumber = String(record.onlineOrderNumber || record.serialNumber || '').trim() || '-';
+  const customerName = String(record.customerName || '').trim() || '-';
+  const amount = getOrderTotalAmount(record);
+  const splits = getOrderPaymentSplits(record);
+  let paymentText = '转-';
+  if (splits.length === 1) {
+    paymentText = splits[0].account === '未收款' ? '未收款' : `转${formatIntroductionAccount(splits[0].account)}`;
+  } else if (splits.length > 1) {
+    paymentText = `转${splits.map(split => `${formatIntroductionAccount(split.account)} ${formatIntroductionAmount(split.amount)}`).join('、')}`;
+  }
+  return `${channel} ${orderNumber} ${customerName}  租金 ${formatIntroductionAmount(amount)} ${paymentText}`;
+}
+
+/** 生成订单简介；平台租金和续期租金使用相同的收款摘要，其他订单保留发货简介。 */
+function buildOrderIntroduction(record: OrderRecord, salesChannelMap: Record<string, string>): string {
+  const products = getOrderProducts(record);
+  const isRentOrder = !!record.renewalSourceOrderId
+    || products.some(product => product.productName === '平台租金' || product.productName === '续期租金');
+  if (isRentOrder) return buildRenewalIntroduction(record, salesChannelMap);
+
   const consigneeLine = [record.consignee, record.consigneePhone, record.consigneeAddress]
     .map(value => String(value || '').trim() || '-')
     .join('，');
-  const phoneSummary = getOrderProducts(record)
+  const phoneSummary = products
     .map(product => {
       const productName = getProductLabel(product.productName) || getBrandLabel(product.brand) || '-';
       const specification = product.specification && product.specification !== '默认'
@@ -375,6 +432,32 @@ async function copyText(text: string): Promise<void> {
     if (!document.execCommand('copy')) throw new Error('copy failed');
   } finally {
     document.body.removeChild(textarea);
+  }
+}
+
+function isClipboardImage(fileName: string): boolean {
+  return /\.(png|jpe?g|webp|gif|bmp)$/i.test(fileName);
+}
+
+async function getClipboardPngBlob(url: string): Promise<Blob> {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error('附件下载失败');
+  const source = await response.blob();
+  if (source.type === 'image/png') return source;
+
+  const bitmap = await createImageBitmap(source);
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('浏览器无法处理该图片');
+    context.drawImage(bitmap, 0, 0);
+    return await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('图片转换失败')), 'image/png');
+    });
+  } finally {
+    bitmap.close();
   }
 }
 
@@ -554,6 +637,117 @@ function buildEditFormFromRecord(record: OrderRecord): OrderFormData {
   };
 }
 
+/**
+ * 基于历史订单创建一份新的手工录单草稿。
+ *
+ * 仅复制业务填写内容；序号、网店订单号、物流、出库、顺丰和附件都属于原订单的
+ * 历史状态，绝不能带入新订单。出库决定也会重新置为“未选择”，由用户在第 4 步确认。
+ */
+function buildCopyFormFromRecord(record: OrderRecord): OrderFormData {
+  const copied = buildEditFormFromRecord(record);
+  const now = new Date();
+  const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const virtualProductOrder = isVirtualProductOrder(copied.products);
+
+  return {
+    ...copied,
+    serialNumber: 0,
+    date,
+    // 平台订单号应对应本次新建的订单，避免沿用原订单号。
+    onlineOrderNumber: '',
+    trackingNumber: '',
+    status: virtualProductOrder ? 'noShip' : 'unknown',
+    attachments: [],
+    returnStatus: '',
+    returnTrackingNumbers: '',
+    // 普通货品订单必须在向导第 4 步重新确认；虚拟货品仍固定无需出库。
+    needsOutbound: false,
+  };
+}
+
+/**
+ * 创建续租草稿：继承客户归属信息，但本次续租使用独立订单号、金额与收款信息。
+ * “续期租金”是虚拟货品，因此不会带出库、物流和收件信息；原订单附件会继续保留。
+ */
+function buildRenewalFormFromRecord(record: OrderRecord): OrderFormData {
+  const copied = buildCopyFormFromRecord(record);
+  return {
+    ...copied,
+    orderSource: 'new',
+    orderType: 'newBusiness',
+    onlineOrderNumber: record.onlineOrderNumber || '',
+    products: [{
+      brand: '虚拟产品',
+      productName: '续期租金',
+      specification: '默认',
+      quantity: 1,
+      unitPrice: 0,
+      amount: 0,
+    }],
+    paymentAccount: '',
+    paymentSplits: [],
+    trackingNumber: '',
+    consignee: '',
+    consigneePhone: '',
+    consigneeAddress: '',
+    shippingFee: '',
+    status: 'noShip',
+    customerRemark: '',
+    transferProducts: [],
+    attachments: [...(record.attachments || [])],
+    returnStatus: '',
+    returnTrackingNumbers: '',
+    needsOutbound: false,
+  };
+}
+
+/**
+ * 创建转租赁2草稿：订单本体使用虚拟转换货品，原订单实体货品预填到转租赁2明细。
+ * 转换不产生出库，金额、收款、已交租期和已交租金由操作人核对。
+ */
+function buildRental2TransferFormFromRecord(record: OrderRecord, mode: Rental2TransferMode): OrderFormData {
+  const copied = buildCopyFormFromRecord(record);
+  const transferProducts = getOrderProducts(record)
+    .filter(product => product.brand && product.brand !== '虚拟产品')
+    .map(product => ({
+      brand: product.brand || '',
+      productName: product.productName || '',
+      specification: product.specification || '',
+      paidPeriod: 0,
+      paidRent: 0,
+    }));
+
+  return {
+    ...copied,
+    orderSource: 'new',
+    orderAttribute: 'rental2',
+    orderType: 'newBusiness',
+    onlineOrderNumber: record.onlineOrderNumber || '',
+    products: [{
+      brand: '虚拟产品',
+      productName: mode === 'partial' ? '部分转租赁2' : '全部转租赁2',
+      specification: '默认',
+      quantity: 1,
+      unitPrice: 0,
+      amount: 0,
+    }],
+    paymentAccount: '',
+    paymentSplits: [],
+    trackingNumber: '',
+    consignee: '',
+    consigneePhone: '',
+    consigneeAddress: '',
+    shippingFee: '',
+    status: 'noShip',
+    customerRemark: '',
+    transferProducts: transferProducts.length > 0 ? transferProducts : [{ ...EMPTY_TRANSFER_PRODUCT }],
+    attachments: [...(record.attachments || [])],
+    returnStatus: '',
+    returnTrackingNumbers: '',
+    needsOutbound: false,
+  };
+}
+
 export function Orders() {
   const orders = useOrders();
   const location = useLocation();
@@ -637,12 +831,19 @@ export function Orders() {
   const [currentRecord, setCurrentRecord] = useState<OrderRecord | null>(null);
   const [introductionVisible, setIntroductionVisible] = useState(false);
   const [introductionText, setIntroductionText] = useState('');
+  const [introductionAttachments, setIntroductionAttachments] = useState<Array<OrderAttachment & { tempFileURL: string }>>([]);
+  const [introductionAttachmentsLoading, setIntroductionAttachmentsLoading] = useState(false);
+  const [copyingIntroductionAttachmentId, setCopyingIntroductionAttachmentId] = useState('');
+  const introductionAttachmentRequestRef = useRef(0);
   const [importing, setImporting] = useState(false);
   const [importPreviewVisible, setImportPreviewVisible] = useState(false);
   const [importPreviewData, setImportPreviewData] = useState<OrderRecord[]>([]);
   const [showMoreFilters, setShowMoreFilters] = useState(false);
   const [addVisible, setAddVisible] = useState(false);
   const [addForm, setAddForm] = useState<OrderFormData>(EMPTY_ORDER);
+  const [addCopySourceSerial, setAddCopySourceSerial] = useState<number | null>(null);
+  const [addRenewalSource, setAddRenewalSource] = useState<Pick<OrderRecord, '_id' | 'serialNumber'> | null>(null);
+  const [addRental2TransferSource, setAddRental2TransferSource] = useState<Rental2TransferSource | null>(null);
   const [addNeedsOutboundDecision, setAddNeedsOutboundDecision] = useState<boolean | null>(null);
   const [addAutoOutbound, setAddAutoOutbound] = useState<AutoOutboundOption>(DEFAULT_AUTO_OUTBOUND);
   const [saving, setSaving] = useState(false);
@@ -726,7 +927,7 @@ export function Orders() {
 
   useEffect(() => {
     if (location.pathname !== '/orders') return;
-    const state = location.state as { filter?: OrderFilters } | null;
+    const state = location.state as { filter?: OrderFilters; focusOrderId?: string } | null;
     const hasNavigationFilter = !!state?.filter;
     if (hasNavigationFilter && handledLocationKeysRef.current.has(location.key)) return;
     if (!hasNavigationFilter && ordersInitialLoadedRef.current) return;
@@ -734,6 +935,10 @@ export function Orders() {
     ordersInitialLoadedRef.current = true;
     const stateFilter = state?.filter || {};
     const initialFilters: OrderFilters = {};
+
+    if (stateFilter.orderId) {
+      initialFilters.orderId = stateFilter.orderId.trim();
+    }
 
     if (stateFilter.serialNumber) {
       initialFilters.serialNumber = stateFilter.serialNumber.trim();
@@ -743,13 +948,27 @@ export function Orders() {
     } else if (stateFilter.customerName) {
       initialFilters.customerName = stateFilter.customerName.trim();
     }
+    if (stateFilter.outboundRecordId) {
+      initialFilters.outboundRecordId = stateFilter.outboundRecordId.trim();
+    }
     if (stateFilter.abnormalStatus) {
       initialFilters.abnormalStatus = stateFilter.abnormalStatus;
       setShowMoreFilters(true); // 让来自首页卡片的异常筛选可见
     }
 
     setFilters(initialFilters);
-    orders.fetchRecords(null, initialFilters);
+    let cancelled = false;
+    void orders.fetchRecords(null, initialFilters).then(result => {
+      if (cancelled || !state?.focusOrderId) return;
+      const target = result?.records.find(record => record._id === state.focusOrderId);
+      if (target) {
+        setCurrentRecord(target);
+        setDetailVisible(true);
+      } else {
+        MessagePlugin.warning('未找到对应的关联订单，该订单可能已被删除');
+      }
+    });
+    return () => { cancelled = true; };
   }, [location.key, location.pathname, location.state]);
 
   const handleSearch = () => {
@@ -998,15 +1217,83 @@ export function Orders() {
   };
 
   const handleIntroduction = useCallback(async (record: OrderRecord) => {
-    const text = buildOrderIntroduction(record);
+    const text = buildOrderIntroduction(record, SALES_CHANNEL_MAP);
     setIntroductionText(text);
     setIntroductionVisible(true);
+    const attachments = record.attachments || [];
+    const requestId = ++introductionAttachmentRequestRef.current;
+    setIntroductionAttachments(attachments.map(attachment => ({ ...attachment, tempFileURL: '' })));
+    setIntroductionAttachmentsLoading(attachments.length > 0);
+    if (attachments.length > 0) {
+      void getCloudFileURLs(attachments.map(attachment => attachment.fileID))
+        .then(urls => {
+          if (requestId !== introductionAttachmentRequestRef.current) return;
+          const urlMap = new Map(urls.map(item => [item.fileID, item.tempFileURL]));
+          setIntroductionAttachments(attachments.map(attachment => ({
+            ...attachment,
+            tempFileURL: urlMap.get(attachment.fileID) || '',
+          })));
+        })
+        .catch(() => {
+          if (requestId === introductionAttachmentRequestRef.current) {
+            MessagePlugin.warning('附件链接加载失败，请稍后重试');
+          }
+        })
+        .finally(() => {
+          if (requestId === introductionAttachmentRequestRef.current) setIntroductionAttachmentsLoading(false);
+        });
+    }
     try {
       await copyText(text);
       MessagePlugin.success('简介已生成并复制到剪贴板');
     } catch {
       MessagePlugin.warning('简介已生成，但自动复制失败，可在预览窗口中重新复制');
     }
+  }, [SALES_CHANNEL_MAP]);
+
+  const handleCopyIntroductionAttachment = useCallback(async (attachment: OrderAttachment & { tempFileURL: string }) => {
+    if (!attachment.tempFileURL) {
+      MessagePlugin.warning('附件尚未加载完成');
+      return;
+    }
+    if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
+      MessagePlugin.warning('当前浏览器不支持复制图片，请下载后发送到微信');
+      return;
+    }
+    setCopyingIntroductionAttachmentId(attachment.fileID);
+    try {
+      const blob = await getClipboardPngBlob(attachment.tempFileURL);
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      MessagePlugin.success('图片已复制，可直接粘贴到微信');
+    } catch (error) {
+      console.error('复制附件失败:', error);
+      MessagePlugin.warning('图片复制失败，请下载后发送到微信');
+    } finally {
+      setCopyingIntroductionAttachmentId('');
+    }
+  }, []);
+
+  const handleDownloadIntroductionAttachment = useCallback((attachment: OrderAttachment & { tempFileURL: string }) => {
+    if (!attachment.tempFileURL) {
+      MessagePlugin.warning('附件尚未加载完成');
+      return;
+    }
+    const link = document.createElement('a');
+    link.href = attachment.tempFileURL;
+    link.download = attachment.fileName;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }, []);
+
+  const handleCloseIntroduction = useCallback(() => {
+    introductionAttachmentRequestRef.current += 1;
+    setIntroductionVisible(false);
+    setIntroductionAttachments([]);
+    setIntroductionAttachmentsLoading(false);
+    setCopyingIntroductionAttachmentId('');
   }, []);
 
   const handleCopyIntroduction = useCallback(async () => {
@@ -1108,12 +1395,76 @@ export function Orders() {
     const operatorName = await getCurrentOperatorName();
     const nickname = operatorName || SALESPERSONS[0];
     setAddForm({ ...EMPTY_ORDER, date: dateStr, salesperson: nickname, products: [{ ...EMPTY_PRODUCT }] });
+    setAddCopySourceSerial(null);
+    setAddRenewalSource(null);
+    setAddRental2TransferSource(null);
     setAddNeedsOutboundDecision(null);
     setAddAutoOutbound(DEFAULT_AUTO_OUTBOUND);
     setAddAttachFiles([]);
     setAddStep(1);
     setAddVisible(true);
   };
+
+  /** 从已有订单预填新增向导；不复制任何订单标识、物流或出库历史。 */
+  const handleCopyOpen = useCallback((record: OrderRecord) => {
+    if (!can('orders:create')) {
+      MessagePlugin.warning('当前用户没有新增订单权限');
+      return;
+    }
+    const form = buildCopyFormFromRecord(record);
+    const virtualProductOrder = isVirtualProductOrder(form.products);
+    setAddForm(form);
+    setAddCopySourceSerial(record.serialNumber);
+    setAddRenewalSource(null);
+    setAddRental2TransferSource(null);
+    setAddNeedsOutboundDecision(virtualProductOrder ? false : null);
+    setAddAutoOutbound(DEFAULT_AUTO_OUTBOUND);
+    setAddAttachFiles([]);
+    setAddStep(1);
+    setAddVisible(true);
+  }, [can]);
+
+  /** 从已有租赁订单创建“续期租金”新订单草稿。 */
+  const handleRenewalOpen = useCallback((record: OrderRecord) => {
+    if (!can('orders:create')) {
+      MessagePlugin.warning('当前用户没有新增订单权限');
+      return;
+    }
+    if (!isRenewalEligible(record)) {
+      MessagePlugin.warning('仅新增业务的租赁订单支持续租');
+      return;
+    }
+    setAddForm(buildRenewalFormFromRecord(record));
+    setAddCopySourceSerial(null);
+    setAddRenewalSource({ _id: record._id, serialNumber: record.serialNumber });
+    setAddRental2TransferSource(null);
+    setAddNeedsOutboundDecision(false);
+    setAddAutoOutbound(DEFAULT_AUTO_OUTBOUND);
+    setAddAttachFiles([]);
+    setAddStep(1);
+    setAddVisible(true);
+  }, [can]);
+
+  /** 从租赁1订单快捷创建部分/全部转租赁2草稿。 */
+  const handleRental2TransferOpen = useCallback((record: OrderRecord, mode: Rental2TransferMode) => {
+    if (!can('orders:create')) {
+      MessagePlugin.warning('当前用户没有新增订单权限');
+      return;
+    }
+    if (!isRental2TransferEligible(record)) {
+      MessagePlugin.warning('仅新增业务的租赁1实体货品订单支持转租赁2');
+      return;
+    }
+    setAddForm(buildRental2TransferFormFromRecord(record, mode));
+    setAddCopySourceSerial(null);
+    setAddRenewalSource(null);
+    setAddRental2TransferSource({ _id: record._id, serialNumber: record.serialNumber, mode });
+    setAddNeedsOutboundDecision(false);
+    setAddAutoOutbound(DEFAULT_AUTO_OUTBOUND);
+    setAddAttachFiles([]);
+    setAddStep(1);
+    setAddVisible(true);
+  }, [can]);
 
   /** 新建订单必须显式确认是否出库；每次改变该决定都重新确认自动生成。 */
   const handleAddOutboundDecisionChange = useCallback((value: boolean | null) => {
@@ -1213,6 +1564,9 @@ export function Orders() {
     } else {
       setAddVisible(false);
       setAddStep(1);
+      setAddCopySourceSerial(null);
+      setAddRenewalSource(null);
+      setAddRental2TransferSource(null);
       setAddAttachFiles([]);
     }
   };
@@ -1222,6 +1576,9 @@ export function Orders() {
     setAddVisible(false);
     setAddStep(1);
     setAddForm(EMPTY_ORDER);
+    setAddCopySourceSerial(null);
+    setAddRenewalSource(null);
+    setAddRental2TransferSource(null);
     setAddNeedsOutboundDecision(null);
     setAddAutoOutbound(DEFAULT_AUTO_OUTBOUND);
     setAddAttachFiles([]);
@@ -1232,7 +1589,7 @@ export function Orders() {
     setSaving(true);
     try {
       // 上传附件到云存储
-      const attachments: OrderAttachment[] = [];
+      const attachments: OrderAttachment[] = [...addForm.attachments];
       for (const file of addAttachFiles) {
         const timestamp = Date.now();
         const ext = file.name.split('.').pop() || 'bin';
@@ -1286,10 +1643,23 @@ export function Orders() {
         returnTrackingNumbers: addForm.returnTrackingNumbers || '',
         needsOutbound: addForm.needsOutbound,
         outboundRecordId: '',
+        ...(addRenewalSource ? {
+          renewalSourceOrderId: addRenewalSource._id,
+          renewalSourceSerialNumber: addRenewalSource.serialNumber,
+        } : {}),
+        ...(addRental2TransferSource ? {
+          rental2TransferSourceOrderId: addRental2TransferSource._id,
+          rental2TransferSourceSerialNumber: addRental2TransferSource.serialNumber,
+          rental2TransferMode: addRental2TransferSource.mode,
+        } : {}),
       };
       const result = await orders.importOrders([newRecord]);
       if (result.success) {
-        MessagePlugin.success(newRecord.products && newRecord.products.length > 1 ? `新增订单成功，含 ${newRecord.products.length} 条货品` : '新增订单成功');
+        MessagePlugin.success(addRenewalSource
+          ? '续租订单创建成功'
+          : addRental2TransferSource
+            ? `${addRental2TransferSource.mode === 'partial' ? '部分' : '全部'}转租赁2订单创建成功`
+          : (newRecord.products && newRecord.products.length > 1 ? `新增订单成功，含 ${newRecord.products.length} 条货品` : '新增订单成功'));
         // 勾选了"保存后自动生成待出库单"且订单为待发货时，自动生成；失败不影响订单已创建
         const newOrderId = result.savedIds?.[0];
         if (addAutoOutbound.enabled === true && addForm.needsOutbound && newOrderId && isPendingShipmentStatus(shipmentFields.status)) {
@@ -1303,6 +1673,9 @@ export function Orders() {
         setAddVisible(false);
         setAddStep(1);
         setAddForm(EMPTY_ORDER);
+        setAddCopySourceSerial(null);
+        setAddRenewalSource(null);
+        setAddRental2TransferSource(null);
         setAddNeedsOutboundDecision(null);
         setAddAutoOutbound(DEFAULT_AUTO_OUTBOUND);
         setAddAttachFiles([]);
@@ -1813,14 +2186,8 @@ export function Orders() {
     { colKey: 'date', title: '日期', width: 100, cell: ({ row }: { row: OrderRecord }) => formatDate(row.date, false) },
     { colKey: 'orderType', title: '订单类型', width: 90, cell: ({ row }: { row: OrderRecord }) => getDictLabel(ORDER_TYPE_MAP, row.orderType) || '-' },
     {
-      colKey: 'importSource', title: '订单来源', width: 90,
-      cell: ({ row }: { row: OrderRecord }) => {
-        if (row.importSource === 'manual-after-sale' || row.importSource === 'hc-order-assist-after-sale') {
-          return <Tag theme="warning" variant="light">售后</Tag>;
-        }
-        if (row.importSource === 'hc-order-assist') return <Tag theme="primary" variant="light">赞晨租</Tag>;
-        return <span>手工</span>;
-      },
+      colKey: 'orderSource', title: '订单来源', width: 90,
+      cell: ({ row }: { row: OrderRecord }) => getDictLabel(ORDER_SOURCE_MAP, row.orderSource) || '-',
     },
     { colKey: 'salesChannel', title: '销售渠道', width: 90, cell: ({ row }: { row: OrderRecord }) => getDictLabel(SALES_CHANNEL_MAP, row.salesChannel) || '-' },
     { colKey: 'salesperson', title: '人员', width: 60, cell: ({ row }: { row: OrderRecord }) => row.salesperson || '-' },
@@ -1890,18 +2257,45 @@ export function Orders() {
           )}
           <Dropdown
             trigger="hover"
-            options={[
-              { content: '简介', value: 'introduction' },
-              { content: '编辑', value: 'edit' },
-              ...(isAfterSaleEligible(row) && can('orders:create') ? [{ content: '生成售后订单', value: 'createAfterSale' }] : []),
-              ...(isAfterSaleEligible(row) ? [{ content: '售后记录', value: 'afterSaleHistory' }] : []),
-              { content: '修改快递单号', value: 'manualTracking' },
-              ...(row.outboundRecordId ? [{ content: '出库单', value: 'viewOutbound' }] : []),
-              ...(shouldShowAfterSaleInboundConfirm(row) ? [{ content: '售后回库确认', value: 'afterSaleInbound' }] : []),
-              { content: '删除', value: 'delete', theme: 'error' as const },
-            ]}
+            options={((): DropdownOption[] => {
+              // 按业务场景分组，最后一项的 divider 会显示在该组下方。
+              const basicActions: DropdownOption[] = [
+                { content: '简介', value: 'introduction' },
+                { content: '编辑', value: 'edit' },
+                ...(isRenewalEligible(row) && can('orders:create') ? [{ content: '续租', value: 'renewal' }] : []),
+                ...(isRental2TransferEligible(row) && can('orders:create') ? [
+                  { content: '部分转租赁2', value: 'partialRental2Transfer' },
+                  { content: '全部转租赁2', value: 'fullRental2Transfer' },
+                ] : []),
+                ...(can('orders:create') ? [{ content: '复制订单', value: 'copy' }] : []),
+              ];
+              const deliveryActions: DropdownOption[] = [
+                { content: '修改快递单号', value: 'manualTracking' },
+                ...(row.outboundRecordId ? [{ content: '出库单', value: 'viewOutbound' }] : []),
+              ];
+              const afterSaleActions: DropdownOption[] = [
+                ...(isAfterSaleEligible(row) && can('orders:create') ? [{ content: '生成售后订单', value: 'createAfterSale' }] : []),
+                ...(isAfterSaleEligible(row) ? [{ content: '售后记录', value: 'afterSaleHistory' }] : []),
+                ...(shouldShowAfterSaleInboundConfirm(row) ? [{ content: '售后回库确认', value: 'afterSaleInbound' }] : []),
+              ];
+              const actionGroups = [
+                basicActions,
+                deliveryActions,
+                afterSaleActions,
+                [{ content: '删除', value: 'delete', theme: 'error' as const }],
+              ].filter(group => group.length > 0);
+
+              return actionGroups.flatMap((group, groupIndex) => group.map((item, itemIndex) => ({
+                ...item,
+                divider: itemIndex === group.length - 1 && groupIndex < actionGroups.length - 1,
+              })));
+            })()}
             onClick={(item: DropdownOption) => {
               if (item.value === 'introduction') handleIntroduction(row);
+              if (item.value === 'renewal') handleRenewalOpen(row);
+              if (item.value === 'partialRental2Transfer') handleRental2TransferOpen(row, 'partial');
+              if (item.value === 'fullRental2Transfer') handleRental2TransferOpen(row, 'full');
+              if (item.value === 'copy') handleCopyOpen(row);
               if (item.value === 'edit') handleEditOpen(row);
               if (item.value === 'createAfterSale') handleAfterSaleOpen(row);
               if (item.value === 'afterSaleHistory') handleAfterSaleHistoryOpen(row);
@@ -1919,7 +2313,7 @@ export function Orders() {
         </div>
       ),
     },
-  ], [handleDetail, handleViewOutbound, handleIntroduction, handleEditOpen, handleAfterSaleOpen, handleAfterSaleHistoryOpen, handleManualTrackingOpen, handleShipOpen, handleGenerateOutboundOpen, handleAfterSaleInboundOpen, handleDeleteConfirm, can, ORDER_TYPE_MAP, SALES_CHANNEL_MAP, ORDER_ATTRIBUTE_MAP, ORDER_STATUS_MAP]);
+  ], [handleDetail, handleViewOutbound, handleIntroduction, handleRenewalOpen, handleRental2TransferOpen, handleCopyOpen, handleEditOpen, handleAfterSaleOpen, handleAfterSaleHistoryOpen, handleManualTrackingOpen, handleShipOpen, handleGenerateOutboundOpen, handleAfterSaleInboundOpen, handleDeleteConfirm, can, ORDER_SOURCE_MAP, ORDER_TYPE_MAP, SALES_CHANNEL_MAP, ORDER_ATTRIBUTE_MAP, ORDER_STATUS_MAP]);
 
   const displayRecords = orders.getPageRecords(orders.currentPage);
   const hasLoadedNextPage = orders.currentPage * PAGE_SIZE < orders.records.length;
@@ -1977,6 +2371,16 @@ export function Orders() {
 
       {/* 筛选栏 */}
       <div className="glass-card p-4 order-filter-panel">
+        {(filters.orderId || filters.outboundRecordId) && (
+          <div className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-sm text-blue-700">
+            <span>
+              {filters.orderId
+                ? '已精确定位该出库记录的关联订单，修改货品后待出库型号会自动同步。'
+                : '当前显示合并出库记录的全部关联订单。'}
+            </span>
+            <Button size="small" variant="text" theme="primary" onClick={handleReset}>退出关联查看</Button>
+          </div>
+        )}
         <div className="grid grid-cols-1 items-end gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(19rem,1.5fr)_auto]">
           <div className="min-w-0">
             <label className="block text-xs text-gray-500 mb-1">网店订单号</label>
@@ -2089,11 +2493,11 @@ export function Orders() {
       <Dialog
         header="简介预览"
         visible={introductionVisible}
-        onClose={() => setIntroductionVisible(false)}
+        onClose={handleCloseIntroduction}
         width="620px"
         footer={(
           <div className="flex justify-end gap-2">
-            <Button onClick={() => setIntroductionVisible(false)}>关闭</Button>
+            <Button onClick={handleCloseIntroduction}>关闭</Button>
             <Button theme="primary" onClick={handleCopyIntroduction}>复制简介</Button>
           </div>
         )}
@@ -2101,6 +2505,43 @@ export function Orders() {
         <pre className="min-h-40 whitespace-pre-wrap break-words rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm leading-7 text-gray-800 select-text">
           {introductionText}
         </pre>
+        {(introductionAttachmentsLoading || introductionAttachments.length > 0) && (
+          <div className="mt-4">
+            <div className="mb-2 text-sm font-medium text-gray-700">订单附件</div>
+            <div className="space-y-2">
+              {introductionAttachments.map(attachment => (
+                <div key={attachment.fileID} className="flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2">
+                  <span className="min-w-0 flex-1 truncate text-sm text-gray-700">{attachment.fileName}</span>
+                  <div className="flex shrink-0 gap-2">
+                    {isClipboardImage(attachment.fileName) && (
+                      <Button
+                        size="small"
+                        variant="outline"
+                        loading={copyingIntroductionAttachmentId === attachment.fileID}
+                        disabled={!attachment.tempFileURL}
+                        onClick={() => handleCopyIntroductionAttachment(attachment)}
+                      >
+                        复制图片
+                      </Button>
+                    )}
+                    <Button
+                      size="small"
+                      variant="outline"
+                      disabled={!attachment.tempFileURL}
+                      onClick={() => handleDownloadIntroductionAttachment(attachment)}
+                    >
+                      下载附件
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            {introductionAttachmentsLoading && <p className="mt-2 text-xs text-gray-400">正在加载附件...</p>}
+            {!introductionAttachmentsLoading && (
+              <p className="mt-2 text-xs text-gray-400">图片复制后可直接粘贴到微信；文档请下载后拖入微信发送。</p>
+            )}
+          </div>
+        )}
       </Dialog>
 
       {/* 详情弹窗 */}
@@ -2126,6 +2567,15 @@ export function Orders() {
                     序号 {currentRecord.afterSaleSourceSerialNumber || '-'}
                   </Button>
                 )}
+              />
+            )}
+            {currentRecord.renewalSourceOrderId && (
+              <DetailRow label="续租来源订单" value={`序号 ${currentRecord.renewalSourceSerialNumber || '-'}`} />
+            )}
+            {currentRecord.rental2TransferSourceOrderId && (
+              <DetailRow
+                label="转租赁2来源订单"
+                value={`序号 ${currentRecord.rental2TransferSourceSerialNumber || '-'}（${currentRecord.rental2TransferMode === 'partial' ? '部分转换' : '全部转换'}）`}
               />
             )}
             <DetailRow label="销售渠道" value={getDictLabel(SALES_CHANNEL_MAP, currentRecord.salesChannel)} />
@@ -2665,7 +3115,11 @@ export function Orders() {
 
       {/* 新增订单弹窗 — 6 步向导 */}
       <Dialog
-        header="新增订单"
+        header={addRenewalSource
+          ? `创建续租订单（来源序号：${addRenewalSource.serialNumber}）`
+          : addRental2TransferSource
+            ? `创建${addRental2TransferSource.mode === 'partial' ? '部分' : '全部'}转租赁2订单（来源序号：${addRental2TransferSource.serialNumber}）`
+            : (addCopySourceSerial === null ? '新增订单' : `复制订单（来源序号：${addCopySourceSerial}）`)}
         visible={addVisible}
         onClose={handleRequestCloseAdd}
         width="760px"
@@ -2679,14 +3133,37 @@ export function Orders() {
             <div className="flex gap-2">
               <Button onClick={handleRequestCloseAdd}>取消</Button>
               {addStep < 6 ? (
-                <Button theme="primary" icon={<ChevronRight size={16} />} onClick={handleAddNext}>下一步</Button>
+                <Button theme="primary" icon={<ChevronRight size={16} />} onClick={handleAddNext}>
+                  {addCopySourceSerial === null && !addRenewalSource && !addRental2TransferSource ? '下一步' : '确认并进入下一步'}
+                </Button>
               ) : (
-                <Button theme="primary" loading={saving} icon={<Check size={16} />} onClick={handleAddSave}>确认提交</Button>
+                <Button theme="primary" loading={saving} icon={<Check size={16} />} onClick={handleAddSave}>
+                  {addRenewalSource
+                    ? '确认创建续租订单'
+                    : addRental2TransferSource
+                      ? `确认创建${addRental2TransferSource.mode === 'partial' ? '部分' : '全部'}转租赁2订单`
+                      : (addCopySourceSerial === null ? '确认提交' : '确认创建订单')}
+                </Button>
               )}
             </div>
           </div>
         }
       >
+        {addCopySourceSerial !== null && (
+          <div className="mb-4 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-sm leading-6 text-blue-700">
+            已带入原订单的业务信息。请从第 1 步开始逐项核对，并在每一步点击“确认并进入下一步”；不会自动创建或跳过任何步骤。
+          </div>
+        )}
+        {addRenewalSource && (
+          <div className="mb-4 rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2 text-sm leading-6 text-emerald-700">
+            已生成“续期租金”草稿并关联来源订单。请核对客户与渠道信息，在货品步骤填写本次续租金额和收款账户；续租为虚拟订单，无需出库。
+          </div>
+        )}
+        {addRental2TransferSource && (
+          <div className="mb-4 rounded-lg border border-violet-100 bg-violet-50 px-3 py-2 text-sm leading-6 text-violet-700">
+            已生成“{addRental2TransferSource.mode === 'partial' ? '部分' : '全部'}转租赁2”草稿并关联来源订单。原货品已带入转租赁2明细，请在货品步骤核对转换范围，并填写金额、收款账户、已交租期和已交租金；转换订单无需出库。
+          </div>
+        )}
         <AddOrderWizard
           step={addStep}
           form={addForm}
@@ -3936,7 +4413,7 @@ function AddOrderWizard({
             </div>
           )}
 
-          {mode === 'edit' && form.attachments && form.attachments.length > 0 && (
+          {form.attachments && form.attachments.length > 0 && (
             <div className="mb-4">
               <h4 className="text-sm font-medium text-gray-600 mb-3">已有附件</h4>
               <div className="space-y-2">
@@ -4068,11 +4545,10 @@ function AddOrderWizard({
             )}
             <PreviewSection title="备注 & 附件">
               <PreviewItem label="客服备注" value={form.customerRemark} />
-              <PreviewItem label="附件" value={
-                mode === 'edit'
-                  ? [...form.attachments.map(a => a.fileName), ...attachFiles.map(f => f.name)].join(', ') || '无'
-                  : attachFiles.length > 0 ? attachFiles.map(f => f.name).join(', ') : '无'
-              } />
+              <PreviewItem
+                label="附件"
+                value={[...form.attachments.map(a => a.fileName), ...attachFiles.map(f => f.name)].join(', ') || '无'}
+              />
             </PreviewSection>
           </div>
         </div>

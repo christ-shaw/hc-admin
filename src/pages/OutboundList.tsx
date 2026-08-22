@@ -12,9 +12,10 @@ import { RecordDetail } from '../components/RecordDetail';
 import { RecordEdit } from '../components/RecordEdit';
 import { exportOutboundRecordsExcel } from '../utils/recordExcel';
 import { RecordExportDialog } from '../components/RecordExportDialog';
-import { useTabDirty } from '../contexts/TabWorkspaceContext';
+import { useTabDirty, useTabWorkspace } from '../contexts/TabWorkspaceContext';
 
 export function OutboundList() {
+  const { openTab } = useTabWorkspace();
   const outbound = useOutbound();
   const logs = useLogs();
   const { notifyRecordChange } = useStorage();
@@ -215,6 +216,33 @@ export function OutboundList() {
         onClose={() => setEditVisible(false)}
         onSave={handleSave}
         onDirtyChange={setEditDirty}
+        onSyncFromOrders={async () => {
+          if (!currentRecord?._id) return { success: false, errMsg: '出库记录不存在' };
+          const result = await outbound.syncModelsFromOrders(currentRecord._id);
+          if (result.success && result.phoneModels) {
+            setCurrentRecord(prev => prev ? {
+              ...prev,
+              phoneModels: result.phoneModels || prev.phoneModels,
+              remark: result.remark ?? prev.remark,
+            } : prev);
+            void outbound.fetchRecords(null, outbound.filters);
+          }
+          return result;
+        }}
+        onEditLinkedOrders={() => {
+          if (!currentRecord?._id || !currentRecord.orderIds?.length) return;
+          const linkedOrderIds = currentRecord.orderIds.filter(Boolean);
+          const focusOrderId = linkedOrderIds.length === 1 ? linkedOrderIds[0] : '';
+          setEditVisible(false);
+          openTab('/orders', {
+            state: {
+              filter: focusOrderId
+                ? { orderId: focusOrderId }
+                : { outboundRecordId: currentRecord._id },
+              focusOrderId,
+            },
+          });
+        }}
       />
 
       {/* 删除确认 */}

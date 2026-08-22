@@ -343,3 +343,55 @@ CloudBase NoSQL 没有原生复合唯一约束，`unique(source, source_order_no
 ```
 
 订单无网店订单号时，订单编号回退为系统序号；多货品之间使用中文逗号连接。
+
+## 18. 插件申请续租（2026-08 更新）
+
+同一 HTTP 路径支持续租附件二进制上传和 `action: "createRenewalOrder"`。插件先以
+`Content-Type: application/octet-stream` 上传每个附件，并通过请求头提交操作名、请求标识、文件名和文件类型：
+
+```text
+X-HC-Order-Assist-Action: upload-renewal-attachment
+X-HC-Renewal-Request-Id: ME...-renewal-...
+X-HC-File-Name: %E7%BB%AD%E7%A7%9F%E4%BB%98%E6%AC%BE%E5%87%AD%E8%AF%81.png
+X-HC-File-Content-Type: image/png
+```
+
+上传成功取得 `fileID` 后，再提交建单请求：
+
+```json
+{
+  "action": "createRenewalOrder",
+  "order": {
+    "sourceOrderNo": "ME20260715100629062996",
+    "renewalRequestId": "ME...-renewal-...",
+    "renewalAmount": 300,
+    "paymentAccount": "XX微信",
+    "remark": "续租一个月",
+    "renewalAttachments": [
+      {
+        "fileID": "cloud://.../orders_attachments/renewals/.../file.png",
+        "fileName": "续租付款凭证.png",
+        "size": 123456
+      }
+    ]
+  }
+}
+```
+
+服务端必须先按 `onlineOrderNumber` 找到可续租的原订单，并继承原订单的销售渠道、人员、订单属性、客户名称、网店单号和附件。续租订单固定映射为：
+
+- `orderSource = new`、`orderType = newBusiness`
+- 货品为 `虚拟产品 / 续期租金 / 默认 × 1`
+- 附件原始二进制上传到 `orders_attachments/renewals/`，建单请求仅提交 `fileID / fileName / size` 引用，避免 Base64 JSON 触发请求载荷限制
+- 可选提交 `renewalAttachments`（最多 5 个图片、PDF、Word、Excel、CSV 或 TXT，总大小不超过 4MB），新附件将追加到继承的原订单附件中
+- `unitPrice = amount = renewalAmount`
+- `status = noShip`、`needsOutbound = false`
+- `importSource = hc-order-assist-renewal`
+- `renewalSourceOrderId / renewalSourceSerialNumber` 记录来源
+- `renewalRequestId` 用于重试幂等
+
+创建成功会返回微信格式简介，例如：
+
+```text
+云途 ME20260715100629062996 潘瑞  租金 300 转XX 微信
+```
