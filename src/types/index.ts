@@ -295,7 +295,7 @@ export interface OrderRecord {
   date: string;                     // 日期
   orderSource: string;              // 订单来源: 新增/服务
   orderAttribute: string;           // 订单属性: 租赁1/租赁2
-  orderType: string;                // 订单类型: 新增业务/租后发货/租后退货/仅退款/退租金
+  orderType: string;                // 订单类型: 新增业务/租后发货/租后退货/租后款项/押金/维修
   salesChannel: string;             // 销售渠道
   salesperson: string;              // 人员
   channelCategory: string;          // 渠道类别

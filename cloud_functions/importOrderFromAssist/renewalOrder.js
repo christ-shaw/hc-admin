@@ -46,13 +46,10 @@ function buildRenewalIntroduction(order, salesChannelMap) {
   return `${channel} ${orderNumber} ${customerName}  租金 ${formatAmount(amount)} ${paymentText}`;
 }
 
-function buildRenewalOrderDoc(source, input, serialNumber, now, date) {
+function buildRenewalOrderDoc(currentOrder, input, serialNumber, now, date) {
   const amount = normalizePositiveAmount(input && input.amount);
   const paymentAccount = trim(input && input.paymentAccount);
   const requestId = trim(input && input.requestId);
-  const inheritedAttachments = Array.isArray(source && source.attachments)
-    ? source.attachments.map((item) => ({ ...item }))
-    : [];
   const uploadedAttachments = Array.isArray(input && input.attachments)
     ? input.attachments.map((item) => ({ fileID: trim(item && item.fileID), fileName: trim(item && item.fileName) }))
       .filter((item) => item.fileID && item.fileName)
@@ -61,13 +58,13 @@ function buildRenewalOrderDoc(source, input, serialNumber, now, date) {
     serialNumber,
     date,
     orderSource: 'new',
-    orderAttribute: trim(source && source.orderAttribute) || 'rental1',
+    orderAttribute: trim(currentOrder && currentOrder.orderAttribute) || 'rental1',
     orderType: 'newBusiness',
-    salesChannel: trim(source && source.salesChannel),
-    salesperson: trim(source && source.salesperson),
-    channelCategory: trim(source && source.channelCategory) || 'platform',
-    onlineOrderNumber: trim(source && source.onlineOrderNumber),
-    customerName: trim(source && source.customerName),
+    salesChannel: trim(currentOrder && currentOrder.salesChannel),
+    salesperson: trim(currentOrder && currentOrder.salesperson),
+    channelCategory: trim(currentOrder && currentOrder.channelCategory) || 'platform',
+    onlineOrderNumber: trim(currentOrder && currentOrder.onlineOrderNumber),
+    customerName: trim(currentOrder && currentOrder.customerName),
     products: [{
       brand: '虚拟产品',
       productName: '续期租金',
@@ -91,14 +88,12 @@ function buildRenewalOrderDoc(source, input, serialNumber, now, date) {
     paidPeriod: 0,
     paidRent: 0,
     transferItems: '',
-    attachments: [...inheritedAttachments, ...uploadedAttachments],
+    attachments: uploadedAttachments,
     returnStatus: '',
     returnTrackingNumbers: '',
     needsOutbound: false,
     outboundRecordId: '',
     importSource: 'hc-order-assist-renewal',
-    renewalSourceOrderId: trim(source && source._id),
-    renewalSourceSerialNumber: Number(source && source.serialNumber) || 0,
     renewalRequestId: requestId,
     renewalUploadedAttachmentCount: uploadedAttachments.length,
     createTime: now,

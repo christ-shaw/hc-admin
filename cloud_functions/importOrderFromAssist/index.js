@@ -852,31 +852,6 @@ async function createAfterSaleOrder(payload) {
   }
 }
 
-function isRenewalSourceOrder(order) {
-  if (!order || order.afterSaleSourceOrderId || order.importSource === 'manual-after-sale') return false;
-  const rental = ['rental1', '租赁1', 'rental2', '租赁2'].includes(order.orderAttribute);
-  const newBusiness = ['newBusiness', '新增业务'].includes(order.orderType);
-  return rental && newBusiness;
-}
-
-async function findRenewalSourceOrder(sourceOrderNo) {
-  const result = await db.collection(ORDERS_COLLECTION)
-    .where({ onlineOrderNumber: sourceOrderNo })
-    .limit(100)
-    .get();
-  const candidates = (result.data || []).filter(isRenewalSourceOrder);
-  candidates.sort((a, b) => {
-    const aRoot = a.importSource === 'hc-order-assist' ? 1 : 0;
-    const bRoot = b.importSource === 'hc-order-assist' ? 1 : 0;
-    if (aRoot !== bRoot) return bRoot - aRoot;
-    const aRenewal = a.importSource === 'hc-order-assist-renewal' || a.renewalSourceOrderId ? 1 : 0;
-    const bRenewal = b.importSource === 'hc-order-assist-renewal' || b.renewalSourceOrderId ? 1 : 0;
-    if (aRenewal !== bRenewal) return aRenewal - bRenewal;
-    return Number(a.serialNumber || 0) - Number(b.serialNumber || 0);
-  });
-  return candidates[0] || null;
-}
-
 function getRenewalAttachmentExtension(fileName, contentType) {
   const extensionMatch = String(fileName || '').toLowerCase().match(/\.([a-z0-9]+)$/);
   const extension = extensionMatch ? extensionMatch[1] : '';
@@ -972,12 +947,18 @@ async function createRenewalOrder(payload) {
   const sourceOrderNo = String(order.sourceOrderNo || '').trim();
   const requestId = String(order.renewalRequestId || '').trim();
   const paymentAccount = String(order.paymentAccount || '').trim();
+  const salesChannel = String(order.salesChannel || '').trim();
+  const salesperson = String(order.responsiblePerson || '').trim();
+  const customerName = String(order.orderPerson || order.recipient || '').trim();
   const amount = normalizePositiveAmount(order.renewalAmount);
 
-  if (!sourceOrderNo || !requestId || !paymentAccount || !amount) {
-    return fail(422, 'MISSING_FIELDS', '请完整填写网店订单号、续租金额和收款账户');
+  if (!sourceOrderNo || !requestId || !paymentAccount || !salesChannel || !salesperson || !customerName || !amount) {
+    return fail(422, 'MISSING_FIELDS', '请完整填写网店订单号、销售渠道、负责人、客户名称、续租金额和收款账户');
   }
   if (requestId.length > 100) return fail(422, 'INVALID_FIELD', '续租请求标识无效');
+  if (!SALES_CHANNEL_KEYS.has(salesChannel)) {
+    return fail(422, 'INVALID_FIELD', `salesChannel 非法: ${salesChannel}`);
+  }
   let uploadedAttachments;
   try {
     uploadedAttachments = normalizeRenewalAttachmentRefs(order.renewalAttachments, requestId);
@@ -1008,15 +989,19 @@ async function createRenewalOrder(payload) {
       });
     }
 
-    const source = await findRenewalSourceOrder(sourceOrderNo);
-    if (!source) {
-      await cleanupRenewalAttachments(uploadedAttachments);
-      return fail(404, 'SOURCE_ORDER_NOT_FOUND', 'hc-admin 未找到可续租的原订单，请先导入原订单');
-    }
+    const currentOrder = {
+      onlineOrderNumber: sourceOrderNo,
+      customerName,
+      salesChannel,
+      salesperson,
+      channelCategory: 'platform',
+      orderAttribute: 'rental1',
+      attachments: [],
+    };
 
     const now = db.serverDate();
     const serialNumber = await getNextSerialNumber();
-    const orderDoc = buildRenewalOrderDoc(source, {
+    const orderDoc = buildRenewalOrderDoc(currentOrder, {
       requestId,
       amount,
       paymentAccount,
@@ -1305,7 +1290,7 @@ exports.main = async (event) => {
     return createAfterSaleOrder(payload);
   }
 
-  // 由插件“申请续租”发起，继承原订单渠道、人员、网店单号和附件，创建虚拟续期租金订单。
+  // 由插件“申请续租”发起，直接使用当前赞晨订单信息创建虚拟续期租金订单，不查询历史订单。
   if (payload && payload.action === 'createRenewalOrder') {
     return createRenewalOrder(payload);
   }

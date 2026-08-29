@@ -136,7 +136,7 @@ test('新包裹关系兼容主订单并去重关联记录', () => {
   );
 });
 
-test('复用候选必须严格匹配收件信息、付款方式和人员', () => {
+test('复用候选必须严格匹配收件信息和付款方式，允许人员不同', () => {
   const base = {
     consignee: ' 张 三 ',
     consigneePhone: '138-0013-8000',
@@ -151,7 +151,7 @@ test('复用候选必须严格匹配收件信息、付款方式和人员', () =>
       consigneePhone: '13800138000',
       consigneeAddress: '深圳市南山区科技园',
       shippingFee: '包邮',
-      salesperson: 'xx',
+      salesperson: 'YY',
     }),
   );
   assert.notEqual(

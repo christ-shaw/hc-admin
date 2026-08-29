@@ -45,7 +45,7 @@ const ORDER_TYPE_VIRTUAL_PRODUCTS: Partial<Record<string, string[]>> = {
 /** 订单来源 → 可选订单类型白名单 */
 const ORDER_SOURCE_ORDER_TYPE_MAP: Partial<Record<string, string[]>> = {
   new: ['newBusiness'],
-  service: ['postRentalShip', 'postRentalReturn', 'postRentalPayment', 'deposit'],
+  service: ['postRentalShip', 'postRentalReturn', 'postRentalPayment', 'deposit', 'repair'],
 };
 
 /** 货品条目默认值 */
@@ -351,7 +351,7 @@ function getEffectiveShipmentFields(form: OrderFormData) {
 
 function shouldShowProductPaymentFields(orderSource?: string, orderType?: string, orderAttribute?: string, productBrand?: string): boolean {
   if (orderSource === 'new' && orderAttribute === 'rental1' && productBrand !== '虚拟产品') return false;
-  if (orderSource === 'service' && (orderType === 'postRentalShip' || orderType === 'postRentalReturn')) return false;
+  if (orderSource === 'service' && ['postRentalShip', 'postRentalReturn', 'repair'].includes(orderType || '')) return false;
   return true;
 }
 

@@ -73,7 +73,6 @@ function buildRecipientMatchKey(order) {
     normalizePhone(order && order.consigneePhone),
     normalizeAddress(order && order.consigneeAddress),
     normalizeShippingFee(order && order.shippingFee),
-    normalizeName(order && order.salesperson),
   ];
   return crypto.createHash('sha256').update(JSON.stringify(parts)).digest('hex');
 }
@@ -544,7 +543,7 @@ async function attachOrder(payload, env, actorId) {
 
     const primaryOrder = await getOrderWithShipping(transaction, record.sourceOrderId);
     if (!primaryOrder || buildRecipientMatchKey(primaryOrder) !== buildRecipientMatchKey(targetOrder)) {
-      throw new Error('收件人、电话、地址、付款方式或人员不一致，不能复用运单');
+      throw new Error('收件人、电话、地址或付款方式不一致，不能复用运单');
     }
 
     const linkedState = await resolveLinkedState(transaction, record);

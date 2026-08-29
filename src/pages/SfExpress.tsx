@@ -1247,7 +1247,7 @@ export function SfExpress() {
       >
         <div className="space-y-4">
           <div className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-700">
-            仅显示已由原订单明确“开放追加”，且收件人、电话、地址、付款方式和人员完全一致的包裹。
+            仅显示已由原订单明确“开放追加”，且收件人、电话、地址和付款方式完全一致的包裹。
             关联成功后，新出库单仍需独立完成拍照。
           </div>
           {reuseTarget && (
@@ -1324,7 +1324,7 @@ export function SfExpress() {
                 ? '仅尚未完成拍照出库的追加订单可以解除。解除后订单和出库单的物流单号将被清空。'
               : shipmentConfirm?.action === 'disableReuse'
                 ? '关闭后，新订单将无法再选择此顺丰运单。'
-                : '开放后，无需先完成现有出库单拍照；仅收件信息、付款方式和人员完全一致的订单可以选择此运单。'}
+                : '开放后，无需先完成现有出库单拍照；仅收件信息和付款方式完全一致的订单可以选择此运单。'}
           </p>
           <p className="text-gray-500">
             运单号：{shipmentConfirm?.row.currentSfOrder?.waybillNo || '-'}

@@ -65,6 +65,7 @@ export const ORDER_TYPE_MAP = {
   postRentalReturn: '租后退货',
   postRentalPayment: '租后款项',
   deposit: '押金',
+  repair: '维修',
 } as const;
 
 export type OrderType = keyof typeof ORDER_TYPE_MAP;

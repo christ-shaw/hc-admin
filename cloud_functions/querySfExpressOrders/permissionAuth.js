@@ -13,6 +13,15 @@ function firstNonEmpty(values) {
   return values.find(value => value !== undefined && value !== null && String(value).trim() !== '') || '';
 }
 
+function uniqueValidIds(values) {
+  return Array.from(new Set(
+    values
+      .filter(value => value !== undefined && value !== null)
+      .map(value => String(value).trim())
+      .filter(value => value && value !== 'anon')
+  ));
+}
+
 async function getCurrentUser() {
   let identity = {};
   try {
@@ -21,11 +30,15 @@ async function getCurrentUser() {
     console.warn('读取 CloudBase 当前调用用户失败:', error.message || error);
   }
 
-  const canonicalId = firstNonEmpty([identity.uid, identity.customUserId, identity.openId]);
+  // user_roles 历史上可能保存 customUserId、uid 或 openId。统一权限模块以
+  // customUserId 为主，因此顺丰工作台必须按同一顺序识别，并保留全部 ID 逐个查找。
+  const ids = uniqueValidIds([identity.customUserId, identity.uid, identity.openId]);
+  const canonicalId = firstNonEmpty(ids);
   if (!canonicalId) return null;
 
   return {
     id: String(canonicalId),
+    ids,
     uid: identity.uid || '',
     customUserId: identity.customUserId || '',
     openId: identity.openId || '',

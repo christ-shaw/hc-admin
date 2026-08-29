@@ -8,17 +8,15 @@ const {
   normalizePositiveAmount,
 } = require('./renewalOrder');
 
-test('续租订单继承来源信息和附件，并固定为续期租金虚拟订单', () => {
+test('续租订单使用当前赞晨订单信息，不依赖历史订单', () => {
   const source = {
-    _id: 'order_1',
-    serialNumber: 100,
     orderAttribute: 'rental1',
     salesChannel: 'yuntu',
     salesperson: 'XX',
     channelCategory: 'platform',
     onlineOrderNumber: 'ME20260715100629062996',
     customerName: '潘瑞',
-    attachments: [{ fileID: 'cloud://file', fileName: '凭证.png' }],
+    attachments: [],
   };
   const order = buildRenewalOrderDoc(source, {
     amount: 300,
@@ -33,12 +31,12 @@ test('续租订单继承来源信息和附件，并固定为续期租金虚拟�
   assert.equal(order.products[0].amount, 300);
   assert.deepEqual(order.paymentSplits, [{ account: 'XX微信', amount: 300 }]);
   assert.deepEqual(order.attachments, [
-    ...source.attachments,
     { fileID: 'cloud://new-file', fileName: '续租凭证.pdf' },
   ]);
   assert.notEqual(order.attachments, source.attachments);
   assert.equal(order.renewalUploadedAttachmentCount, 1);
-  assert.equal(order.renewalSourceOrderId, 'order_1');
+  assert.equal(order.renewalSourceOrderId, undefined);
+  assert.equal(order.renewalSourceSerialNumber, undefined);
   assert.equal(order.status, 'noShip');
   assert.equal(order.needsOutbound, false);
 });

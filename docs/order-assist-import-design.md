@@ -364,6 +364,9 @@ X-HC-File-Content-Type: image/png
   "order": {
     "sourceOrderNo": "ME20260715100629062996",
     "renewalRequestId": "ME...-renewal-...",
+    "salesChannel": "yuntu",
+    "responsiblePerson": "XX",
+    "orderPerson": "潘瑞",
     "renewalAmount": 300,
     "paymentAccount": "XX微信",
     "remark": "续租一个月",
@@ -378,16 +381,16 @@ X-HC-File-Content-Type: image/png
 }
 ```
 
-服务端必须先按 `onlineOrderNumber` 找到可续租的原订单，并继承原订单的销售渠道、人员、订单属性、客户名称、网店单号和附件。续租订单固定映射为：
+服务端直接使用插件提交的当前赞晨订单信息创建续租单，不查询 hc-admin 历史订单。销售渠道、负责人、客户名称和网店单号均来自本次请求。续租订单固定映射为：
 
 - `orderSource = new`、`orderType = newBusiness`
 - 货品为 `虚拟产品 / 续期租金 / 默认 × 1`
 - 附件原始二进制上传到 `orders_attachments/renewals/`，建单请求仅提交 `fileID / fileName / size` 引用，避免 Base64 JSON 触发请求载荷限制
-- 可选提交 `renewalAttachments`（最多 5 个图片、PDF、Word、Excel、CSV 或 TXT，总大小不超过 4MB），新附件将追加到继承的原订单附件中
+- 可选提交 `renewalAttachments`（最多 5 个图片、PDF、Word、Excel、CSV 或 TXT，总大小不超过 4MB），订单附件仅包含本次上传内容
 - `unitPrice = amount = renewalAmount`
 - `status = noShip`、`needsOutbound = false`
 - `importSource = hc-order-assist-renewal`
-- `renewalSourceOrderId / renewalSourceSerialNumber` 记录来源
+- 不写入 `renewalSourceOrderId / renewalSourceSerialNumber` 历史订单关联
 - `renewalRequestId` 用于重试幂等
 
 创建成功会返回微信格式简介，例如：

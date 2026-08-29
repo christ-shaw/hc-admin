@@ -127,10 +127,8 @@ async function syncOrderLinkedOutboundModels(recordId, operator, auth) {
       await transaction.rollback();
       return { success: false, code: 'NOT_ORDER_LINKED', errMsg: '该出库记录没有关联订单' };
     }
-    if (outbound.outboundStatus !== 'pending') {
-      await transaction.rollback();
-      return { success: false, code: 'SNAPSHOT_LOCKED', errMsg: '已完成出库的型号快照不能重新同步' };
-    }
+    // 临时允许已完成出库的历史记录从关联订单重新同步，用于修正历史数据。
+    // 历史数据修正完成后，应在此恢复 outboundStatus === 'pending' 的限制。
 
     const orderIds = unique(outbound.orderIds).map(value => String(value).trim()).filter(Boolean);
     const orders = [];

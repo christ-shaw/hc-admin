@@ -247,10 +247,10 @@ export function RecordEdit({ visible, record, type, onClose, onSave, onDirtyChan
                 <p className="text-xs leading-5 text-blue-700">
                   {isLinkedPendingOutbound
                     ? '型号和数量来自关联订单，订单修改后会自动同步。'
-                    : '该记录已完成出库，型号和数量作为历史快照保留。'}
+                    : '当前临时允许已完成出库的记录从关联订单重新同步。'}
                 </p>
                 <div className="flex shrink-0 gap-2">
-                  {isLinkedPendingOutbound && onSyncFromOrders && (
+                  {onSyncFromOrders && (
                     <Button
                       size="small"
                       variant="outline"
