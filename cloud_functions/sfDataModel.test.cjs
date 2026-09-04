@@ -52,6 +52,16 @@ const cancelSfOrder = loadHelpers('cancelSfExpress/index.js');
 const records = loadHelpers('queryRecords/index.js');
 const shipment = loadHelpers('manageSfShipment/index.js');
 
+test('取消自身顺丰单后追加到其他包裹，优先显示当前关联而非旧取消记录', () => {
+  const cancelled = { _id: 'cancelled', isCurrent: true, status: 'cancelled', attemptNo: 3 };
+  const attached = { _id: 'attached', isCurrent: true, status: 'applied', attemptNo: 1 };
+  assert.equal(workbench.selectLatestCurrent([cancelled, attached], 'attached')._id, 'attached');
+  assert.equal(workbench.selectLatestCurrent([attached, cancelled], 'attached')._id, 'attached');
+  assert.equal(workbench.selectLatestCurrent([cancelled], 'cancelled')._id, 'cancelled');
+  assert.equal(workbench.selectLatestCurrent([cancelled, { ...attached, isCurrent: false }], 'attached')._id, 'cancelled');
+  assert.equal(workbench.selectLatestCurrent([cancelled, attached], '')._id, 'cancelled');
+});
+
 test('首次下单使用第一版客户订单号和确定性记录 ID', () => {
   const plan = apply.planSfAttempt([], 'order-123');
   assert.equal(plan.action, 'create');

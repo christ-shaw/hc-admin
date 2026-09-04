@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useRef } from 'react';
-import { Table, Button, Input, Select, Tag, Dialog, MessagePlugin } from 'tdesign-react';
+import { Table, Button, Input, Select, Tag, Dialog, MessagePlugin, Pagination } from 'tdesign-react';
 import { Search, RotateCcw, Plus, Eye, Download, Upload, X, ChevronRight, ChevronLeft, Check } from 'lucide-react';
 import { InvoiceRecord, InvoiceFilters, CompanyTemplate, InvoiceFile, InvoicePhoneProduct, dictToOptions, getDictLabel } from '../types';
 import { useInvoices } from '../hooks/useInvoices';
@@ -262,17 +262,15 @@ export function Invoices() {
   };
 
   const handleSearch = () => {
-    invoices.resetFilters();
     const searchFilters: InvoiceFilters = { ...filters };
     if (searchFilters.companyName) searchFilters.companyName = searchFilters.companyName.trim();
     if (searchFilters.applicant) searchFilters.applicant = searchFilters.applicant.trim();
-    invoices.fetchRecords(null, searchFilters);
+    invoices.fetchRecords(1, searchFilters);
   };
 
   const handleReset = () => {
     setFilters({});
-    invoices.resetFilters();
-    invoices.fetchRecords(null, {});
+    invoices.fetchRecords(1, {});
   };
 
   const handleDetail = (record: InvoiceRecord) => {
@@ -666,10 +664,6 @@ export function Invoices() {
     },
   ];
 
-  const displayRecords = invoices.getPageRecords(invoices.currentPage);
-  const loadedInvoicePages = Math.max(1, Math.ceil(invoices.records.length / 20));
-  const canGoNextInvoicePage = invoices.currentPage < loadedInvoicePages || invoices.hasMore;
-
   return (
     <div className="min-w-0 space-y-4">
       <div className="flex items-center justify-between">
@@ -711,9 +705,14 @@ export function Invoices() {
 
       {/* 表格 */}
       <div className="glass-card min-w-0 overflow-hidden">
+        {invoices.error && (
+          <div role="alert" className="border-b border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
+            查询失败：{invoices.error}。已保留上次查询结果，请重试。
+          </div>
+        )}
         <div className="max-w-full overflow-x-auto">
           <Table
-            data={displayRecords}
+            data={invoices.records}
             columns={columns}
             loading={invoices.loading}
             rowKey="_id"
@@ -723,17 +722,17 @@ export function Invoices() {
           />
         </div>
         {/* 分页 */}
-        <div className="flex justify-center items-center gap-2 py-4 border-t border-gray-100">
-          <Button size="small" variant="outline" disabled={invoices.currentPage <= 1}
-            onClick={invoices.goPreviousPage}>
-            上一页
-          </Button>
-          <span className="text-sm text-gray-500">第 {invoices.currentPage} 页</span>
-          <Button size="small" variant="outline" disabled={!canGoNextInvoicePage || invoices.loading}
-            onClick={invoices.goNextPage}>
-            下一页
-          </Button>
-          <span className="text-sm text-gray-400">共 {invoices.totalRecords} 条</span>
+        <div className="overflow-x-auto border-t border-gray-100 p-4">
+          <Pagination
+            current={invoices.currentPage}
+            pageSize={invoices.pageSize}
+            total={invoices.totalRecords}
+            totalContent={`共 ${invoices.totalRecords} 条`}
+            pageSizeOptions={[10, 20, 50, 100]}
+            showJumper
+            disabled={invoices.loading}
+            onChange={({ current, pageSize }) => { void invoices.changePage(current, pageSize); }}
+          />
         </div>
       </div>
 

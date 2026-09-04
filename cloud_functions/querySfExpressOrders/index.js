@@ -282,9 +282,12 @@ async function enrichShippingFees(orders) {
   }));
 }
 
-function selectLatestCurrent(records) {
-  return records
-    .filter(record => record.isCurrent === true)
+function selectLatestCurrent(records, preferredRecordId = '') {
+  const current = records.filter(record => record.isCurrent === true);
+  // 取消自身运单后可能追加到另一订单的包裹；不同主单的 attemptNo 不能相互比较。
+  // 优先展示订单当前明确关联的运单，旧的已取消记录仍保留作历史。
+  const referenced = current.find(record => record._id === trimString(preferredRecordId));
+  return referenced || current
     .sort((a, b) => Number(b.attemptNo || 0) - Number(a.attemptNo || 0))[0] || null;
 }
 
@@ -380,7 +383,8 @@ async function buildWorkbenchRows(orders, config) {
     const order = stripLegacySfFields(rawOrder);
     const related = sfBySource.get(order._id) || [];
     const currentSfOrder = selectLatestCurrent(
-      related.filter(record => normalizeSfEnv(record.env) === config.env)
+      related.filter(record => normalizeSfEnv(record.env) === config.env),
+      order.sfExpressOrderRecordId,
     );
     return {
       order,

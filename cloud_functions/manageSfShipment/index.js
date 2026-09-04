@@ -399,20 +399,38 @@ function buildMissingRemarkEntries(orders, sourceOrderId, attachedAt) {
     ));
 }
 
-async function listReusable(sourceOrderId, env) {
-  const targetOrder = await getOrderWithShipping(db, sourceOrderId);
+async function getReusableOutbound(store, targetOrder, env) {
   if (!targetOrder) throw new Error('目标订单不存在');
-  if (trimString(targetOrder.trackingNumber) || trimString(targetOrder.sfExpressOrderRecordId)) {
-    throw new Error('目标订单已经关联物流单号');
+  if (trimString(targetOrder.trackingNumber)) throw new Error('目标订单已经关联物流单号');
+  if (!PENDING_ORDER_STATUSES.has(trimString(targetOrder.status)) || targetOrder.needsOutbound === false) {
+    throw new Error('仅需要出库的未发货订单可以复用顺丰运单');
   }
-  if (!PENDING_ORDER_STATUSES.has(trimString(targetOrder.status))) {
-    throw new Error('仅未发货订单可以复用顺丰运单');
-  }
-  const targetOutbound = await getDoc(db, OUTBOUND_COLLECTION, targetOrder.outboundRecordId);
+  const targetOutbound = await getDoc(store, OUTBOUND_COLLECTION, targetOrder.outboundRecordId);
   if (!targetOutbound || trimString(targetOutbound.outboundStatus) !== 'pending') {
     throw new Error('请先为目标订单生成待出库单');
   }
   if (trimString(targetOutbound.trackingNumber)) throw new Error('目标出库单已经存在物流单号');
+
+  // 取消会清空物流单号，但保留历史顺丰记录 ID。只放行已经确认取消的本订单记录，
+  // 不将仍有效、被新申请替代、跨环境或无法核实的关联当作“未下单”。
+  const previousRecordIds = uniqueStrings([
+    targetOrder.sfExpressOrderRecordId,
+    targetOutbound.sfExpressOrderRecordId,
+  ]);
+  for (const recordId of previousRecordIds) {
+    const previous = await getDoc(store, SF_ORDERS_COLLECTION, recordId);
+    if (!previous || previous.status !== 'cancelled' || previous.isCurrent !== true
+      || normalizeSfEnv(previous.env) !== env
+      || trimString(previous.sourceOrderId) !== trimString(targetOrder._id)) {
+      throw new Error('目标订单仍关联有效或无法核实的顺丰记录，不能复用运单');
+    }
+  }
+  return targetOutbound;
+}
+
+async function listReusable(sourceOrderId, env) {
+  const targetOrder = await getOrderWithShipping(db, sourceOrderId);
+  await getReusableOutbound(db, targetOrder, env);
   const targetKey = buildRecipientMatchKey(targetOrder);
 
   const result = await db.collection(SF_ORDERS_COLLECTION)
@@ -528,18 +546,8 @@ async function attachOrder(payload, env, actorId) {
       throw new Error('包裹状态已经变化，请刷新候选列表后重试');
     }
 
-    if (trimString(targetOrder.trackingNumber) || trimString(targetOrder.sfExpressOrderRecordId)) {
-      throw new Error('目标订单已经关联其他物流单号');
-    }
-    if (!PENDING_ORDER_STATUSES.has(trimString(targetOrder.status)) || targetOrder.needsOutbound === false) {
-      throw new Error('仅需要出库的未发货订单可以复用顺丰运单');
-    }
+    await getReusableOutbound(transaction, targetOrder, env);
     const targetOutboundId = trimString(targetOrder.outboundRecordId);
-    const targetOutbound = await getDoc(transaction, OUTBOUND_COLLECTION, targetOutboundId);
-    if (!targetOutbound || trimString(targetOutbound.outboundStatus) !== 'pending') {
-      throw new Error('目标订单必须先生成待出库单');
-    }
-    if (trimString(targetOutbound.trackingNumber)) throw new Error('目标出库单已经存在物流单号');
 
     const primaryOrder = await getOrderWithShipping(transaction, record.sourceOrderId);
     if (!primaryOrder || buildRecipientMatchKey(primaryOrder) !== buildRecipientMatchKey(targetOrder)) {

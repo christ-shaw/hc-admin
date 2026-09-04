@@ -904,7 +904,7 @@ export function SfExpress() {
                 {canRetry ? '重试' : row.sfStatus === 'cancelled' ? '重新生成' : '生成顺丰单'}
               </Button>
             )}
-            {row.sfStatus === 'not_created' && (
+            {canApply && (
               <Button
                 size="small"
                 variant="outline"
@@ -1249,6 +1249,9 @@ export function SfExpress() {
           <div className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-700">
             仅显示已由原订单明确“开放追加”，且收件人、电话、地址和付款方式完全一致的包裹。
             关联成功后，新出库单仍需独立完成拍照。
+            {reuseTarget?.sfStatus === 'cancelled' && (
+              <p className="mt-1">原顺丰单已取消，可以追加到其他有效包裹，不会恢复原运单。</p>
+            )}
           </div>
           {reuseTarget && (
             <div className="text-sm text-gray-600">
