@@ -301,6 +301,12 @@ export interface OrderRecord {
   channelCategory: string;          // 渠道类别
   onlineOrderNumber: string;        // 网店订单号
   customerName: string;             // 客户名称
+  customerId?: string;              // 关联客户主档案 ID（旧订单允许为空）
+  customerAliasId?: string;         // 下单时选用的客户别名 ID
+  recipientProfileId?: string;      // 下单时选用的收货档案 ID
+  customerLinkStatus?: 'linked' | 'pending' | 'ignored'; // 客户关联状态
+  customerLinkedAt?: string;        // 最近关联时间
+  customerLinkedBy?: string;        // 最近关联操作人
   products?: ProductItem[];         // 货品明细（新结构：一条订单多条货品）
   /** @deprecated 旧扁平结构单货品字段，仅兼容未迁移数据；读取货品请用 getOrderProducts() */
   brand?: string;                   // 品牌
@@ -349,6 +355,64 @@ export interface OrderRecord {
   sfExpressOrderRecordId?: string;  // 关联的顺丰实际包裹记录（第一阶段只读）
   sharedWaybill?: boolean;          // 是否与其他订单共享同一顺丰运单
   createTime?: { $date: string };
+}
+
+export type CustomerStatus = 'active' | 'disabled';
+export type CustomerProfileSource = 'manual' | 'order' | 'assist_import';
+
+/** 客户主档案。客户名称、别名和收货信息拆分保存，订单仅持有引用与历史快照。 */
+export interface CustomerRecord {
+  _id: string;
+  displayName: string;
+  normalizedDisplayName: string;
+  status: CustomerStatus;
+  remark: string;
+  createdAt?: string;
+  createdBy?: string;
+  updatedAt?: string;
+  updatedBy?: string;
+}
+
+export interface CustomerAliasRecord {
+  _id: string;
+  customerId: string;
+  name: string;
+  normalizedName: string;
+  sourceType: CustomerProfileSource;
+  salesChannel: string;
+  remark: string;
+  enabled: boolean;
+  createdAt?: string;
+  createdBy?: string;
+  updatedAt?: string;
+  updatedBy?: string;
+}
+
+export interface CustomerRecipientProfileRecord {
+  _id: string;
+  customerId: string;
+  label: string;
+  consignee: string;
+  normalizedConsignee: string;
+  phone: string;
+  normalizedPhone: string;
+  address: string;
+  normalizedAddress: string;
+  sourceType: CustomerProfileSource;
+  enabled: boolean;
+  useCount: number;
+  lastUsedAt?: string;
+  createdAt?: string;
+  createdBy?: string;
+  updatedAt?: string;
+  updatedBy?: string;
+}
+
+export interface CustomerDetail extends CustomerRecord {
+  aliases: CustomerAliasRecord[];
+  recipients: CustomerRecipientProfileRecord[];
+  recentOrders: OrderRecord[];
+  linkedOrderCount: number;
 }
 
 /** 转租赁2货品条目（支持多组） */

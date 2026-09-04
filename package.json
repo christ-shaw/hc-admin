@@ -12,6 +12,7 @@
     "test:sf-plugin-print": "node --test cloud_functions/manageSfPluginPrint/index.test.cjs",
     "test:sf-data-model": "node --test cloud_functions/sfDataModel.test.cjs cloud_functions/manageSfShipment/index.test.cjs",
     "test:purchases": "node --test cloud_functions/managePurchases/index.test.cjs",
+    "test:customers": "node --test cloud_functions/manageCustomers/index.test.cjs",
     "test:invoices": "node --test cloud_functions/queryInvoices/index.test.cjs scripts/useInvoices.test.cjs",
     "test:product-model-ids": "node --test cloud_functions/manageProductModels/*.test.cjs",
     "test:order-assist-catalog": "node --test cloud_functions/importOrderFromAssist/*.test.cjs",

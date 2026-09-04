@@ -12,6 +12,7 @@ import {
   ShoppingCart,
   Smartphone,
   Truck,
+  UsersRound,
   Warehouse,
   type LucideIcon,
 } from 'lucide-react';
@@ -39,6 +40,7 @@ const Stats = lazyNamed(() => import('../pages/Stats'), 'Stats');
 const Logs = lazyNamed(() => import('../pages/Logs'), 'Logs');
 const PhoneModels = lazyNamed(() => import('../pages/PhoneModels'), 'PhoneModels');
 const Orders = lazyNamed(() => import('../pages/Orders'), 'Orders');
+const Customers = lazyNamed(() => import('../pages/Customers'), 'Customers');
 const SfExpress = lazyNamed(() => import('../pages/SfExpress'), 'SfExpress');
 const Purchases = lazyNamed(() => import('../pages/Purchases'), 'Purchases');
 const Invoices = lazyNamed(() => import('../pages/Invoices'), 'Invoices');
@@ -54,6 +56,7 @@ export const appRoutes: AppRouteMeta[] = [
   { path: '/logs', label: '操作日志', Icon: FileText, Component: Logs, closable: true },
   { path: '/models', label: '型号管理', Icon: Smartphone, Component: PhoneModels, closable: true },
   { path: '/orders', label: '订单管理', Icon: ShoppingCart, Component: Orders, closable: true },
+  { path: '/customers', label: '客户管理', Icon: UsersRound, Component: Customers, closable: true },
   { path: '/sf-express', label: '顺丰快递', Icon: Truck, Component: SfExpress, closable: true },
   { path: '/purchases', label: '采购管理', Icon: ClipboardList, Component: Purchases, closable: true },
   { path: '/invoices', label: '开票管理', Icon: FileText, Component: Invoices, closable: true },
@@ -89,6 +92,7 @@ export const appNavigation: AppNavItem[] = [
   route('/logs'),
   route('/models'),
   route('/orders'),
+  route('/customers'),
   route('/sf-express'),
   route('/purchases'),
   { label: '发票', Icon: Receipt, children: [route('/invoices'), route('/companies')] },

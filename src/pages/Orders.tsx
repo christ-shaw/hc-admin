@@ -22,6 +22,7 @@ import { PAGE_SIZE } from '../utils/constants';
 import { DICT_CODES, useDictionaries } from '../contexts/DictionaryContext';
 import { useTabDirty } from '../contexts/TabWorkspaceContext';
 import { usePermission } from '../contexts/PermissionContext';
+import { CustomerOrderLinkFields } from '../components/CustomerOrderLinkFields';
 
 /** ========== 预计算静态 options（模块级常量，避免每次渲染重建） ========== */
 const PLACEHOLDER_OPTION = { label: '请选择', value: '' };
@@ -79,6 +80,9 @@ interface OrderFormData {
   channelCategory: string;
   onlineOrderNumber: string;
   customerName: string;
+  customerId: string;
+  customerAliasId: string;
+  recipientProfileId: string;
   trackingNumber: string;
   consignee: string;
   consigneePhone: string;
@@ -241,6 +245,9 @@ const EMPTY_ORDER: OrderFormData = {
   channelCategory: '',
   onlineOrderNumber: '',
   customerName: '',
+  customerId: '',
+  customerAliasId: '',
+  recipientProfileId: '',
   trackingNumber: '',
   consignee: '',
   consigneePhone: '',
@@ -611,6 +618,9 @@ function buildEditFormFromRecord(record: OrderRecord): OrderFormData {
     channelCategory: record.channelCategory,
     onlineOrderNumber: record.onlineOrderNumber,
     customerName: record.customerName,
+    customerId: record.customerId || '',
+    customerAliasId: record.customerAliasId || '',
+    recipientProfileId: record.recipientProfileId || '',
     trackingNumber: record.trackingNumber,
     consignee: record.consignee,
     consigneePhone: record.consigneePhone || '',
@@ -690,6 +700,7 @@ function buildRenewalFormFromRecord(record: OrderRecord): OrderFormData {
     consignee: '',
     consigneePhone: '',
     consigneeAddress: '',
+    recipientProfileId: '',
     shippingFee: '',
     status: 'noShip',
     customerRemark: '',
@@ -737,6 +748,7 @@ function buildRental2TransferFormFromRecord(record: OrderRecord, mode: Rental2Tr
     consignee: '',
     consigneePhone: '',
     consigneeAddress: '',
+    recipientProfileId: '',
     shippingFee: '',
     status: 'noShip',
     customerRemark: '',
@@ -1623,6 +1635,12 @@ export function Orders() {
         channelCategory: addForm.channelCategory,
         onlineOrderNumber: addForm.onlineOrderNumber,
         customerName: addForm.customerName,
+        customerId: addForm.customerId || '',
+        customerAliasId: addForm.customerAliasId || '',
+        recipientProfileId: addForm.recipientProfileId || '',
+        customerLinkStatus: addForm.customerId ? 'linked' : 'pending',
+        customerLinkedAt: addForm.customerId ? new Date().toISOString() : '',
+        customerLinkedBy: addForm.customerId ? await getCurrentOperatorName() : '',
         products: addForm.products.map(serializeProductForSave),
         ...serializeOrderPayment(addForm),
         trackingNumber: shipmentFields.trackingNumber,
@@ -1655,6 +1673,9 @@ export function Orders() {
       };
       const result = await orders.importOrders([newRecord]);
       if (result.success) {
+        if (addForm.recipientProfileId) {
+          callFunction('manageCustomers', { action: 'touchRecipient', recipientId: addForm.recipientProfileId }).catch(() => undefined);
+        }
         MessagePlugin.success(addRenewalSource
           ? '续租订单创建成功'
           : addRental2TransferSource
@@ -2111,6 +2132,12 @@ export function Orders() {
         channelCategory: editForm.channelCategory,
         onlineOrderNumber: editForm.onlineOrderNumber,
         customerName: editForm.customerName,
+        customerId: editForm.customerId || '',
+        customerAliasId: editForm.customerAliasId || '',
+        recipientProfileId: editForm.recipientProfileId || '',
+        customerLinkStatus: editForm.customerId ? 'linked' : 'pending',
+        customerLinkedAt: editForm.customerId ? new Date().toISOString() : '',
+        customerLinkedBy: editForm.customerId ? await getCurrentOperatorName() : '',
         products: editForm.products.map(serializeProductForSave),
         // 收款在订单级；清空旧扁平货品字段，避免与 products 并存产生歧义
         ...serializeOrderPayment(editForm),
@@ -2141,6 +2168,9 @@ export function Orders() {
 
       const success = await orders.updateOrder(editId, updateData);
       if (success) {
+        if (editForm.recipientProfileId) {
+          callFunction('manageCustomers', { action: 'touchRecipient', recipientId: editForm.recipientProfileId }).catch(() => undefined);
+        }
         MessagePlugin.success('修改订单成功');
         setEditVisible(false);
         setEditStep(1);
@@ -3944,7 +3974,7 @@ function AddOrderWizard({
     try {
       const result = await parseConsigneeInfo(pasteText.trim());
       if (result) {
-        onChange(prev => ({ ...prev, consignee: result.name || prev.consignee, consigneePhone: result.phone || prev.consigneePhone, consigneeAddress: result.address || prev.consigneeAddress }));
+        onChange(prev => ({ ...prev, consignee: result.name || prev.consignee, consigneePhone: result.phone || prev.consigneePhone, consigneeAddress: result.address || prev.consigneeAddress, recipientProfileId: '' }));
         setPasteText('');
         MessagePlugin.success('识别成功');
       } else { MessagePlugin.warning('未能识别出收件人信息，请手动填写'); }
@@ -3988,12 +4018,17 @@ function AddOrderWizard({
             <div className="order-basic-form-field">
               <label className="block text-xs text-gray-500 mb-1">客户名称 <span className="text-red-500">*</span></label>
               <Input placeholder="请输入客户名称"
-                value={form.customerName} onChange={val => updateField('customerName', val as string)} />
+                value={form.customerName} onChange={val => onChange(prev => ({ ...prev, customerName: val as string, customerAliasId: '' }))} />
             </div>
             <div className="order-basic-form-field">
               <label className="block text-xs text-gray-500 mb-1">销售人员 <span className="text-red-500">*</span></label>
               <Select placeholder="请选择" value={form.salesperson || ''} onChange={val => updateField('salesperson', val as string)} options={SALESPERSON_OPTIONS} />
             </div>
+            <CustomerOrderLinkFields
+              value={form}
+              salesChannel={form.salesChannel}
+              onChange={patch => onChange(prev => ({ ...prev, ...patch }))}
+            />
           </div>
         </div>
       )}
@@ -4317,17 +4352,17 @@ function AddOrderWizard({
                 <div>
                   <label className="block text-xs text-gray-500 mb-1">收货人名称 {mode === 'add' && <span className="text-red-500">*</span>}</label>
                   <Input placeholder="收货人名称"
-                    value={form.consignee} onChange={val => updateField('consignee', val as string)} />
+                    value={form.consignee} onChange={val => onChange(prev => ({ ...prev, consignee: val as string, recipientProfileId: '' }))} />
                 </div>
                 <div>
                   <label className="block text-xs text-gray-500 mb-1">收货人电话 {mode === 'add' && <span className="text-red-500">*</span>}</label>
                   <Input placeholder="收货人电话"
-                    value={form.consigneePhone} onChange={val => updateField('consigneePhone', val as string)} />
+                    value={form.consigneePhone} onChange={val => onChange(prev => ({ ...prev, consigneePhone: val as string, recipientProfileId: '' }))} />
                 </div>
                 <div className="col-span-2">
                   <label className="block text-xs text-gray-500 mb-1">收货人地址 {mode === 'add' && <span className="text-red-500">*</span>}</label>
                   <Input placeholder="收货人地址"
-                    value={form.consigneeAddress} onChange={val => updateField('consigneeAddress', val as string)} />
+                    value={form.consigneeAddress} onChange={val => onChange(prev => ({ ...prev, consigneeAddress: val as string, recipientProfileId: '' }))} />
                 </div>
                 {mode === 'add' && (
                   <div className="col-span-2">
@@ -4477,6 +4512,7 @@ function AddOrderWizard({
             <PreviewSection title="基础信息">
               <PreviewItem label="日期" value={form.date} />
               <PreviewItem label="客户名称" value={form.customerName} />
+              <PreviewItem label="客户主档案" value={form.customerId ? '已关联' : '未关联（待后续整理）'} />
               <PreviewItem label="销售人员" value={form.salesperson} />
             </PreviewSection>
             <PreviewSection title="订单属性">

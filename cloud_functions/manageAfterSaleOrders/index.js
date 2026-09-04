@@ -240,6 +240,16 @@ async function createAfterSale(payload, currentUser) {
         channelCategory: trim(source.channelCategory),
         onlineOrderNumber: trim(source.onlineOrderNumber),
         customerName: trim(source.customerName),
+        customerId: trim(source.customerId),
+        customerAliasId: trim(source.customerAliasId),
+        recipientProfileId: trim(source.consignee) === input.consignee
+          && trim(source.consigneePhone) === input.consigneePhone
+          && trim(source.consigneeAddress) === input.consigneeAddress
+          ? trim(source.recipientProfileId)
+          : '',
+        customerLinkStatus: source.customerId ? 'linked' : 'pending',
+        customerLinkedAt: trim(source.customerLinkedAt),
+        customerLinkedBy: trim(source.customerLinkedBy),
         products: input.products,
         paymentAccount: '',
         paymentSplits: [],
