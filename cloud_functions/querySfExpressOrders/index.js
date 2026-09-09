@@ -1,3 +1,4 @@
+const sfProfile = require('./sfProfile');
 /**
  * querySfExpressOrders - 顺丰快递统一日期工作台
  *
@@ -207,7 +208,7 @@ function shouldDisplaySfStatus(status) {
 
 async function resolveSfConfig() {
   const config = await getDoc(CONFIG_COLLECTION, SF_CONFIG_DOC_ID);
-  const env = normalizeSfEnv(config && config.env);
+  const env = sfProfile.route()?.env || normalizeSfEnv(config && config.env);
   return {
     env,
     dataModelVersion: Number(config && config.dataModelVersion || 1),
@@ -330,6 +331,7 @@ function publicSfOrder(record, fallbackOrder) {
     sfOrderId: record.sfOrderId,
     attemptNo: Number(record.attemptNo || 1),
     env: normalizeSfEnv(record.env),
+    sfConfigProfile: sfProfile.profile(record.sfConfigProfile),
     isCurrent: record.isCurrent === true,
     status: record.status,
     waybillNo: record.waybillNo || '',
@@ -383,7 +385,7 @@ async function buildWorkbenchRows(orders, config) {
     const order = stripLegacySfFields(rawOrder);
     const related = sfBySource.get(order._id) || [];
     const currentSfOrder = selectLatestCurrent(
-      related.filter(record => normalizeSfEnv(record.env) === config.env),
+      related,
       order.sfExpressOrderRecordId,
     );
     return {
@@ -508,3 +510,6 @@ exports.__test__ = {
   selectLatestCurrent,
   buildOtherEnvSummary,
 };
+
+// Capture one immutable profile/environment for this invocation.
+exports.main = sfProfile.wrap(db, 'active', exports.main);

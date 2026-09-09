@@ -1,3 +1,4 @@
+const sfProfile = require('./sfProfile');
 /**
  * querySfOrderResult - 按独立顺丰记录查询顺丰订单
  *
@@ -67,13 +68,14 @@ function normalizeSfEnv(value = process.env.SF_ENV || 'sandbox') {
 
 function getFirstEnv(names) {
   for (const name of names) {
-    const value = trimString(process.env[name]);
+    const value = trimString(sfProfile.envValue(name));
     if (value) return value;
   }
   return '';
 }
 
 async function resolveSfEnv() {
+  if (sfProfile.route()) return sfProfile.route().env;
   try {
     const result = await db.collection(CONFIG_COLLECTION).doc(SF_CONFIG_DOC_ID).get();
     const value = trimString(result.data && result.data.env);
@@ -189,11 +191,11 @@ async function getDoc(collectionName, id) {
 async function getAccessToken(config, forceRefresh = false) {
   const result = await cloud.callFunction({
     name: 'getSfAccessToken',
-    data: { forceRefresh, sfEnv: config.env },
+    data: { forceRefresh, sfEnv: config.env, sfConfigProfile: sfProfile.currentProfile() },
   });
   const tokenResult = result.result || {};
   if (!tokenResult.success) throw new Error(tokenResult.errMsg || '获取顺丰 accessToken 失败');
-  const tokenData = await getDoc(TOKEN_COLLECTION, config.env);
+  const tokenData = await getDoc(TOKEN_COLLECTION, sfProfile.tokenId(config.env));
   if (!tokenData || !tokenData.accessToken) throw new Error('顺丰 accessToken 缓存为空');
   if (Number(tokenData.expiresAt || 0) <= Date.now()) throw new Error('顺丰 accessToken 已过期');
   return tokenData.accessToken;
@@ -396,3 +398,6 @@ exports.main = async (event) => {
 exports.__test__ = {
   planPendingOutboundTrackingSync,
 };
+
+// Capture one immutable profile/environment for this invocation.
+exports.main = sfProfile.wrap(db, 'record', exports.main);

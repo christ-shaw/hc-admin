@@ -1,3 +1,4 @@
+const sfProfile = require('./sfProfile');
 /**
  * manageSfPluginPrint - 管理顺丰 Windows 云打印插件会话
  *
@@ -57,7 +58,7 @@ function isNotFound(error) {
 
 function getFirstEnv(names) {
   for (const name of names) {
-    const value = trimString(process.env[name]);
+    const value = trimString(sfProfile.envValue(name));
     if (value) return value;
   }
   return '';
@@ -100,7 +101,7 @@ function getCustomTemplateCode(env) {
 }
 
 function getPluginEnabled(config, env) {
-  const byEnv = config && config.pluginPrintEnabledByEnv;
+  const byEnv = sfProfile.pluginFlags(config, sfProfile.currentProfile());
   return !!(byEnv && byEnv[env] === true);
 }
 
@@ -348,7 +349,7 @@ async function ensureCollection(collectionName) {
 async function readSfConfig() {
   const config = await getDoc(CONFIG_COLLECTION, SF_CONFIG_DOC_ID);
   const rawEnv = trimString(config && config.env);
-  const env = rawEnv ? normalizeSfEnv(rawEnv) : normalizeSfEnv();
+  const env = sfProfile.route()?.env || (rawEnv ? normalizeSfEnv(rawEnv) : normalizeSfEnv());
   return { config: config || {}, env };
 }
 
@@ -359,13 +360,13 @@ async function getSfExpressOrder(sfExpressOrderId) {
 async function getAccessToken(env, forceRefresh) {
   const result = await cloud.callFunction({
     name: 'getSfAccessToken',
-    data: { forceRefresh: !!forceRefresh, sfEnv: env },
+    data: { forceRefresh: !!forceRefresh, sfEnv: env, sfConfigProfile: sfProfile.currentProfile() },
   });
   const tokenResult = result.result || {};
   if (!tokenResult.success) {
     throw createError('SF_TOKEN_FAILED', tokenResult.errMsg || '获取顺丰 accessToken 失败');
   }
-  const tokenData = await getDoc(TOKEN_COLLECTION, env);
+  const tokenData = await getDoc(TOKEN_COLLECTION, sfProfile.tokenId(env));
   const accessToken = trimString(tokenData && tokenData.accessToken);
   const expiresAt = Number(tokenData && tokenData.expiresAt || 0);
   if (!accessToken) throw createError('SF_TOKEN_EMPTY', '顺丰 accessToken 缓存为空');
@@ -435,6 +436,7 @@ async function createPrintSession({
       waybillNo,
       env,
       channel: 'plugin',
+      sfConfigProfile: sfProfile.currentProfile(),
       operation,
       status: 'prepared',
       operatorId: auth.operatorId,
@@ -630,3 +632,6 @@ exports.__test__ = {
   normalizeCallbackCode,
   getRecordOutcome,
 };
+
+// Capture one immutable profile/environment for this invocation.
+exports.main = sfProfile.wrap(db, 'record', exports.main);

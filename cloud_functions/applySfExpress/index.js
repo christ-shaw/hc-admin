@@ -1,3 +1,4 @@
+const sfProfile = require('./sfProfile');
 /**
  * applySfExpress - 顺丰下快递单
  *
@@ -91,14 +92,14 @@ function normalizeSfEnv(value = process.env.SF_ENV || 'sandbox') {
 
 function getFirstEnv(names) {
   for (const name of names) {
-    const value = trimString(process.env[name]);
+    const value = trimString(sfProfile.envValue(name));
     if (value) return value;
   }
   return '';
 }
 
 function getPositiveIntegerEnv(name, defaultValue) {
-  const value = trimString(process.env[name]);
+  const value = trimString(sfProfile.envValue(name));
   if (!value) return defaultValue;
 
   const parsed = Number(value);
@@ -110,6 +111,7 @@ function getPositiveIntegerEnv(name, defaultValue) {
 }
 
 async function resolveSfEnv() {
+  if (sfProfile.route()) return sfProfile.route().env;
   let raw = '';
   try {
     const result = await db.collection(CONFIG_COLLECTION).doc(SF_CONFIG_DOC_ID).get();
@@ -245,14 +247,14 @@ function validateSenderConfig(sender, label) {
 function getDefaultSenderConfig(env) {
   const prefix = env === 'production' ? 'SF_PROD_SENDER_' : 'SF_SANDBOX_SENDER_';
   const sender = normalizeSenderConfig({
-    contact: process.env[`${prefix}CONTACT`],
-    tel: process.env[`${prefix}TEL`],
-    company: process.env[`${prefix}COMPANY`],
+    contact: sfProfile.envValue(`${prefix}CONTACT`),
+    tel: sfProfile.envValue(`${prefix}TEL`),
+    company: sfProfile.envValue(`${prefix}COMPANY`),
     country: 'CN',
-    province: process.env[`${prefix}PROVINCE`],
-    city: process.env[`${prefix}CITY`],
-    county: process.env[`${prefix}COUNTY`],
-    address: process.env[`${prefix}ADDRESS`],
+    province: sfProfile.envValue(`${prefix}PROVINCE`),
+    city: sfProfile.envValue(`${prefix}CITY`),
+    county: sfProfile.envValue(`${prefix}COUNTY`),
+    address: sfProfile.envValue(`${prefix}ADDRESS`),
   });
 
   validateSenderConfig(sender, `${env === 'production' ? '生产' : '沙箱'}默认寄件人配置`);
@@ -263,10 +265,10 @@ function getDefaultSenderConfig(env) {
 function parseSenderMap(env) {
   const variableName = env === 'production' ? 'SF_PROD_SENDER_MAP' : 'SF_SANDBOX_SENDER_MAP';
   const base64VariableName = `${variableName}_BASE64`;
-  const encodedText = trimString(process.env[base64VariableName]);
+  const encodedText = trimString(sfProfile.envValue(base64VariableName));
   const text = encodedText
     ? Buffer.from(encodedText, 'base64').toString('utf8')
-    : trimString(process.env[variableName]);
+    : trimString(sfProfile.envValue(variableName));
   if (!text) return null;
 
   try {
@@ -717,6 +719,7 @@ async function createSfRecord({ order, env, attemptNo, sfOrderId, sender, reques
   const shipmentRemarkEntries = [buildShipmentRemarkEntry(order, 'primary', createdAt)];
   const data = {
     _id: recordId,
+    sfConfigProfile: sfProfile.currentProfile(),
     sourceOrderId: order._id,
     sourceSerialNumber: Number(order.serialNumber || 0),
     sourceOnlineOrderNumber: trimString(order.onlineOrderNumber),
@@ -767,7 +770,7 @@ async function createSfRecord({ order, env, attemptNo, sfOrderId, sender, reques
     return data;
   } catch (error) {
     const existing = await getSfRecord(recordId);
-    if (existing) return existing;
+    if (existing) throw new Error('该订单已被其他请求申请，请查询原顺丰记录后重试');
     throw error;
   }
 }
@@ -786,6 +789,10 @@ async function prepareSfRecord({ order, config, sender }) {
   const records = await getSfRecordsBySource(order._id, config.env);
   const plan = planSfAttempt(records, order._id);
   const current = plan.current;
+  if (current && current.status !== 'cancelled'
+      && sfProfile.profile(current.sfConfigProfile) !== sfProfile.currentProfile()) {
+    throw new Error('申请期间订单配置已被其他请求确定，请查询原顺丰记录后重试');
+  }
 
   if (plan.action === 'reject_applied') {
     throw new Error('该订单已成功生成顺丰单，请勿重复申请');
@@ -985,7 +992,7 @@ async function markSfFailed(sfRecord, parsed) {
 async function getAccessToken(config, forceRefresh = false) {
   const result = await cloud.callFunction({
     name: 'getSfAccessToken',
-    data: { forceRefresh, sfEnv: config.env },
+    data: { forceRefresh, sfEnv: config.env, sfConfigProfile: sfProfile.currentProfile() },
   });
 
   const tokenResult = result.result || {};
@@ -993,7 +1000,7 @@ async function getAccessToken(config, forceRefresh = false) {
     throw new Error(tokenResult.errMsg || '获取顺丰 accessToken 失败');
   }
 
-  const tokenDoc = await db.collection(TOKEN_COLLECTION).doc(config.env).get();
+  const tokenDoc = await db.collection(TOKEN_COLLECTION).doc(sfProfile.tokenId(config.env)).get();
   const tokenData = tokenDoc.data || {};
   if (!tokenData.accessToken) {
     throw new Error('顺丰 accessToken 缓存为空');
@@ -1324,3 +1331,6 @@ exports.__test__ = {
   planPendingOutboundTrackingSync,
   buildInitialShipmentFields,
 };
+
+// Capture one immutable profile/environment for this invocation.
+exports.main = sfProfile.wrap(db, 'apply', exports.main);

@@ -36,6 +36,7 @@ function patchTDesignCssWarnings() {
 }
 
 export default defineConfig({
+  cacheDir: './tmp/vite',
   base: '/',
   plugins: [patchTDesignCssWarnings(), react()],
   server: {

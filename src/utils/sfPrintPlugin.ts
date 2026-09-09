@@ -89,9 +89,11 @@ export async function getSfPrintPlugin(
   const key = `${env}:${partnerID}`;
   if (instancePromise) {
     if (instanceKey !== key) {
-      throw new Error('顺丰打印环境已变化，请刷新页面后再使用插件打印');
+      // Finish a batch item before creating the SDK instance for the next account.
+      await instancePromise;
+      instancePromise = null;
     }
-    return instancePromise;
+    if (instancePromise) return instancePromise;
   }
 
   instanceKey = key;

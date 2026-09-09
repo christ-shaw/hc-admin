@@ -32,6 +32,7 @@ function loadHelpers(relativePath, exportName = '__test__') {
     module,
     process: { env: {} },
     require(id) {
+      if (id === './sfProfile') return require('./sfProfile.cjs');
       if (id === 'wx-server-sdk') return cloudStub;
       if (id === './permissionAuth') return { getCurrentUser: async () => null };
       if (id === './miniappAuth') return { requireMiniappPermission: async () => ({ allowed: false }) };

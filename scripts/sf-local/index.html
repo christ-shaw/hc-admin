@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>顺丰双配置 · 本地调试</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f3f6fa;color:#172b40;font:15px/1.6 system-ui,sans-serif}main{max-width:1200px;margin:40px auto;padding:0 24px}h1{font-size:28px;letter-spacing:-1px;margin:8px 0}h2{font-size:17px;margin:0 0 16px}.muted{color:#63758b}.badge{display:inline-block;border-radius:6px;background:#daf3e9;color:#10674c;padding:3px 10px;font-size:12px;font-weight:600}.panel{background:white;border:1px solid #e0e7ef;border-radius:14px;padding:24px;margin:22px 0;box-shadow:0 5px 18px #20304004}.row{display:flex;align-items:center;gap:14px;flex-wrap:wrap}label{display:grid;gap:6px;font-size:13px;color:#53677d}select,button{font:inherit;border-radius:7px;border:1px solid #d4dde8;padding:9px 14px;background:white;color:#24405c}button{cursor:pointer}button:hover{background:#eef4fa}button.primary{background:#186bcd;color:white;border-color:#186bcd}button:disabled{opacity:.45;cursor:default}table{width:100%;border-collapse:collapse;font-size:14px}th{text-align:left;font-weight:500;color:#64788e}th,td{padding:14px 8px;border-bottom:1px solid #edf1f6}td button{font-size:12px;padding:5px 9px;margin:3px}.scroll{overflow-x:auto}pre{white-space:pre-wrap;word-break:break-word;font-size:12px;max-height:300px;overflow:auto;background:#f5f8fb;border-radius:8px;padding:14px}.split{display:grid;grid-template-columns:1fr 1fr;gap:22px}.split .panel{margin-top:0}.notice{border-left:3px solid #186bcd;padding-left:12px;margin-top:16px}#status{position:sticky;top:0;padding:12px;background:#e8f2fd;border-radius:8px;display:none}@media(max-width:750px){.split{grid-template-columns:1fr}main{padding:0 14px;margin:20px auto}}
+</style>
+<main>
+<span class="badge">LOCAL DEVELOPMENT · 本地模拟</span>
+<h1>顺丰下单配置调试台</h1>
+<div class="muted">鸿城与汇川并行使用 · 运行项目中的实际云函数 · 使用内存数据库与模拟顺丰响应</div>
+<p id="status" role="status"></p>
+<section class="panel"><h2>管理员下单配置</h2>
+<div class="row">
+<label>当前角色<select id="role"><option value="admin">管理员</option><option value="viewer">只读用户</option></select></label>
+<label>下单配置<select id="profile"><option value="hongcheng">鸿城</option><option value="huichuan">汇川</option></select></label>
+<label>接口环境<select id="env"><option value="sandbox">沙箱</option><option value="production">生产（本地模拟）</option></select></label>
+<button class="primary" id="save">保存并立即生效</button><button id="reset">重置模拟数据</button>
+</div>
+<div class="notice">当前新下单使用：<strong id="active"></strong><br><span class="muted">已有运单及失败重试沿用订单原配置。重置或重启会清空本地数据。</span></div>
+</section>
+<section class="panel"><div class="row" style="justify-content:space-between"><h2>模拟订单</h2><button id="timeout">下一次下单模拟超时</button></div>
+<div class="scroll"><table><thead><tr><th>订单</th><th>状态</th><th>运单所属配置</th><th>运单号</th><th>操作</th></tr></thead><tbody id="orders"></tbody></table></div>
+<p class="muted">验证示例：鸿城下单 → 切换汇川 → 新订单下单 → 查询或打印第一张运单，观察仍使用鸿城。插件按钮验证配置与打印请求，不连接实体打印机。</p>
+</section>
+<div class="split"><section class="panel"><h2>Token 缓存分区</h2><pre id="tokens"></pre><h2>最近接口路由</h2><pre id="calls"></pre></section>
+<section class="panel"><h2>操作结果</h2><pre id="result">等待操作</pre><h2>管理员切换记录</h2><pre id="history"></pre></section></div>
+</main>
+<script>
+const $=id=>document.getElementById(id),label=p=>p==='huichuan'?'汇川':'鸿城';let snapshot;
+async function post(url,body){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});return r.json()}
+function show(result){const safe={...result};if(safe.accessToken)safe.accessToken='[本地模拟 token 已隐藏]';$('result').textContent=JSON.stringify(safe,null,2);$('status').style.display='block';$('status').textContent=result.success===false?(result.errMsg||'操作失败'):'操作完成'}
+async function invoke(name,data){show(await post('/invoke',{name,data}));await refresh()}
+async function refresh(){snapshot=await(await fetch('/state')).json();const c=snapshot.config;$('active').textContent=label(c.activeProfile)+' / '+c.env;$('profile').value=c.activeProfile;$('env').value=c.env;$('role').value=snapshot.role;$('save').disabled=snapshot.role!=='admin';$('tokens').textContent=snapshot.tokens.join('\n')||'尚未获取 token';$('calls').textContent=snapshot.calls.slice(-10).map(c=>`${c.partner} / ${c.env} → ${c.service}`).join('\n')||'暂无调用';$('history').textContent=JSON.stringify(c.switchHistory||[],null,2);$('orders').replaceChildren();
+for(const order of snapshot.orders){const records=snapshot.records.filter(r=>r.sourceOrderId===order._id&&r.isCurrent);const r=records.sort((a,b)=>(b.attemptNo||0)-(a.attemptNo||0))[0];const tr=document.createElement('tr');for(const v of [order._id,r?.status||'待下单',r?label(r.sfConfigProfile)+' / '+r.env:'—',r?.waybillNo||'—']){const td=document.createElement('td');td.textContent=v;tr.append(td)}const actions=document.createElement('td');
+const button=(text,fn)=>{const b=document.createElement('button');b.textContent=text;b.onclick=async()=>{b.disabled=true;try{await fn()}catch(e){show({success:false,errMsg:e.message})}finally{b.disabled=false}};actions.append(b)};
+button('下单 / 重试',()=>invoke('applySfExpress',{sourceOrderId:order._id}));if(r){button('查询',()=>invoke('querySfOrderResult',{sfExpressOrderId:r._id}));button('取消',()=>invoke('cancelSfExpress',{sfExpressOrderId:r._id}));button('插件参数',()=>invoke('manageSfPluginPrint',{action:'prepare',sfExpressOrderId:r._id,operation:'preview'}))}tr.append(actions);$('orders').append(tr)}}
+$('save').onclick=()=>invoke('manageSfConfig',{action:'set',activeProfile:$('profile').value,env:$('env').value,expectedRevision:snapshot.config.revision||0});
+$('role').onchange=async()=>{await post('/role',{role:$('role').value});await refresh()};
+$('reset').onclick=async()=>{show(await post('/reset',{}));await refresh()};
+$('timeout').onclick=async()=>show(await post('/timeout',{}));refresh().catch(e=>show({success:false,errMsg:e.message}));
+</script></html>

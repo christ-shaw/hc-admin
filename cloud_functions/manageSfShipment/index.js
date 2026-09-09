@@ -1,3 +1,4 @@
+const sfProfile = require('./sfProfile');
 /**
  * manageSfShipment - 管理一个顺丰实际包裹关联的多张订单/出库单。
  *
@@ -298,6 +299,7 @@ async function getOrderWithShipping(store, orderId) {
 }
 
 async function resolveSfEnv() {
+  if (sfProfile.route()) return sfProfile.route().env;
   const config = await getDoc(db, CONFIG_COLLECTION, SF_CONFIG_DOC_ID);
   return normalizeSfEnv(config && config.env);
 }
@@ -822,3 +824,6 @@ exports.__test__ = {
   validateReuseToggle,
   requiresHandoverConfirmation,
 };
+
+// Capture one immutable profile/environment for this invocation.
+exports.main = sfProfile.wrap(db, 'record', exports.main);

@@ -35,6 +35,7 @@ interface SfRouteState {
 type TableRow = SfExpressWorkbenchRow & { _id: string };
 
 interface QueryResult {
+  sfConfigProfile?: 'hongcheng' | 'huichuan';
   success?: boolean;
   data?: SfExpressWorkbenchRow[];
   cursor?: string | null;
@@ -247,6 +248,7 @@ export function SfExpress() {
     [selectedRows],
   );
   const selectedBatchCount = selectedApplyRows.length + selectedPrintRows.length;
+  const [sfProfile, setSfProfile] = useState<'hongcheng' | 'huichuan'>('hongcheng');
   const [sfEnv, setSfEnv] = useState<'sandbox' | 'production' | ''>('');
   const [dataModelVersion, setDataModelVersion] = useState(1);
   const [cutoverDate, setCutoverDate] = useState('');
@@ -297,6 +299,7 @@ export function SfExpress() {
       setHasMore(!!result.hasMore && !!result.cursor);
       setPageIndex(targetPageIndex);
       setSfEnv(result.env || '');
+      setSfProfile(result.sfConfigProfile || 'hongcheng');
       setDataModelVersion(Number(result.dataModelVersion || 1));
       setCutoverDate(result.dataModelCutoverDate || '');
     } catch (error) {
@@ -795,6 +798,8 @@ export function SfExpress() {
       },
     },
     { colKey: 'waybillNo', title: '顺丰运单号', width: 205, cell: ({ row }: { row: TableRow }) => row.currentSfOrder?.waybillNo || '-' },
+    { colKey: 'sfConfigProfile', title: '运单所属配置', width: 125, cell: ({ row }: { row: TableRow }) => row.currentSfOrder
+      ? `${row.currentSfOrder.sfConfigProfile === 'huichuan' ? '汇川' : '鸿城'} / ${row.currentSfOrder.env === 'production' ? '生产' : '沙箱'}` : '-' },
     {
       colKey: 'shipment',
       title: '包裹关联',
@@ -1012,7 +1017,7 @@ export function SfExpress() {
         </div>
         <div className="flex items-center gap-2">
           <Tag theme={sfEnv === 'production' ? 'danger' : sfEnv === 'sandbox' ? 'success' : 'warning'} variant="light">
-            当前环境：{sfEnv === 'production' ? '生产环境' : sfEnv === 'sandbox' ? '沙箱测试' : '读取中'}
+            新下单配置：{sfProfile === 'huichuan' ? '汇川' : '鸿城'} / {sfEnv === 'production' ? '生产环境' : sfEnv === 'sandbox' ? '沙箱测试' : '读取中'}
           </Tag>
           {cutoverDate && <Tag variant="light">V2 切换日：{cutoverDate}</Tag>}
           {dataModelVersion !== 2 && <Tag theme="warning" variant="light">V2 尚未启用</Tag>}
@@ -1093,7 +1098,7 @@ export function SfExpress() {
         {applyTarget && (
           <div className="space-y-3 text-sm">
             <div className={`rounded-lg border px-3 py-2 ${sfEnv === 'production' ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
-              本次将调用<strong>{sfEnv === 'production' ? '生产环境（将生成真实运单）' : '沙箱测试环境'}</strong>。
+              本次新申请使用 {sfProfile === 'huichuan' ? '汇川' : '鸿城'} / <strong>{sfEnv === 'production' ? '生产环境（将生成真实运单）' : '沙箱测试环境'}</strong>。
             </div>
             <div>订单：{applyTarget.order.onlineOrderNumber || `序号 ${applyTarget.order.serialNumber}`}</div>
             <div>收件人：{applyTarget.order.consignee}，{applyTarget.order.consigneePhone}</div>
@@ -1121,7 +1126,7 @@ export function SfExpress() {
       >
         <div className="space-y-4 text-sm">
           <div className={`rounded-lg border px-3 py-2 ${sfEnv === 'production' ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
-            本次将在<strong>{sfEnv === 'production' ? '生产环境（将生成真实运单）' : '沙箱测试环境'}</strong>
+            本次新申请使用 {sfProfile === 'huichuan' ? '汇川' : '鸿城'} / <strong>{sfEnv === 'production' ? '生产环境（将生成真实运单）' : '沙箱测试环境'}</strong>
             为 {batchApplyTargets.length} 条订单申请单号，随后连续打印共 {batchApplyTargets.length + batchExistingPrintTargets.length} 张面单。
             系统将按勾选顺序逐条处理，生成失败的订单会跳过打印。
           </div>

@@ -17,6 +17,7 @@ import {
 } from '../utils/sfPrintPlugin';
 
 interface BootstrapResult {
+  sfConfigProfile?: 'hongcheng' | 'huichuan';
   success: boolean;
   env?: SfPrintEnv;
   sdkEnv?: 'pro' | 'sbox';
@@ -158,7 +159,7 @@ export function SfPrintDialog({
 
     if (platform !== 'windows') return;
     setInitializing(true);
-    callFunction<BootstrapResult>('manageSfPluginPrint', { data: { action: 'bootstrap' } })
+    callFunction<BootstrapResult>('manageSfPluginPrint', { data: { action: 'bootstrap', sfExpressOrderId: primaryRecord.currentSfOrder?._id } })
       .then(async result => {
         if (!active) return;
         if (!result.success) throw new Error(result.errMsg || '读取插件打印配置失败');
@@ -240,13 +241,16 @@ export function SfPrintDialog({
     operation: 'print' | 'preview',
     retryOfRequestID = '',
   ) => {
-    if (!bootstrap?.partnerID || !bootstrap.env) throw new Error('插件打印配置尚未加载');
+    const itemConfig = await callFunction<BootstrapResult>('manageSfPluginPrint', {
+      data: { action: 'bootstrap', sfExpressOrderId: target.currentSfOrder?._id },
+    });
+    if (!itemConfig.success || !itemConfig.partnerID || !itemConfig.env || !itemConfig.pluginPrintEnabled) {
+      throw new Error(itemConfig.errMsg || '该运单所属配置未启用插件打印，请使用 PDF 打印');
+    }
     const prepared = await prepare(target, operation, retryOfRequestID);
     if (!prepared.success) throw new Error(prepared.errMsg || '准备打印数据失败');
-    if (prepared.env !== bootstrap.env) throw new Error('顺丰打印环境已变化，请刷新页面后重试');
-
-    // accessToken 只存在于这个局部变量及 SDK 调用参数中，不写入 React 状态或本地存储。
-    const { instance } = await getSfPrintPlugin(bootstrap.partnerID, bootstrap.env);
+    if (prepared.env !== itemConfig.env) throw new Error('运单打印环境不一致');
+    const { instance } = await getSfPrintPlugin(itemConfig.partnerID, itemConfig.env);
     if (printerName) setSfPrinter(instance, printerName);
     const printData: SfPluginPrintData = {
       requestID: prepared.requestID,

@@ -195,6 +195,7 @@ export type SfShipmentStatus =
   | 'legacy_locked';
 
 export interface SfExpressOrderRecord {
+  sfConfigProfile?: 'hongcheng' | 'huichuan';
   _id: string;
   sourceOrderId: string;
   sourceSerialNumber: number;

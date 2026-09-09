@@ -1,3 +1,4 @@
+const sfProfile = require('./sfProfile');
 /**
  * getSfAccessToken - 获取顺丰 OAuth2 accessToken
  *
@@ -49,13 +50,14 @@ function normalizeSfEnv(value = process.env.SF_ENV || 'sandbox') {
 
 function getFirstEnv(names) {
   for (const name of names) {
-    const value = trimString(process.env[name]);
+    const value = trimString(sfProfile.envValue(name));
     if (value) return value;
   }
   return '';
 }
 
 async function resolveSfEnv() {
+  if (sfProfile.route()) return sfProfile.route().env;
   let raw = '';
   try {
     const result = await db.collection(CONFIG_COLLECTION).doc(SF_CONFIG_DOC_ID).get();
@@ -97,7 +99,7 @@ function getSfConfig(env, expectedEnv) {
 
   return {
     env,
-    tokenDocId: env,
+    tokenDocId: sfProfile.tokenId(env),
     partnerID,
     secret,
     accessTokenUrl,
@@ -131,6 +133,7 @@ async function saveToken(config, tokenData) {
   const collection = db.collection(TOKEN_COLLECTION);
   const updateData = {
     env: config.env,
+    sfConfigProfile: sfProfile.currentProfile(),
     accessToken: tokenData.accessToken,
     expiresIn: tokenData.expiresIn,
     expiresAt: tokenData.expiresAt,
@@ -243,3 +246,6 @@ exports.main = async (event) => {
     };
   }
 };
+
+// Capture one immutable profile/environment for this invocation.
+exports.main = sfProfile.wrap(db, 'token', exports.main);

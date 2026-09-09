@@ -135,7 +135,7 @@ test('returns cached sandbox token when it is still valid', async () => {
 
   await withFunctionRuntime({
     initialDocs: {
-      sandbox: {
+      'hongcheng:sandbox': {
         env: 'sandbox',
         accessToken: cachedToken,
         expiresIn: 7199,
@@ -170,7 +170,7 @@ test('refreshes expired token and persists the new token', async () => {
 
   await withFunctionRuntime({
     initialDocs: {
-      sandbox: {
+      'hongcheng:sandbox': {
         env: 'sandbox',
         accessToken: 'expired-token',
         expiresIn: 7199,
@@ -215,7 +215,7 @@ test('refreshes expired token and persists the new token', async () => {
     assert.equal(capturedOptions.body.get('secret'), 'secret-test');
     assert.equal(capturedOptions.body.get('grantType'), 'password');
 
-    const saved = mockCloud.docs.get('sandbox');
+    const saved = mockCloud.docs.get('hongcheng:sandbox');
     assert.equal(saved.accessToken, 'new-token-abcdef');
     assert.equal(saved.apiResponseID, 'response-1');
     assert.equal(saved.expiresIn, 7199);
@@ -229,7 +229,7 @@ test('uses production token endpoint and production token cache when SF_ENV is p
 
   await withFunctionRuntime({
     initialDocs: {
-      production: {
+      'hongcheng:production': {
         env: 'production',
         accessToken: 'expired-prod-token',
         expiresIn: 7199,
@@ -270,7 +270,7 @@ test('uses production token endpoint and production token cache when SF_ENV is p
     assert.equal(capturedUrl, 'https://bspgw.sf-express.com/oauth2/accessToken');
     assert.equal(capturedOptions.body.get('partnerID'), 'prod-partner');
     assert.equal(capturedOptions.body.get('secret'), 'prod-secret');
-    assert.equal(mockCloud.docs.get('production').accessToken, 'prod-token-abcdef');
+    assert.equal(mockCloud.docs.get('hongcheng:production').accessToken, 'prod-token-abcdef');
     assert.equal(mockCloud.docs.has('sandbox'), false);
   });
 });
@@ -324,7 +324,7 @@ test('creates token cache document when it does not exist', async () => {
     assert.equal(result.apiResponseID, 'response-2');
     assert.equal(mockCloud.calls.adds.length, 1);
     assert.equal(mockCloud.calls.sets.length, 0);
-    assert.equal(mockCloud.docs.get('sandbox').accessToken, 'created-token-abcdef');
+    assert.equal(mockCloud.docs.get('hongcheng:sandbox').accessToken, 'created-token-abcdef');
   });
 });
 
@@ -334,7 +334,7 @@ test('uses database sf_express env before SF_ENV fallback', async () => {
   await withFunctionRuntime({
     initialDocs: {
       sf_express: { env: 'production' },
-      production: {
+      'hongcheng:production': {
         env: 'production',
         accessToken: 'expired-prod-token',
         expiresIn: 7199,
@@ -371,7 +371,7 @@ test('uses database sf_express env before SF_ENV fallback', async () => {
     assert.equal(result.success, true);
     assert.equal(result.env, 'production');
     assert.equal(capturedUrl, 'https://bspgw.sf-express.com/oauth2/accessToken');
-    assert.equal(mockCloud.docs.get('production').accessToken, 'prod-token-from-db-env');
+    assert.equal(mockCloud.docs.get('hongcheng:production').accessToken, 'prod-token-from-db-env');
   });
 });
 

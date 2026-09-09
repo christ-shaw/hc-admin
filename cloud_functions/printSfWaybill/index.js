@@ -1,3 +1,4 @@
+const sfProfile = require('./sfProfile');
 /**
  * printSfWaybill - 获取顺丰丰密面单 PDF
  *
@@ -72,7 +73,7 @@ function isNotFound(error) {
 
 function getFirstEnv(names) {
   for (const name of names) {
-    const value = trimString(process.env[name]);
+    const value = trimString(sfProfile.envValue(name));
     if (value) return value;
   }
   return '';
@@ -89,6 +90,7 @@ function getMaxFileBytes() {
 }
 
 async function resolveSfEnv() {
+  if (sfProfile.route()) return sfProfile.route().env;
   let raw = '';
   try {
     const result = await db.collection(CONFIG_COLLECTION).doc(SF_CONFIG_DOC_ID).get();
@@ -366,14 +368,14 @@ function validateSfExpressOrder(record, env) {
 async function getAccessToken(config, forceRefresh = false) {
   const result = await cloud.callFunction({
     name: 'getSfAccessToken',
-    data: { forceRefresh, sfEnv: config.env },
+    data: { forceRefresh, sfEnv: config.env, sfConfigProfile: sfProfile.currentProfile() },
   });
   const tokenResult = result.result || {};
   if (!tokenResult.success) {
     throw new Error(tokenResult.errMsg || '获取顺丰 accessToken 失败');
   }
 
-  const tokenDoc = await db.collection(TOKEN_COLLECTION).doc(config.env).get();
+  const tokenDoc = await db.collection(TOKEN_COLLECTION).doc(sfProfile.tokenId(config.env)).get();
   const tokenData = tokenDoc.data || {};
   if (!tokenData.accessToken) throw new Error('顺丰 accessToken 缓存为空');
   if (Number(tokenData.expiresAt || 0) <= Date.now()) throw new Error('顺丰 accessToken 已过期');
@@ -704,3 +706,6 @@ exports.__test__ = {
   buildFileName,
   validateSfExpressOrder,
 };
+
+// Capture one immutable profile/environment for this invocation.
+exports.main = sfProfile.wrap(db, 'record', exports.main);

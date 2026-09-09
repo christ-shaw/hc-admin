@@ -1,3 +1,4 @@
+const sfProfile = require('./sfProfile');
 /**
  * manageSfConfig - 管理顺丰下单环境
  *
@@ -170,9 +171,13 @@ async function readSfConfig() {
   return {
     success: true,
     env,
+    activeProfile: sfProfile.profile(config?.activeProfile),
+    profileRoutingVersion: 1,
+    revision: Number(config?.revision || 0),
+    pluginPrintEnabledByProfile: { hongcheng: sfProfile.pluginFlags(config, 'hongcheng'), huichuan: sfProfile.pluginFlags(config, 'huichuan') },
     dataModelVersion: Number(config && config.dataModelVersion || 1),
     dataModelCutoverDate: trimString(config && config.dataModelCutoverDate),
-    pluginPrintEnabledByEnv: normalizePluginPrintEnabledByEnv(config && config.pluginPrintEnabledByEnv),
+    pluginPrintEnabledByEnv: sfProfile.pluginFlags(config, config?.activeProfile),
     source: rawEnv ? 'database' : 'env',
     updatedAt: config && config.updatedAt || '',
     updatedBy: config && config.updatedBy || '',
@@ -182,37 +187,42 @@ async function readSfConfig() {
 async function saveSfConfig(payload, currentUser) {
   const env = normalizeSfEnv(payload.env);
   await ensureCollection(CONFIG_COLLECTION);
-
-  const existing = await getDocById(CONFIG_COLLECTION, CONFIG_ID);
-  const data = {
-    env,
-    dataModelVersion: Number(existing && existing.dataModelVersion || 1),
-    dataModelCutoverDate: trimString(existing && existing.dataModelCutoverDate),
-    updatedAt: now(),
-    updatedBy: currentUser.id,
-  };
-
-  if (existing) {
-    await db.collection(CONFIG_COLLECTION).doc(CONFIG_ID).update({ data });
-  } else {
-    await db.collection(CONFIG_COLLECTION).add({
-      data: {
-        _id: CONFIG_ID,
-        ...data,
-        createdAt: now(),
-        createdBy: currentUser.id,
+  const transaction = await db.startTransaction();
+  try {
+    let existing = null;
+    try { existing = (await transaction.collection(CONFIG_COLLECTION).doc(CONFIG_ID).get()).data; }
+    catch (error) { if (!notFound(error)) throw error; }
+    const activeProfile = sfProfile.profile(payload.activeProfile || existing?.activeProfile);
+    const revision = Number(existing?.revision || 0);
+    if (payload.expectedRevision !== undefined && Number(payload.expectedRevision) !== revision) {
+      throw new Error('配置已被其他管理员修改，请刷新后重试');
+    }
+    const updatedAt = now();
+    const change = {
+      from: { profile: sfProfile.profile(existing?.activeProfile), env: existing?.env || normalizeSfEnv() },
+      to: { profile: activeProfile, env }, operatorId: currentUser.id, at: updatedAt,
+    };
+    const data = {
+      activeProfile, env, revision: revision + 1, updatedAt, updatedBy: currentUser.id,
+      switchHistory: [...(existing?.switchHistory || []), change].slice(-100),
+    };
+    if (existing) await transaction.collection(CONFIG_COLLECTION).doc(CONFIG_ID).update({ data });
+    else await transaction.collection(CONFIG_COLLECTION).add({ data: {
+      _id: CONFIG_ID, ...data, createdAt: updatedAt, createdBy: currentUser.id,
+    } });
+    await transaction.commit();
+    return {
+      success: true, ...data, source: 'database', profileRoutingVersion: 1,
+      pluginPrintEnabledByEnv: sfProfile.pluginFlags(existing, activeProfile),
+      pluginPrintEnabledByProfile: {
+        hongcheng: sfProfile.pluginFlags(existing, 'hongcheng'),
+        huichuan: sfProfile.pluginFlags(existing, 'huichuan'),
       },
-    });
+    };
+  } catch (error) {
+    try { await transaction.rollback(); } catch (_) {}
+    throw error;
   }
-
-  return {
-    success: true,
-    env,
-    pluginPrintEnabledByEnv: normalizePluginPrintEnabledByEnv(existing && existing.pluginPrintEnabledByEnv),
-    source: 'database',
-    updatedAt: data.updatedAt,
-    updatedBy: data.updatedBy,
-  };
 }
 
 async function savePluginPrintConfig(payload, currentUser) {
@@ -223,12 +233,13 @@ async function savePluginPrintConfig(payload, currentUser) {
 
   await ensureCollection(CONFIG_COLLECTION);
   const existing = await getDocById(CONFIG_COLLECTION, CONFIG_ID);
+  const activeProfile = sfProfile.profile(payload.activeProfile || existing?.activeProfile);
   const pluginPrintEnabledByEnv = {
-    ...normalizePluginPrintEnabledByEnv(existing && existing.pluginPrintEnabledByEnv),
+    ...sfProfile.pluginFlags(existing, activeProfile),
     [env]: payload.enabled,
   };
   const data = {
-    pluginPrintEnabledByEnv,
+    [`pluginPrintEnabledByProfile.${activeProfile}`]: pluginPrintEnabledByEnv,
     updatedAt: now(),
     updatedBy: currentUser.id,
   };
@@ -240,7 +251,9 @@ async function savePluginPrintConfig(payload, currentUser) {
       data: {
         _id: CONFIG_ID,
         env: normalizeSfEnv(),
-        ...data,
+        pluginPrintEnabledByProfile: { [activeProfile]: pluginPrintEnabledByEnv },
+        updatedAt: data.updatedAt,
+        updatedBy: data.updatedBy,
         createdAt: now(),
         createdBy: currentUser.id,
       },
@@ -314,10 +327,10 @@ exports.main = async (event) => {
       return { success: false, code: auth.code, errMsg: auth.errMsg };
     }
 
-    if (action === 'get') return readSfConfig();
-    if (action === 'set') return saveSfConfig(payload, auth.currentUser);
-    if (action === 'setPluginPrint') return savePluginPrintConfig(payload, auth.currentUser);
-    if (action === 'setDataModel') return saveDataModelConfig(payload, auth.currentUser);
+    if (action === 'get') return await readSfConfig();
+    if (action === 'set') return await saveSfConfig(payload, auth.currentUser);
+    if (action === 'setPluginPrint') return await savePluginPrintConfig(payload, auth.currentUser);
+    if (action === 'setDataModel') return await saveDataModelConfig(payload, auth.currentUser);
 
     return { success: false, errMsg: '不支持的操作类型' };
   } catch (error) {

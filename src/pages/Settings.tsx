@@ -24,9 +24,15 @@ interface InitializePermissionResult {
   errMsg?: string;
 }
 
+type SfProfile = 'hongcheng' | 'huichuan';
+const profileLabel = (p: SfProfile) => p === 'huichuan' ? '汇川' : '鸿城';
 type SfEnv = 'sandbox' | 'production';
 
 interface SfConfigResult {
+  profileRoutingVersion?: number;
+  activeProfile?: SfProfile;
+  revision?: number;
+  pluginPrintEnabledByProfile?: Record<SfProfile, Record<SfEnv, boolean>>;
   success: boolean;
   env?: SfEnv;
   source?: 'database' | 'env';
@@ -42,6 +48,11 @@ export function SettingsPage() {
   const [savedValue, setSavedValue] = useState<number>(0);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [sfProfile, setSfProfile] = useState<SfProfile>('hongcheng');
+  const [savedSfProfile, setSavedSfProfile] = useState<SfProfile>('hongcheng');
+  const [sfRevision, setSfRevision] = useState(0);
+  const [sfProfilesSupported, setSfProfilesSupported] = useState(false);
+  const [sfPluginProfiles, setSfPluginProfiles] = useState<Partial<Record<SfProfile, Record<SfEnv, boolean>>>>({});
   const [sfEnv, setSfEnv] = useState<SfEnv>('sandbox');
   const [savedSfEnv, setSavedSfEnv] = useState<SfEnv>('sandbox');
   const [sfEnvSource, setSfEnvSource] = useState<'database' | 'env'>('env');
@@ -122,6 +133,11 @@ export function SettingsPage() {
       });
       if (result.success && result.env) {
         const nextEnv = normalizeSfEnv(result.env);
+        setSfProfile(result.activeProfile || 'hongcheng');
+        setSavedSfProfile(result.activeProfile || 'hongcheng');
+        setSfRevision(result.revision || 0);
+        setSfProfilesSupported(result.profileRoutingVersion === 1);
+        setSfPluginProfiles(result.pluginPrintEnabledByProfile || {});
         setSfEnv(nextEnv);
         setSavedSfEnv(nextEnv);
         setSfEnvSource(result.source || 'env');
@@ -174,17 +190,25 @@ export function SettingsPage() {
 
   /** 保存顺丰环境 */
   const handleSaveSfEnv = async () => {
+    if (!sfProfilesSupported) {
+      MessagePlugin.warning('当前云端尚未部署双配置版本，请先使用本地模拟调试台验证');
+      return;
+    }
     setSavingSfEnv(true);
     try {
       const result = await callFunction<SfConfigResult>('manageSfConfig', {
-        data: { action: 'set', env: sfEnv },
+        data: { action: 'set', env: sfEnv, activeProfile: sfProfile, expectedRevision: sfRevision },
       });
       if (result.success && result.env) {
         const nextEnv = normalizeSfEnv(result.env);
+        setSfProfile(result.activeProfile || 'hongcheng');
+        setSavedSfProfile(result.activeProfile || 'hongcheng');
+        setSfRevision(result.revision || 0);
+        setSfPluginProfiles(result.pluginPrintEnabledByProfile || {});
         setSfEnv(nextEnv);
         setSavedSfEnv(nextEnv);
         setSfEnvSource(result.source || 'database');
-        MessagePlugin.success(`顺丰下单环境已切换为${nextEnv === 'production' ? '生产环境' : '沙箱测试环境'}`);
+        MessagePlugin.success(`顺丰下单配置已切换为${profileLabel(result.activeProfile || 'hongcheng')} / ${nextEnv === 'production' ? '生产环境' : '沙箱测试环境'}`);
       } else {
         MessagePlugin.error('保存失败: ' + (result.errMsg || '未知错误'));
       }
@@ -204,7 +228,7 @@ export function SettingsPage() {
     setSavingSfPluginEnv(env);
     try {
       const result = await callFunction<SfConfigResult>('manageSfConfig', {
-        data: { action: 'setPluginPrint', env, enabled },
+        data: { action: 'setPluginPrint', env, enabled, activeProfile: sfProfile },
       });
       if (!result.success || !result.pluginPrintEnabledByEnv) {
         MessagePlugin.error('保存失败: ' + (result.errMsg || '未知错误'));
@@ -223,7 +247,7 @@ export function SettingsPage() {
   };
 
   const hasChanged = counterValue !== savedValue;
-  const sfEnvChanged = sfEnv !== savedSfEnv;
+  const sfEnvChanged = sfEnv !== savedSfEnv || sfProfile !== savedSfProfile;
   useTabDirty(hasChanged || sfEnvChanged, '系统设置');
   const showPermissionBootstrap = permissionStatus === 'uninitialized' && canInitialize;
   const canUpdateSettings = can('settings:update');
@@ -351,17 +375,22 @@ export function SettingsPage() {
                     <Truck size={20} className="text-emerald-600" />
                   </div>
                   <div>
-                    <h3 className="text-base font-medium text-gray-800">顺丰下单环境</h3>
-                    <p className="text-sm text-gray-500">控制申请快递、查询下单结果、取消发货使用的顺丰接口环境</p>
+                    <h3 className="text-base font-medium text-gray-800">顺丰下单配置</h3>
+                    <p className="text-sm text-gray-500">管理员选择新下单使用的配置；已有运单按创建时的配置查询、取消和打印</p>
                   </div>
                 </div>
 
                 <div className="bg-gray-50 rounded-lg p-4 space-y-4">
                   <div className="flex flex-col gap-4 md:flex-row md:items-end">
                     <div className="flex-1 max-w-xs">
-                      <label className="block text-sm text-gray-600 mb-1">当前顺丰环境</label>
+                      <label className="block text-sm text-gray-600 mb-1">下单配置</label>
+                      <Select value={sfProfile} disabled={!canUpdateSettings || !sfProfilesSupported || sfConfigLoading || savingSfEnv}
+                        options={[{ label: '鸿城', value: 'hongcheng' }, { label: '汇川', value: 'huichuan' }]}
+                        onChange={val => setSfProfile(val as SfProfile)} />
+                      <label className="block text-sm text-gray-600 mb-1 mt-3">接口环境</label>
                       <Select
                         value={sfEnv}
+                        disabled={!canUpdateSettings || !sfProfilesSupported || savingSfEnv}
                         loading={sfConfigLoading}
                         onChange={val => setSfEnv(normalizeSfEnv(val))}
                         options={SF_ENV_OPTIONS}
@@ -372,7 +401,7 @@ export function SettingsPage() {
                         theme="primary"
                         icon={<Save size={16} />}
                         loading={savingSfEnv}
-                        disabled={!canUpdateSettings || !sfEnvChanged}
+                        disabled={!canUpdateSettings || !sfProfilesSupported || !sfEnvChanged}
                         onClick={handleSaveSfEnv}
                       >
                         保存
@@ -381,7 +410,7 @@ export function SettingsPage() {
                         variant="outline"
                         icon={<RotateCcw size={16} />}
                         disabled={!sfEnvChanged}
-                        onClick={() => setSfEnv(savedSfEnv)}
+                        onClick={() => { setSfEnv(savedSfEnv); setSfProfile(savedSfProfile); }}
                       >
                         还原
                       </Button>
@@ -392,7 +421,7 @@ export function SettingsPage() {
                     <div className="flex items-center gap-2">
                       <span className="text-gray-500">生效环境:</span>
                       <span className={savedSfEnv === 'production' ? 'font-medium text-rose-600' : 'font-medium text-emerald-600'}>
-                        {savedSfEnv === 'production' ? '生产环境' : '沙箱测试环境'}
+                        {profileLabel(savedSfProfile)} / {savedSfEnv === 'production' ? '生产环境' : '沙箱测试环境'}
                       </span>
                     </div>
                     <div className="flex items-center gap-2">
@@ -406,16 +435,16 @@ export function SettingsPage() {
                       <div key={env} className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-4 py-3">
                         <div>
                           <div className="text-sm font-medium text-gray-800">
-                            {env === 'production' ? '生产环境插件打印' : '沙箱环境插件打印'}
+                            {profileLabel(sfProfile)} · {env === 'production' ? '生产环境插件打印' : '沙箱环境插件打印'}
                           </div>
                           <div className="mt-1 text-xs text-gray-400">
                             仅影响 Windows 顺丰云打印插件，PDF 打印不受影响
                           </div>
                         </div>
                         <Switch
-                          value={sfPluginEnabledByEnv[env]}
+                          value={(sfPluginProfiles[sfProfile] || (sfProfile === savedSfProfile ? sfPluginEnabledByEnv : undefined))?.[env] === true}
                           loading={savingSfPluginEnv === env}
-                          disabled={!canUpdateSettings || sfConfigLoading}
+                          disabled={!canUpdateSettings || !sfProfilesSupported || sfConfigLoading}
                           onChange={value => handleSfPluginPrintChange(env, value)}
                         />
                       </div>
@@ -423,10 +452,11 @@ export function SettingsPage() {
                   </div>
 
                   <div className="text-xs text-gray-400 space-y-1">
-                    <p>• 保存后云函数每次调用都会读取最新环境，无需重新部署</p>
+                    {!sfProfilesSupported && <p className="text-amber-700">当前后端尚未启用双配置功能，此处暂为只读。请先在本地模拟调试台验证。</p>}
+                    <p>• 保存后新下单立即使用所选配置；正在提交和已有运单继续使用原配置</p>
                     <p>• 切换到生产环境前，请确认生产客户编码、校验码、月结卡号和寄件人配置已在云函数环境变量中配置完成</p>
                     <p>• 生产环境会调用顺丰正式接口并生成真实运单</p>
-                    <p>• 插件打印开关按沙箱、生产环境分别保存；切换环境后如已加载插件 SDK，请刷新页面</p>
+                    <p>• 插件打印开关按鸿城 / 汇川及沙箱 / 生产分别保存</p>
                   </div>
                 </div>
               </div>

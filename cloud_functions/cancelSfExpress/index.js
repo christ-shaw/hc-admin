@@ -1,3 +1,4 @@
+const sfProfile = require('./sfProfile');
 /**
  * cancelSfExpress - 取消顺丰发货
  *
@@ -83,13 +84,14 @@ function normalizeSfEnv(value = process.env.SF_ENV || 'sandbox') {
 
 function getFirstEnv(names) {
   for (const name of names) {
-    const value = trimString(process.env[name]);
+    const value = trimString(sfProfile.envValue(name));
     if (value) return value;
   }
   return '';
 }
 
 async function resolveSfEnv() {
+  if (sfProfile.route()) return sfProfile.route().env;
   let raw = '';
   try {
     const result = await db.collection(CONFIG_COLLECTION).doc(SF_CONFIG_DOC_ID).get();
@@ -164,7 +166,7 @@ function toLimitedJson(value) {
 async function getAccessToken(config, forceRefresh = false) {
   const result = await cloud.callFunction({
     name: 'getSfAccessToken',
-    data: { forceRefresh, sfEnv: config.env },
+    data: { forceRefresh, sfEnv: config.env, sfConfigProfile: sfProfile.currentProfile() },
   });
 
   const tokenResult = result.result || {};
@@ -172,7 +174,7 @@ async function getAccessToken(config, forceRefresh = false) {
     throw new Error(tokenResult.errMsg || '获取顺丰 accessToken 失败');
   }
 
-  const tokenDoc = await db.collection(TOKEN_COLLECTION).doc(config.env).get();
+  const tokenDoc = await db.collection(TOKEN_COLLECTION).doc(sfProfile.tokenId(config.env)).get();
   const tokenData = tokenDoc.data || {};
   if (!tokenData.accessToken) {
     throw new Error('顺丰 accessToken 缓存为空');
@@ -498,3 +500,6 @@ exports.__test__ = {
   planPendingOutboundTrackingClear,
   isSharedShipment,
 };
+
+// Capture one immutable profile/environment for this invocation.
+exports.main = sfProfile.wrap(db, 'record', exports.main);

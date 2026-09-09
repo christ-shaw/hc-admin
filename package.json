@@ -4,8 +4,11 @@
   "version": "2.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
+    "dev": "vite --configLoader runner",
+    "build": "tsc -b && vite build --configLoader runner",
+    "dev:sf": "node scripts/sync-sf-profile.cjs && node scripts/sf-local/server.cjs",
+    "test:sf-profiles": "node scripts/sync-sf-profile.cjs --check && node --test scripts/sf-local/profiles.test.cjs",
+    "sf:sync": "node scripts/sync-sf-profile.cjs",
     "preview": "vite preview",
     "test:sf-token": "node --test cloud_functions/getSfAccessToken/index.test.cjs",
     "test:sf-print": "node --test cloud_functions/printSfWaybill/index.test.cjs",
