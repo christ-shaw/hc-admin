@@ -25,7 +25,7 @@ function applyFields(row, fields) {
     target[leaf] = value?.$op === 'inc' ? Number(target[leaf] || 0) + value.value : clone(value);
   }
 }
-function createRuntime() {
+function createRuntime({ legacyToken = false } = {}) {
   const tables = new Map(); const calls = []; const cache = new Map(); const sfOrders = new Map();
   const state = { role: 'admin', timeoutNextCreate: false, beforeCreate: null };
   const demoEnv = { SF_ENV: 'sandbox' };
@@ -40,6 +40,11 @@ function createRuntime() {
       [prefix + 'SENDER_ADDRESS']: '本地模拟寄件地址',
       [prefix + 'PRINT_TEMPLATE_CODE']: `demo-template-${p}-${e}`,
     });
+  }
+  if (legacyToken) {
+    for (const [name, value] of Object.entries(demoEnv)) {
+      if (name.startsWith('SF_HONGCHENG_')) demoEnv[name.replace('SF_HONGCHENG_', 'SF_')] = value;
+    }
   }
   const table = (store, name) => { if (!store.has(name)) store.set(name, new Map()); return store.get(name); };
   const put = (name, row) => table(tables, name).set(row._id, clone(row));
@@ -147,7 +152,9 @@ function createRuntime() {
   }
   async function invoke(name, data = {}) {
     if (!FUNCTION_NAMES.includes(name)) throw new Error('本地调试只允许顺丰相关函数');
-    return load(path.join(root, name, 'index.js')).main({ data });
+    const file = legacyToken && name === 'getSfAccessToken'
+      ? path.join(__dirname, 'legacy-token.fixture.cjs') : path.join(root, name, 'index.js');
+    return load(file).main({ data });
   }
   function snapshot() {
     return { localOnly: true, role: state.role, config: clone(table(tables, 'system_config').get('sf_express')),

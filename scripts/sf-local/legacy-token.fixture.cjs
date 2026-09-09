@@ -1,4 +1,4 @@
-const sfProfile = require('./sfProfile');
+// Frozen pre-profile implementation from hc-admin commit 0bf107c^ for rollout tests.
 /**
  * getSfAccessToken - 获取顺丰 OAuth2 accessToken
  *
@@ -50,14 +50,13 @@ function normalizeSfEnv(value = process.env.SF_ENV || 'sandbox') {
 
 function getFirstEnv(names) {
   for (const name of names) {
-    const value = trimString(sfProfile.envValue(name));
+    const value = trimString(process.env[name]);
     if (value) return value;
   }
   return '';
 }
 
 async function resolveSfEnv() {
-  if (sfProfile.route()) return sfProfile.route().env;
   let raw = '';
   try {
     const result = await db.collection(CONFIG_COLLECTION).doc(SF_CONFIG_DOC_ID).get();
@@ -99,7 +98,7 @@ function getSfConfig(env, expectedEnv) {
 
   return {
     env,
-    tokenDocId: sfProfile.tokenId(env),
+    tokenDocId: env,
     partnerID,
     secret,
     accessTokenUrl,
@@ -133,7 +132,6 @@ async function saveToken(config, tokenData) {
   const collection = db.collection(TOKEN_COLLECTION);
   const updateData = {
     env: config.env,
-    sfConfigProfile: sfProfile.currentProfile(),
     accessToken: tokenData.accessToken,
     expiresIn: tokenData.expiresIn,
     expiresAt: tokenData.expiresAt,
@@ -201,7 +199,7 @@ async function requestAccessToken(config) {
 }
 
 exports.main = async (event) => {
-  const { forceRefresh = false, sfEnv } = event.data || event || {};
+  const { forceRefresh = false, sfEnv } = event.data || {};
 
   try {
     const env = await resolveSfEnv();
@@ -239,13 +237,10 @@ exports.main = async (event) => {
     console.error('获取顺丰 accessToken 失败:', err);
     return {
       success: false,
-      env: sfProfile.route()?.env || (() => {
+      env: (() => {
         try { return normalizeSfEnv(); } catch { return trimString(process.env.SF_ENV) || 'sandbox'; }
       })(),
       errMsg: err.message || String(err),
     };
   }
 };
-
-// Capture one immutable profile/environment for this invocation.
-exports.main = sfProfile.wrap(db, 'token', exports.main);

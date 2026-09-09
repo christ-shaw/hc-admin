@@ -18,7 +18,7 @@ test('管理员切换只影响新单，旧单查询/取消/打印仍使用原配
   assert.equal(boot.partnerID, 'demo-hongcheng');
   ok(await r.invoke('cancelSfExpress', { sfExpressOrderId: a.sfExpressOrderId }));
   assert.equal(r.calls.at(-1).partner, 'demo-hongcheng');
-  assert.deepEqual(r.snapshot().tokens.sort(), ['hongcheng:sandbox', 'huichuan:sandbox']);
+  assert.deepEqual(r.snapshot().tokens.sort(), ['huichuan:sandbox', 'sandbox']);
 });
 test('保存期间正在发送的订单固定路由，后续 token 刷新沿用原环境', async () => {
   const r = createRuntime();
@@ -73,7 +73,7 @@ test('请求级上下文并发隔离，既不修改进程环境也不互串配�
     await new Promise(resolve => setTimeout(resolve, (1 - i) * 10));
     return profiles.tokenId('sandbox');
   })));
-  assert.deepEqual(values, ['hongcheng:sandbox', 'huichuan:sandbox']);
+  assert.deepEqual(values, ['sandbox', 'huichuan:sandbox']);
 });
 
 test('原运单取消后，新申请可使用汇川；原记录保留鸿城归属', async () => {
@@ -101,4 +101,57 @@ test('同一订单并发下单只允许一次发送', async () => {
   const results = await Promise.all([apply(r, 1), apply(r, 1)]);
   assert.equal(results.filter(x => x.success).length, 1);
   assert.equal(r.calls.filter(x => x.service === 'EXP_RECE_CREATE_ORDER').length, 1);
+});
+
+test('过渡缓存支持旧调用写入、新调用复用以及新刷新后旧调用读取', async () => {
+  const r = createRuntime();
+  r.put('sf_tokens', { _id: 'production', env: 'production', accessToken: 'legacy-cached-token', expiresAt: Date.now() + 7200000, expiresIn: 7200 });
+  const reused = ok(await r.invoke('getSfAccessToken', { sfConfigProfile: 'hongcheng', sfEnv: 'production' }));
+  assert.equal(reused.cached, true); assert.equal(r.calls.length, 0);
+  ok(await r.invoke('getSfAccessToken', { sfConfigProfile: 'hongcheng', sfEnv: 'production', forceRefresh: true }));
+  const legacyRead = (await r.db.collection('sf_tokens').doc('production').get()).data;
+  assert.equal(legacyRead.accessToken, 'local-token:demo-hongcheng:production');
+  const count = r.calls.length;
+  const oldCaller = ok(await r.invoke('getSfAccessToken', { sfEnv: 'production' }));
+  assert.equal(oldCaller.cached, true); assert.equal(r.calls.length, count);
+  assert.deepEqual(r.snapshot().tokens, ['production']);
+});
+test('全局汇川时，无账号参数的旧调用始终获取鸿城且不覆盖汇川缓存', async () => {
+  const r = createRuntime(); ok(await set(r, 'huichuan', 'production'));
+  ok(await r.invoke('getSfAccessToken', { sfConfigProfile: 'huichuan', sfEnv: 'production' }));
+  const before = (await r.db.collection('sf_tokens').doc('huichuan:production').get()).data;
+  const old = ok(await r.invoke('getSfAccessToken', { forceRefresh: true }));
+  assert.equal(old.sfConfigProfile, 'hongcheng'); assert.equal(old.env, 'production');
+  assert.equal(r.calls.at(-1).partner, 'demo-hongcheng');
+  assert.deepEqual((await r.db.collection('sf_tokens').doc('huichuan:production').get()).data, before);
+  const pinned = ok(await r.invoke('getSfAccessToken', { sfEnv: 'sandbox', forceRefresh: true }));
+  assert.equal(pinned.env, 'sandbox'); assert.equal(pinned.sfConfigProfile, 'hongcheng');
+});
+test('新版鸿城下单、查询、取消及插件准备兼容实际旧版 token 函数', async () => {
+  const r = createRuntime({ legacyToken: true });
+  const a = ok(await apply(r, 1));
+  ok(await r.invoke('querySfOrderResult', { sfExpressOrderId: a.sfExpressOrderId }));
+  ok(await r.invoke('manageSfPluginPrint', { action: 'prepare', sfExpressOrderId: a.sfExpressOrderId, operation: 'preview' }));
+  ok(await r.invoke('cancelSfExpress', { sfExpressOrderId: a.sfExpressOrderId }));
+  assert.deepEqual(r.snapshot().tokens, ['sandbox']);
+  assert.equal(r.calls.every(c => c.partner === 'demo-hongcheng'), true);
+});
+test('旧版 token 函数未升级时，汇川请求失败而不会用鸿城账号创建', async () => {
+  const r = createRuntime({ legacyToken: true }); ok(await set(r, 'huichuan'));
+  const result = await apply(r, 1); assert.equal(result.success, false);
+  assert.equal(r.calls.some(c => c.service === 'EXP_RECE_CREATE_ORDER'), false);
+});
+test('过渡期鸿城原变量及原生产别名优先，避免共享缓存对应不同账号', async () => {
+  const r = createRuntime();
+  r.demoEnv.SF_PRODUCTION_CLIENT_CODE = 'demo-hongcheng';
+  r.demoEnv.SF_PRODUCTION_CHECK_WORD = 'legacy-secret';
+  r.demoEnv.SF_HONGCHENG_PROD_CLIENT_CODE = 'must-not-be-used';
+  ok(await r.invoke('getSfAccessToken', { sfConfigProfile: 'hongcheng', sfEnv: 'production', forceRefresh: true }));
+  assert.equal(r.calls.at(-1).partner, 'demo-hongcheng');
+});
+test('显式账号缺少环境时失败，不从全局猜测环境', async () => {
+  const r = createRuntime();
+  const result = await r.invoke('getSfAccessToken', { sfConfigProfile: 'huichuan' });
+  assert.equal(result.success, false); assert.match(result.errMsg, /sfEnv/);
+  assert.equal(r.calls.length, 0);
 });

@@ -57,7 +57,7 @@ Web SDK 访问标识与顺丰后端校验码是不同字段。顺丰校验码绝
 | `SENDER_MAP_BASE64` 或 `SENDER_CONTACT` / `SENDER_TEL` / `SENDER_ADDRESS` 等 | applySfExpress |
 | `PRINT_TEMPLATE_CODE` / `CUSTOM_TEMPLATE_CODE`（可选） | printSfWaybill、manageSfPluginPrint |
 
-示例：`SF_HUICHUAN_PROD_CHECK_WORD`。鸿城兼容原来的 `SF_PROD_*` / `SF_SANDBOX_*` 变量；汇川不回退到鸿城凭据。
+示例：`SF_HUICHUAN_PROD_CHECK_WORD`。过渡期鸿城优先使用原来的 `SF_PROD_*` / `SF_PRODUCTION_*` / `SF_SANDBOX_*` 变量，原变量缺失才使用 `SF_HONGCHENG_*`；汇川不回退到鸿城凭据。保留鸿城原凭据不变，以免共用缓存的新旧调用方采用不同账号。
 新截图只提供客户编码与校验码，汇川的月结卡号、寄件人和打印模板须按实际账号配置确认，不自动沿用鸿城。
 此副本未写入截图中的真实密钥。凭据应通过云函数环境变量配置，不提交到 Git。
 
@@ -67,13 +67,25 @@ Web SDK 访问标识与顺丰后端校验码是不同字段。顺丰校验码绝
 - 插件开关按 `pluginPrintEnabledByProfile.<profile>.<env>` 分开，鸿城兼容原开关字段。
 - 每次调用固定一次配置，采用 AsyncLocalStorage 保存请求上下文，不修改进程级环境变量。
 - 已有运单、处理中或失败重试按记录固定配置；新申请不接受前端自选账号。
-- token 缓存 ID 为 `hongcheng:sandbox` 等四个分区。旧的 `sandbox/production` 缓存不再读取，也不删除。
+- 过渡版 token 缓存：鸿城继续读写原 `sandbox` / `production` 文档；汇川使用 `huichuan:sandbox` / `huichuan:production`。不搬迁、不删除、不双写原缓存。
+- 未传 `sfConfigProfile` 的旧 token 调用固定使用鸿城；传了 `sfEnv` 就使用调用方已确定的环境，即使管理员刚刚切换。完全未指定环境的旧调用才按系统环境选择鸿城沙箱/生产。
+- 新 token 调用必须同时传入账号与环境。仅传账号而缺少环境会明确失败；汇川不能回退鸿城缓存。
+- 尚未部署的上一版 `hongcheng:*` 缓存设计已撤回；若有人已自行部署上一版，不适用本节的旧版兼容假设，需先核对函数版本。
 - 原确定性订单记录 ID 保持不变，用于在并发下阻止同一申请被不同账号重复发送。
 - 查询、取消和打印依据运单自身的配置与环境，不依赖管理员此时的选择。
 
 共享模块源文件为 `cloud_functions/sfProfile.cjs`；执行 `npm run sf:sync` 同步到各函数包，再部署这些函数的完整目录。
 受影响的函数：manageSfConfig、getSfAccessToken、applySfExpress、querySfOrderResult、cancelSfExpress、querySfExpressOrders、manageSfShipment、printSfWaybill、manageSfPluginPrint。
-正式部署需协调所有调用方与 token 函数版本，避免新旧 token 缓存协议混用；不支持只更新 token 函数就立刻切换汇川。
+分批部署顺序：
+
+1. 保持当前鸿城配置和接口环境不变，保留全部现有凭据及 token 缓存。
+2. 先更新 `getSfAccessToken` 过渡版。旧下单、查询、取消和打印函数仍读原缓存；此时不启用汇川。
+3. 更新下单、查询、取消、PDF/插件打印、工作台、包裹管理函数的完整包，确认均包含相同的过渡版 `sfProfile.js`。
+4. 最后更新 `manageSfConfig`，再发布设置页。逐项核对全部函数版本、汇川凭据、寄件人、月结和模板配置。
+5. 在沙箱完成真实接口及打印联调后，再由管理员选择汇川。混合版本期间保持鸿城及当前接口环境不变。
+
+过渡版可与双配置改造前的旧调用方共存，但不能承诺发布过程零失败。保留原缓存解决的是缓存格式与账号选择兼容问题；部署平台的在途执行及顺丰接口仍需观察。
+启用汇川前可回退旧代码，原鸿城缓存仍有效；一旦产生汇川运单，必须保留能按账号处理历史订单的版本，不能把查询/取消/打印全部回退成只认识鸿城的版本。
 本地已完成模拟验证，尚未切换或部署线上配置。
 
 ## 验证命令

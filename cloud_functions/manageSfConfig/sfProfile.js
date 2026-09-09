@@ -18,11 +18,19 @@ function environment(value) {
 }
 function route() { return context.getStore(); }
 function currentProfile() { return profile(route()?.sfConfigProfile); }
-function tokenId(env) { return `${currentProfile()}:${environment(env)}`; }
+function tokenId(env) {
+  // During rollout legacy callers and Hongcheng callers share the same cache.
+  const e = environment(env);
+  return currentProfile() === 'hongcheng' ? e : `huichuan:${e}`;
+}
 function envValue(name) {
   const p = currentProfile();
-  const scoped = name.replace(/^SF_/, `SF_${p.toUpperCase()}_`);
-  return process.env[scoped] || (p === 'hongcheng' ? process.env[name] : '') || '';
+  const aliases = name.startsWith('SF_PROD_') ? [name, name.replace('SF_PROD_', 'SF_PRODUCTION_')]
+    : name.startsWith('SF_PRODUCTION_') ? [name, name.replace('SF_PRODUCTION_', 'SF_PROD_')] : [name];
+  const scoped = aliases.map(key => key.replace(/^SF_/, `SF_${p.toUpperCase()}_`));
+  // Keep the identity used by old callers authoritative while sharing a cache.
+  const keys = p === 'hongcheng' ? [...aliases, ...scoped] : scoped;
+  return keys.map(key => process.env[key]).find(value => String(value || '').trim()) || '';
 }
 function pluginFlags(config, p) {
   const key = profile(p);
@@ -49,9 +57,16 @@ async function selectRoute(db, mode, payload) {
   if (mode === 'record' && payload.action === 'record' && payload.requestID) {
     return storedRoute(await getDoc(db, 'sf_print_logs', String(payload.requestID)));
   }
-  // Token calls explicitly carry the route captured by their parent operation.
-  if (mode === 'token' && payload.sfConfigProfile && payload.sfEnv) {
-    return { sfConfigProfile: profile(payload.sfConfigProfile), env: environment(payload.sfEnv) };
+  // Old callers cannot name an account: they must always receive Hongcheng.
+  // Honor their captured sfEnv even if the administrator changed the global env.
+  if (mode === 'token') {
+    const p = profile(payload.sfConfigProfile);
+    if (payload.sfConfigProfile && !payload.sfEnv) {
+      throw new Error('指定顺丰配置时必须同时传入 sfEnv');
+    }
+    if (payload.sfEnv) return { sfConfigProfile: p, env: environment(payload.sfEnv) };
+    const config = await getDoc(db, 'system_config', 'sf_express');
+    return { sfConfigProfile: 'hongcheng', env: environment(config?.env || process.env.SF_ENV) };
   }
   const config = await getDoc(db, 'system_config', 'sf_express');
   const selected = {
