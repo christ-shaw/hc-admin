@@ -307,6 +307,15 @@ export interface OrderRecord {
   recipientProfileId?: string;      // 下单时选用的收货档案 ID
   customerLinkStatus?: 'linked' | 'pending' | 'ignored'; // 客户关联状态
   customerLinkedAt?: string;        // 最近关联时间
+  customerLinkIgnoreReason?: string; // 人工忽略归档的原因
+  customerSelectionMode?: 'explicit' | 'none';
+  createCustomerArchive?: boolean;  // 本次新建订单申请随单建档（不持久化）
+  customerArchiveRequested?: boolean; // 服务端保存，用于建档失败后的独立重试
+  customerLinkExpected?: { customerId: string; customerAliasId: string; recipientProfileId: string };
+  customerLinkMethod?: 'manual' | 'inherited' | 'exact' | '';
+  customerIngestState?: 'pending' | 'done';
+  customerIngestVersion?: number;
+  customerIngestActor?: string;
   customerLinkedBy?: string;        // 最近关联操作人
   products?: ProductItem[];         // 货品明细（新结构：一条订单多条货品）
   /** @deprecated 旧扁平结构单货品字段，仅兼容未迁移数据；读取货品请用 getOrderProducts() */
@@ -358,15 +367,28 @@ export interface OrderRecord {
   createTime?: { $date: string };
 }
 
-export type CustomerStatus = 'active' | 'disabled';
+export type CustomerStatus = 'active' | 'disabled' | 'merged';
 export type CustomerProfileSource = 'manual' | 'order' | 'assist_import';
+
+export interface CustomerStats {
+  totalOrderCount: number;
+  rental1OrderCount: number;
+  rental2OrderCount: number;
+  totalAmount: number;
+  firstOrderDate?: string;
+  lastOrderDate?: string;
+}
 
 /** 客户主档案。客户名称、别名和收货信息拆分保存，订单仅持有引用与历史快照。 */
 export interface CustomerRecord {
+  writeRevision?: number;
   _id: string;
   displayName: string;
   normalizedDisplayName: string;
   status: CustomerStatus;
+  mergedIntoCustomerId?: string;
+  stats?: CustomerStats;
+  normalizationVersion?: string;
   remark: string;
   createdAt?: string;
   createdBy?: string;
@@ -379,6 +401,7 @@ export interface CustomerAliasRecord {
   customerId: string;
   name: string;
   normalizedName: string;
+  normalizationVersion?: string;
   sourceType: CustomerProfileSource;
   salesChannel: string;
   remark: string;
@@ -399,6 +422,7 @@ export interface CustomerRecipientProfileRecord {
   normalizedPhone: string;
   address: string;
   normalizedAddress: string;
+  normalizationVersion?: string;
   sourceType: CustomerProfileSource;
   enabled: boolean;
   useCount: number;
@@ -414,6 +438,157 @@ export interface CustomerDetail extends CustomerRecord {
   recipients: CustomerRecipientProfileRecord[];
   recentOrders: OrderRecord[];
   linkedOrderCount: number;
+}
+
+/** Deliberately separate from management detail: no orders, remarks, relations or audit data. */
+export interface CustomerSelectionItem {
+  _id: string;
+  displayName: string;
+}
+
+export interface CustomerOrderSelection extends CustomerSelectionItem {
+  aliases: Pick<CustomerAliasRecord, '_id' | 'name' | 'salesChannel'>[];
+  recipients: Pick<CustomerRecipientProfileRecord, '_id' | 'label' | 'consignee' | 'phone' | 'address'>[];
+  aliasPage: number;
+  recipientPage: number;
+  pageSize: number;
+  aliasTotal: number;
+  recipientTotal: number;
+}
+
+export type CustomerSuggestion = Pick<CustomerOrderSelection, '_id' | 'displayName' | 'aliases' | 'recipients' | 'aliasTotal' | 'recipientTotal'>;
+
+export type CustomerRelationType = 'family' | 'cohabitant' | 'colleague' | 'ordered_on_behalf' | 'guarantor' | 'other';
+export type CustomerRelationDirection = 'undirected' | 'directed';
+export type CustomerCandidateStatus = 'pending' | 'accepted' | 'rejected' | 'ignored';
+
+export interface CustomerAuditFields {
+  createdAt: string;
+  createdBy: string;
+  updatedAt: string;
+  updatedBy: string;
+}
+
+export interface CustomerRelation extends CustomerAuditFields {
+  _id: string;
+  fromCustomerId: string;
+  toCustomerId: string;
+  type: CustomerRelationType;
+  direction: CustomerRelationDirection;
+  remark?: string;
+}
+
+export interface CustomerObservedIdentity {
+  customerName: string;
+  consignee: string;
+  phone: string;
+  address: string;
+}
+
+export interface CustomerIdentityMatch {
+  displayName?: string;
+  customerId: string;
+  score: number;
+  reasons: string[];
+  evidence?: Array<{ type: 'name_exact' | 'phone_exact' | 'address_exact' | 'consignee_exact'; objectId: string; source: 'displayName' | 'alias' | 'recipient' }>;
+  exact?: boolean;
+  exactRecipientProfileIds?: string[];
+}
+
+export interface CustomerIdentityMatchResult {
+  identityRevision?: number;
+  normalizationVersion: string;
+  identityFingerprint: string | null;
+  status: 'exact' | 'no_match' | 'incomplete' | 'ambiguous' | 'invalid_cluster';
+  autoLinkEligible: boolean;
+  customerId: string | null;
+  candidates: CustomerIdentityMatch[];
+  issues: Array<{ customerId: string; code: string }>;
+}
+
+export type CustomerIdentityCheckResult = CustomerIdentityMatchResult | {
+  unchanged: true; identityRevision: number; normalizationVersion: string;
+};
+
+export interface CustomerLinkCandidate {
+  identityRevision?: number;
+  _id: string;
+  identityFingerprint: string;
+  normalizationVersion: string;
+  evidenceVersion: string;
+  orderCount: number;
+  pendingCount: number;
+  rental1Count: number;
+  rental2Count: number;
+  observedIdentity: CustomerObservedIdentity;
+  matches: CustomerIdentityMatch[];
+  matchCount: number;
+  matchStatus: CustomerIdentityMatchResult['status'];
+  status: 'pending' | 'processed';
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CustomerLinkCandidateMember {
+  _id: string;
+  candidateId: string;
+  orderId: string;
+  orderVersion: string;
+  evidenceVersion: string;
+  revision: number;
+  rentalType: 'rental1' | 'rental2';
+  serialNumber: number | string;
+  onlineOrderNumber: string;
+  date: string;
+  observedIdentity: CustomerObservedIdentity;
+  status: 'pending' | 'accepted' | 'ignored' | 'stale';
+  rejectedCustomerIds: string[];
+  resolvedCustomerId?: string;
+  resolvedAt?: string;
+  resolvedBy?: string;
+  reason?: string;
+}
+
+export interface CustomerRelationCandidate {
+  _id: string;
+  fromCustomerId: string;
+  toCustomerId: string;
+  pairKey: string;
+  evidenceVersion: string;
+  evidence: Array<{
+    type: 'shared_phone' | 'shared_address' | 'shared_phone_address' | 'shared_recipient';
+    summary: string;
+    count: number;
+  }>;
+  status: CustomerCandidateStatus;
+  resolvedRelationId?: string;
+  resolvedAt?: string;
+  resolvedBy?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CustomerMergeEvent {
+  _id: string;
+  sourceCustomerId: string;
+  targetCustomerId: string;
+  status: 'merged' | 'reverted';
+  remark?: string;
+  createdAt: string;
+  createdBy: string;
+  revertedAt?: string;
+  revertedBy?: string;
+  revertRemark?: string;
+}
+
+export interface CustomerAuditRecord {
+  _id: string;
+  action: string;
+  customerId: string;
+  objectId: string;
+  actorId: string;
+  changedFields: string[];
+  createdAt: string;
 }
 
 /** 转租赁2货品条目（支持多组） */

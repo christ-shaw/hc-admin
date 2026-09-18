@@ -58,6 +58,7 @@ const ACTION_PERMISSION_OPTIONS = [
   { label: '订单删除', value: 'orders:delete' },
   { label: '客户查询', value: 'customers:read' },
   { label: '客户维护', value: 'customers:write' },
+  { label: '客户合并 / 撤销合并', value: 'customers:merge' },
   { label: '采购查询', value: 'purchases:read' },
   { label: '采购新增', value: 'purchases:create' },
   { label: '采购编辑 / 退货调整', value: 'purchases:update' },

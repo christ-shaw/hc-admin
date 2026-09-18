@@ -13,6 +13,7 @@ const { getCurrentUser } = require('./permissionAuth');
 cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 
 const db = cloud.database();
+const customerOrders = require('./customer/orderIngestion').createOrderIngestion(db);
 const ORDERS = 'orders';
 const ROLES = 'roles';
 const USER_ROLES = 'user_roles';
@@ -240,16 +241,6 @@ async function createAfterSale(payload, currentUser) {
         channelCategory: trim(source.channelCategory),
         onlineOrderNumber: trim(source.onlineOrderNumber),
         customerName: trim(source.customerName),
-        customerId: trim(source.customerId),
-        customerAliasId: trim(source.customerAliasId),
-        recipientProfileId: trim(source.consignee) === input.consignee
-          && trim(source.consigneePhone) === input.consigneePhone
-          && trim(source.consigneeAddress) === input.consigneeAddress
-          ? trim(source.recipientProfileId)
-          : '',
-        customerLinkStatus: source.customerId ? 'linked' : 'pending',
-        customerLinkedAt: trim(source.customerLinkedAt),
-        customerLinkedBy: trim(source.customerLinkedBy),
         products: input.products,
         paymentAccount: '',
         paymentSplits: [],
@@ -279,8 +270,13 @@ async function createAfterSale(payload, currentUser) {
         createTime: now,
       };
 
+      const prepared = await customerOrders.prepareOrder(order, currentUser, transaction);
+      Object.assign(order, prepared);
       await transaction.collection(ORDERS).add({ data: order });
       await transaction.commit();
+      await customerOrders.ingestOrder(orderId, currentUser);
+      const savedOrder = await getOrder(orderId).catch(() => null);
+      if (savedOrder) Object.assign(order, savedOrder);
       return { success: true, duplicated: false, orderId, order, errMsg: '售后订单创建成功' };
     } catch (error) {
       try { await transaction.rollback(); } catch (_) { /* ignore */ }

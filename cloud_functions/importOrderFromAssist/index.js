@@ -38,6 +38,16 @@ const {
 cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 
 const db = cloud.database();
+const customerOrders = require('./customer/orderIngestion').createOrderIngestion(db);
+// Used only after the existing server-side API token validation succeeds.
+const customerActor = Object.freeze({ id: 'service:hc-order-assist' });
+async function saveCustomerOrder(orderDoc) {
+  const prepared = await customerOrders.prepareOrder(orderDoc, customerActor);
+  Object.assign(orderDoc, prepared);
+  const saved = await db.collection('orders').add({ data: orderDoc });
+  await customerOrders.ingestOrder(saved._id, customerActor);
+  return saved;
+}
 const _ = db.command;
 
 const ORDERS_COLLECTION = 'orders';
@@ -837,7 +847,7 @@ async function createAfterSaleOrder(payload) {
     const now = db.serverDate();
     const serialNumber = await getNextSerialNumber();
     const orderDoc = mapToAfterSaleOrder(order, items, serialNumber, now);
-    const addRes = await db.collection(ORDERS_COLLECTION).add({ data: orderDoc });
+    const addRes = await saveCustomerOrder(orderDoc);
     const outboundSync = await syncOutboundAfterImport({
       orderId: addRes._id,
       orderDoc,
@@ -1009,7 +1019,7 @@ async function createRenewalOrder(payload) {
       attachments: uploadedAttachments,
     }, serialNumber, now, todayInBeijing());
     orderDoc._id = `renewal_${crypto.createHash('sha256').update(requestId).digest('hex').slice(0, 24)}`;
-    const addResult = await db.collection(ORDERS_COLLECTION).add({ data: orderDoc });
+    const addResult = await saveCustomerOrder(orderDoc);
     return ok('CREATED', '续租订单创建成功', {
       orderId: addResult._id,
       duplicated: false,
@@ -1290,7 +1300,7 @@ exports.main = async (event) => {
     return createAfterSaleOrder(payload);
   }
 
-  // 由插件“申请续租”发起，直接使用当前赞晨订单信息创建虚拟续期租金订单，不查询历史订单。
+  // 由插件“申请续租”发起，先使用当前赞晨订单信息创建虚拟续期租金订单，再尝试可信客户继承。
   if (payload && payload.action === 'createRenewalOrder') {
     return createRenewalOrder(payload);
   }
@@ -1464,6 +1474,7 @@ exports.main = async (event) => {
         await db.collection(ORDERS_COLLECTION).doc(createdOrderId).update({ data: { ...remarkPatch, updateTime: now } });
       }
 
+      await customerOrders.ingestOrder(createdOrderId, customerActor);
       await updateImportLogs(lockedItems, { status: 'success', createdOrderId });
       const appendedCount = toAppend.length;
       const appendSync = await syncOutboundAfterImport({
@@ -1485,7 +1496,7 @@ exports.main = async (event) => {
 
     const serialNumber = await getNextSerialNumber();
     const orderDoc = mapToOrder(order, lockedItems.map((l) => l.item), serialNumber, now);
-    const addRes = await db.collection(ORDERS_COLLECTION).add({ data: orderDoc });
+    const addRes = await saveCustomerOrder(orderDoc);
     createdOrderId = addRes._id;
 
     await updateImportLogs(lockedItems, { status: 'success', createdOrderId, normalizedPayload: orderDoc });

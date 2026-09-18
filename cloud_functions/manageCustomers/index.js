@@ -1,12 +1,13 @@
 /**
  * manageCustomers - 客户主档案、别名与收货档案管理。
  *
- * 第一阶段只维护人工确认的数据，不扫描或自动合并历史订单。
+ * 管理查询、身份匹配与事务化人工维护；订单接入及历史归档另阶段实施。
  */
 
 const cloud = require('wx-server-sdk');
 const { getCurrentUser } = require('./permissionAuth');
 const { clean, normalizeName, normalizePhone, normalizeAddress } = require('./normalizers');
+const { permissionsFor, hasAnyPermission } = require('./permissions');
 
 cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 const db = cloud.database();
@@ -20,78 +21,23 @@ const CONFIG_ID = 'permission_system';
 const ROLE_COLLECTION = 'roles';
 const USER_ROLE_COLLECTION = 'user_roles';
 
-const READ_PERMISSIONS = ['customers:read', 'customers:write', 'orders:read', 'orders:create', 'orders:update'];
-const WRITE_PERMISSIONS = ['customers:write'];
-const ORDER_LINK_PERMISSIONS = ['customers:write', 'orders:create', 'orders:update'];
-
-function now() {
-  return new Date().toISOString();
-}
+const { createRepository } = require('./repository');
+const { conditionalMatch } = require('./versionedMatcher');
+const { createWriter, WRITE_ACTIONS } = require('./writer');
+const { CustomerError } = require('./errors');
+const { aliasData, recipientData } = require('./records');
+const repository = createRepository(db);
+const { getDocById, fetchAll } = repository;
+const write = createWriter(repository);
+const scanUnlinkedOrders = require('./archiveScanner').createScanner(repository);
+const resolveLinkCandidate = require('./archiveResolver').createResolver(repository);
+const listLinkCandidates = require('./archiveQueries').createArchiveQueries(repository);
+const suggestCustomers = require('./suggestions').createSuggestions(repository);
+const archiveOrder = require('./orderArchive').createOrderArchive(db);
 
 function getPayload(event) {
   const first = event && event.data !== undefined ? event.data : event || {};
   return first && first.data && first.action === undefined ? first.data : first;
-}
-
-function notFound(err) {
-  const message = String(err && err.message || '');
-  return err && (err.errCode === -1 || err.errCode === -502005 || message.includes('not exist') || message.includes('does not exist'));
-}
-
-function hasAnyPermission(role, permissions) {
-  const actions = Array.isArray(role && role.actionPermissions) ? role.actionPermissions : [];
-  return actions.includes('*') || permissions.some(permission => actions.includes(permission));
-}
-
-async function ensureCollection(name) {
-  try {
-    await db.collection(name).limit(1).get();
-  } catch (err) {
-    if (!notFound(err)) throw err;
-    if (typeof db.createCollection !== 'function') throw new Error(`数据库集合不存在且无法自动创建: ${name}`);
-    try {
-      await db.createCollection(name);
-    } catch (createErr) {
-      const message = String(createErr && createErr.message || '');
-      if (!message.includes('already exists') && !message.includes('exists')) throw createErr;
-    }
-  }
-}
-
-async function ensureCollections() {
-  await Promise.all([
-    ensureCollection(CUSTOMER_COLLECTION),
-    ensureCollection(ALIAS_COLLECTION),
-    ensureCollection(RECIPIENT_COLLECTION),
-  ]);
-}
-
-async function getDocById(collectionName, id) {
-  if (!id) return null;
-  try {
-    const result = await db.collection(collectionName).where({ _id: id }).limit(1).get();
-    return result.data && result.data[0] || null;
-  } catch (err) {
-    if (notFound(err)) return null;
-    throw err;
-  }
-}
-
-async function fetchAll(collectionName, where = {}) {
-  try {
-    const query = Object.keys(where).length ? db.collection(collectionName).where(where) : db.collection(collectionName);
-    const result = [];
-    for (let skip = 0; ; skip += 100) {
-      const page = await query.skip(skip).limit(100).get();
-      const rows = page.data || [];
-      result.push(...rows);
-      if (rows.length < 100) break;
-    }
-    return result;
-  } catch (err) {
-    if (notFound(err)) return [];
-    throw err;
-  }
 }
 
 async function requirePermission(permissions) {
@@ -107,36 +53,32 @@ async function requirePermission(permissions) {
   return { allowed: true, currentUser, role };
 }
 
-function auditCreate(currentUser) {
-  const timestamp = now();
-  return { createdAt: timestamp, createdBy: currentUser.id, updatedAt: timestamp, updatedBy: currentUser.id };
-}
-
-function auditUpdate(currentUser) {
-  return { updatedAt: now(), updatedBy: currentUser.id };
-}
-
 async function requireCustomer(customerId) {
   const customer = await getDocById(CUSTOMER_COLLECTION, customerId);
   if (!customer) throw new Error('客户主档案不存在');
   return customer;
 }
 
-async function findDuplicateAlias(customerId, normalizedName, salesChannel, excludeId = '') {
-  const aliases = await fetchAll(ALIAS_COLLECTION, { customerId });
-  return aliases.find(alias => alias._id !== excludeId
-    && alias.enabled !== false
-    && alias.normalizedName === normalizedName
-    && clean(alias.salesChannel) === salesChannel) || null;
+function pageNumber(value) {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number > 0 ? number : 1;
 }
 
-async function listCustomers(payload) {
-  await ensureCollections();
+function limitedPageSize(value, maximum) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.min(maximum, Math.max(1, Math.floor(number))) : 20;
+}
+
+async function listCustomers(payload, selectionOnly = false) {
   const keyword = clean(payload.keyword).normalize('NFKC').toLocaleLowerCase('zh-CN');
+  if (selectionOnly && !keyword) return { success: false, code: 'KEYWORD_REQUIRED', errMsg: '请输入客户名称、别名、电话或地址' };
+  if (keyword.length > 200) return { success: false, code: 'INVALID_KEYWORD', errMsg: '搜索内容过长' };
   const normalizedKeyword = normalizeName(keyword);
+  const phoneKeyword = normalizePhone(keyword);
+  const addressKeyword = normalizeAddress(keyword);
   const includeDisabled = payload.includeDisabled === true;
-  const page = Math.max(1, Number(payload.page) || 1);
-  const pageSize = Math.min(5000, Math.max(1, Number(payload.pageSize) || 100));
+  const page = pageNumber(payload.page);
+  const pageSize = limitedPageSize(payload.pageSize, selectionOnly ? 50 : 100);
   const [customers, aliases, recipients] = await Promise.all([
     fetchAll(CUSTOMER_COLLECTION),
     fetchAll(ALIAS_COLLECTION),
@@ -156,19 +98,23 @@ async function listCustomers(payload) {
   });
 
   const filtered = customers.filter(customer => {
-    if (!includeDisabled && customer.status === 'disabled') return false;
+    if (customer.status === 'merged') return false;
+    if (selectionOnly ? customer.status !== 'active' : (!includeDisabled && customer.status === 'disabled')) return false;
     if (!keyword) return true;
     if (String(customer.displayName || '').toLocaleLowerCase('zh-CN').includes(keyword)) return true;
-    if (String(customer.normalizedDisplayName || '').includes(normalizedKeyword)) return true;
-    if ((aliasesByCustomer.get(customer._id) || []).some(alias => String(alias.name || '').toLocaleLowerCase('zh-CN').includes(keyword))) return true;
+    // Derive from original fields until the optional v2 backfill has completed.
+    if (normalizedKeyword && normalizeName(customer.displayName).includes(normalizedKeyword)) return true;
+    if (normalizedKeyword && (aliasesByCustomer.get(customer._id) || []).some(alias => normalizeName(alias.name).includes(normalizedKeyword))) return true;
     return (recipientsByCustomer.get(customer._id) || []).some(recipient => (
-      String(recipient.consignee || '').toLocaleLowerCase('zh-CN').includes(keyword)
-      || String(recipient.phone || '').includes(keyword)
-      || String(recipient.address || '').toLocaleLowerCase('zh-CN').includes(keyword)
+      (normalizedKeyword && normalizeName(recipient.consignee).includes(normalizedKeyword))
+      || (phoneKeyword && normalizePhone(recipient.phone).includes(phoneKeyword) && /^[+\d\s()\-]+$/.test(keyword))
+      || (addressKeyword && normalizeAddress(recipient.address).includes(addressKeyword))
     ));
-  }).sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+  }).sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')) || String(a._id).localeCompare(String(b._id)));
 
-  const data = filtered.slice((page - 1) * pageSize, page * pageSize).map(customer => ({
+  const data = filtered.slice((page - 1) * pageSize, page * pageSize).map(customer => selectionOnly ? ({
+    _id: customer._id, displayName: customer.displayName,
+  }) : ({
     ...customer,
     aliasCount: (aliasesByCustomer.get(customer._id) || []).length,
     recipientCount: (recipientsByCustomer.get(customer._id) || []).length,
@@ -176,8 +122,35 @@ async function listCustomers(payload) {
   return { success: true, data, total: filtered.length, page, pageSize };
 }
 
+async function getOrderSelection(payload) {
+  const customer = await requireCustomer(clean(payload.customerId || payload._id));
+  if (customer.status !== 'active') return { success: false, code: 'CUSTOMER_UNAVAILABLE', errMsg: '该客户已停用或合并，请重新选择客户' };
+  const pageSize = limitedPageSize(payload.pageSize, 50);
+  const aliasPage = pageNumber(payload.aliasPage);
+  const recipientPage = pageNumber(payload.recipientPage);
+  const aliasQuery = db.collection(ALIAS_COLLECTION).where({ customerId: customer._id, enabled: db.command.neq(false) });
+  const recipientQuery = db.collection(RECIPIENT_COLLECTION).where({ customerId: customer._id, enabled: db.command.neq(false) });
+  const [aliasResult, recipientResult, aliasesCount, recipientsCount] = await Promise.all([
+    aliasQuery.orderBy('_id', 'asc').skip((aliasPage - 1) * pageSize).limit(pageSize)
+      .field({ _id: true, name: true, salesChannel: true }).get(),
+    recipientQuery.orderBy('_id', 'asc').skip((recipientPage - 1) * pageSize).limit(pageSize)
+      .field({ _id: true, label: true, consignee: true, phone: true, address: true }).get(),
+    aliasQuery.count(), recipientQuery.count(),
+  ]);
+  return { success: true, data: {
+    _id: customer._id,
+    displayName: customer.displayName,
+    // Explicit allowlists protect the response even if a projection changes later.
+    aliases: (aliasResult.data || []).map(row => ({ _id: row._id, name: row.name, salesChannel: row.salesChannel || '' })),
+    recipients: (recipientResult.data || []).map(row => ({
+      _id: row._id, label: row.label || '', consignee: row.consignee, phone: row.phone, address: row.address,
+    })),
+    aliasPage, recipientPage, pageSize,
+    aliasTotal: aliasesCount.total, recipientTotal: recipientsCount.total,
+  } };
+}
+
 async function getCustomer(payload) {
-  await ensureCollections();
   const customerId = clean(payload.customerId || payload._id);
   const customer = await requireCustomer(customerId);
   const [aliases, recipients, orderCountResult, recentOrdersResult] = await Promise.all([
@@ -198,179 +171,29 @@ async function getCustomer(payload) {
   };
 }
 
-async function createCustomer(payload, currentUser) {
-  await ensureCollections();
-  const displayName = clean(payload.displayName);
-  if (!displayName) return { success: false, errMsg: '客户主名称不能为空' };
-  const customerResult = await db.collection(CUSTOMER_COLLECTION).add({ data: {
-    displayName,
-    normalizedDisplayName: normalizeName(displayName),
-    status: 'active',
-    remark: clean(payload.remark),
-    ...auditCreate(currentUser),
-  } });
-  const customerId = customerResult._id;
-  const aliasResult = await db.collection(ALIAS_COLLECTION).add({ data: {
-    customerId,
-    name: displayName,
-    normalizedName: normalizeName(displayName),
-    sourceType: 'manual',
-    salesChannel: '',
-    remark: '创建主档案时生成',
-    enabled: true,
-    ...auditCreate(currentUser),
-  } });
-  return { success: true, data: { _id: customerId, primaryAliasId: aliasResult._id } };
-}
-
-async function updateCustomer(payload, currentUser) {
-  const customerId = clean(payload.customerId || payload._id);
-  const existing = await requireCustomer(customerId);
-  const displayName = clean(payload.displayName === undefined ? existing.displayName : payload.displayName);
-  if (!displayName) return { success: false, errMsg: '客户主名称不能为空' };
-  await db.collection(CUSTOMER_COLLECTION).doc(customerId).update({ data: {
-    displayName,
-    normalizedDisplayName: normalizeName(displayName),
-    remark: clean(payload.remark === undefined ? existing.remark : payload.remark),
-    ...auditUpdate(currentUser),
-  } });
-  return { success: true };
-}
-
-async function setCustomerStatus(payload, currentUser, status) {
-  const customerId = clean(payload.customerId || payload._id);
-  await requireCustomer(customerId);
-  await db.collection(CUSTOMER_COLLECTION).doc(customerId).update({ data: { status, ...auditUpdate(currentUser) } });
-  return { success: true };
-}
-
-function aliasData(payload) {
-  const name = clean(payload.name);
-  return {
-    name,
-    normalizedName: normalizeName(name),
-    sourceType: ['manual', 'order', 'assist_import'].includes(payload.sourceType) ? payload.sourceType : 'manual',
-    salesChannel: clean(payload.salesChannel),
-    remark: clean(payload.remark),
-    enabled: payload.enabled !== false,
-  };
-}
-
-async function createAlias(payload, currentUser) {
-  const customerId = clean(payload.customerId);
-  await requireCustomer(customerId);
-  const data = aliasData(payload);
-  if (!data.name) return { success: false, errMsg: '别名不能为空' };
-  if (await findDuplicateAlias(customerId, data.normalizedName, data.salesChannel)) return { success: false, errMsg: '该客户在相同渠道下已存在此别名' };
-  const result = await db.collection(ALIAS_COLLECTION).add({ data: { customerId, ...data, ...auditCreate(currentUser) } });
-  return { success: true, data: { _id: result._id } };
-}
-
-async function updateAlias(payload, currentUser) {
-  const aliasId = clean(payload.aliasId || payload._id);
-  const existing = await getDocById(ALIAS_COLLECTION, aliasId);
-  if (!existing) return { success: false, errMsg: '客户别名不存在' };
-  const data = aliasData({ ...existing, ...payload });
-  if (!data.name) return { success: false, errMsg: '别名不能为空' };
-  if (await findDuplicateAlias(existing.customerId, data.normalizedName, data.salesChannel, aliasId)) return { success: false, errMsg: '该客户在相同渠道下已存在此别名' };
-  await db.collection(ALIAS_COLLECTION).doc(aliasId).update({ data: { ...data, ...auditUpdate(currentUser) } });
-  return { success: true };
-}
-
-async function disableAlias(payload, currentUser) {
-  const aliasId = clean(payload.aliasId || payload._id);
-  const existing = await getDocById(ALIAS_COLLECTION, aliasId);
-  if (!existing) return { success: false, errMsg: '客户别名不存在' };
-  await db.collection(ALIAS_COLLECTION).doc(aliasId).update({ data: { enabled: false, ...auditUpdate(currentUser) } });
-  return { success: true };
-}
-
-function recipientData(payload) {
-  const consignee = clean(payload.consignee);
-  const phone = clean(payload.phone);
-  const address = clean(payload.address);
-  return {
-    label: clean(payload.label) || consignee || '默认收货档案',
-    consignee,
-    normalizedConsignee: normalizeName(consignee),
-    phone,
-    normalizedPhone: normalizePhone(phone),
-    address,
-    normalizedAddress: normalizeAddress(address),
-    sourceType: ['manual', 'order', 'assist_import'].includes(payload.sourceType) ? payload.sourceType : 'manual',
-    enabled: payload.enabled !== false,
-  };
-}
-
-async function createRecipient(payload, currentUser) {
-  const customerId = clean(payload.customerId);
-  await requireCustomer(customerId);
-  const data = recipientData(payload);
-  if (!data.consignee || !data.phone || !data.address) return { success: false, errMsg: '收货人、电话和地址不能为空' };
-  const result = await db.collection(RECIPIENT_COLLECTION).add({ data: {
-    customerId, ...data, useCount: 0, lastUsedAt: '', ...auditCreate(currentUser),
-  } });
-  return { success: true, data: { _id: result._id } };
-}
-
-async function updateRecipient(payload, currentUser) {
-  const recipientId = clean(payload.recipientId || payload._id);
-  const existing = await getDocById(RECIPIENT_COLLECTION, recipientId);
-  if (!existing) return { success: false, errMsg: '收货档案不存在' };
-  const data = recipientData({ ...existing, ...payload });
-  if (!data.consignee || !data.phone || !data.address) return { success: false, errMsg: '收货人、电话和地址不能为空' };
-  await db.collection(RECIPIENT_COLLECTION).doc(recipientId).update({ data: { ...data, ...auditUpdate(currentUser) } });
-  return { success: true };
-}
-
-async function disableRecipient(payload, currentUser) {
-  const recipientId = clean(payload.recipientId || payload._id);
-  const existing = await getDocById(RECIPIENT_COLLECTION, recipientId);
-  if (!existing) return { success: false, errMsg: '收货档案不存在' };
-  await db.collection(RECIPIENT_COLLECTION).doc(recipientId).update({ data: { enabled: false, ...auditUpdate(currentUser) } });
-  return { success: true };
-}
-
-async function touchRecipient(payload, currentUser) {
-  const recipientId = clean(payload.recipientId || payload._id);
-  const existing = await getDocById(RECIPIENT_COLLECTION, recipientId);
-  if (!existing) return { success: false, errMsg: '收货档案不存在' };
-  await db.collection(RECIPIENT_COLLECTION).doc(recipientId).update({ data: {
-    useCount: (Number(existing.useCount) || 0) + 1,
-    lastUsedAt: now(),
-    ...auditUpdate(currentUser),
-  } });
-  return { success: true };
-}
-
 exports.main = async event => {
   const payload = getPayload(event);
   const action = clean(payload.action) || 'list';
   try {
-    const readActions = new Set(['list', 'search', 'get']);
-    const permissions = readActions.has(action)
-      ? READ_PERMISSIONS
-      : action === 'touchRecipient' ? ORDER_LINK_PERMISSIONS : WRITE_PERMISSIONS;
+    const permissions = permissionsFor(action, payload.scope);
+    if (!permissions) return { success: false, code: 'ACTION_NOT_ALLOWED', errMsg: '不支持此操作或查询模式' };
     const auth = await requirePermission(permissions);
     if (!auth.allowed) return { success: false, code: auth.code, errMsg: auth.errMsg };
 
-    if (action === 'list' || action === 'search') return listCustomers(payload);
-    if (action === 'get') return getCustomer(payload);
-    if (action === 'create') return createCustomer(payload, auth.currentUser);
-    if (action === 'update') return updateCustomer(payload, auth.currentUser);
-    if (action === 'disable') return setCustomerStatus(payload, auth.currentUser, 'disabled');
-    if (action === 'enable') return setCustomerStatus(payload, auth.currentUser, 'active');
-    if (action === 'createAlias') return createAlias(payload, auth.currentUser);
-    if (action === 'updateAlias') return updateAlias(payload, auth.currentUser);
-    if (action === 'disableAlias') return disableAlias(payload, auth.currentUser);
-    if (action === 'createRecipient') return createRecipient(payload, auth.currentUser);
-    if (action === 'updateRecipient') return updateRecipient(payload, auth.currentUser);
-    if (action === 'disableRecipient') return disableRecipient(payload, auth.currentUser);
-    if (action === 'touchRecipient') return touchRecipient(payload, auth.currentUser);
-    return { success: false, errMsg: '不支持的操作类型' };
+    if (action === 'search' && payload.scope === 'orderSuggestions') return await suggestCustomers(payload);
+    if (action === 'list' || action === 'search') return await listCustomers(payload, action === 'search');
+    if (action === 'get') return await (payload.scope === 'orderSelection' ? getOrderSelection(payload) : getCustomer(payload));
+    if (action === 'matchIdentity') return { success: true, data: await conditionalMatch(repository, payload) };
+    if (action === 'createFromOrder') return { success: true, data: await archiveOrder(payload.orderId, auth.currentUser) };
+    if (action === 'scanUnlinkedOrders') return await scanUnlinkedOrders({ ...payload, scanMode: 'all' }, auth.currentUser);
+    if (action === 'scanNewOrders') return await scanUnlinkedOrders({ ...payload, scanMode: 'new', dryRun: false }, auth.currentUser);
+    if (action === 'listLinkCandidates') return await listLinkCandidates(payload, auth.currentUser);
+    if (action === 'resolveLinkCandidate') return await resolveLinkCandidate(payload, auth.currentUser);
+    if (WRITE_ACTIONS.includes(action)) return await write(action, payload, auth.currentUser);
+    return { success: false, code: 'ACTION_NOT_IMPLEMENTED', errMsg: '此操作尚未开放' };
   } catch (error) {
-    console.error('客户主档案管理失败:', error);
-    return { success: false, code: 'CUSTOMER_MANAGE_FAILED', errMsg: error.message || '客户主档案管理失败' };
+    console.error('客户主档案管理失败', { action, code: error.code || error.errCode || 'CUSTOMER_MANAGE_FAILED' });
+    return { success: false, code: error instanceof CustomerError ? error.code : 'CUSTOMER_MANAGE_FAILED', errMsg: error instanceof CustomerError ? error.message : '客户操作失败，请使用原请求重试' };
   }
 };
 

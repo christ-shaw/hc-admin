@@ -6,6 +6,10 @@
  */
 
 const cloud = require('wx-server-sdk');
+const { getCurrentUser } = require('./permissionAuth');
+const { requireOrderPermission } = require('./customer/orderPermission');
+const { stripLinkFields } = require('./customer/orderIngestion');
+const { applyCustomerSelection } = require('./customerSelection');
 const {
   aggregateOutboundModels,
   isOrderLinkedPendingOutbound,
@@ -48,11 +52,16 @@ exports.main = async (event, context) => {
   }
 
   try {
+    const actor = await requireOrderPermission(db, getCurrentUser, 'orders:update');
+    // Ignore raw linkage fields; only an explicit selection can change ownership.
     // 不允许更新的字段
-    const forbiddenFields = ['_id', 'createTime'];
-    const cleanData = { ...updateData };
+    const forbiddenFields = ['_id', 'createTime', 'customerLinkExpected'];
+    const cleanData = stripLinkFields(updateData, true);
     for (const field of forbiddenFields) {
       delete cleanData[field];
+    }
+    for (const field of Object.keys(cleanData)) {
+      if (field.startsWith('customerLinkExpected.')) delete cleanData[field];
     }
 
     const transaction = await db.startTransaction();
@@ -64,6 +73,8 @@ exports.main = async (event, context) => {
       }
 
       // 添加更新时间。先保留纯数据用于重新聚合，避免服务端时间占位符进入快照。
+      const linkPatch = await applyCustomerSelection(db, transaction, existingOrder, updateData, { ...existingOrder, ...cleanData }, actor);
+      Object.assign(cleanData, linkPatch);
       const nextOrder = { ...existingOrder, ...cleanData };
       cleanData.updateTime = db.serverDate();
 
@@ -106,6 +117,7 @@ exports.main = async (event, context) => {
       return {
         success: true,
         data: {
+          ...linkPatch,
           _id,
           updateTime: new Date().toISOString(),
           outboundSynced,

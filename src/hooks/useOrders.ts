@@ -2,6 +2,7 @@ import { useState, useCallback } from 'react';
 import { callFunction } from '../lib/cloudbase';
 import { OrderRecord, OrderFilters } from '../types';
 import { PAGE_SIZE } from '../utils/constants';
+import type { OrderCustomerArchiveResult } from '../components/OrderCustomerArchiveRetry';
 
 interface QueryResult {
   success?: boolean;
@@ -14,6 +15,7 @@ interface SaveResult {
   success: boolean;
   savedCount?: number;
   savedIds?: string[];
+  customerArchives?: OrderCustomerArchiveResult[];
   errMsg?: string;
 }
 
@@ -154,21 +156,26 @@ export function useOrders() {
   }, []);
 
   /** 更新订单 */
-  const updateOrder = useCallback(async (_id: string, updateData: Partial<OrderRecord>): Promise<boolean> => {
+  const updateOrder = useCallback(async (_id: string, updateData: Partial<OrderRecord>, onError?: (message: string) => void): Promise<boolean> => {
     try {
-      const result = await callFunction<{ success: boolean }>('updateOrder', {
+      const result = await callFunction<{ success: boolean; data?: Partial<OrderRecord>; errMsg?: string }>('updateOrder', {
         data: { _id, updateData },
       });
       if (result.success) {
+        const savedData = { ...updateData, ...result.data };
+        delete savedData.customerSelectionMode;
+        delete savedData.customerLinkExpected;
         setState(prev => ({
           ...prev,
-          records: prev.records.map(r => r._id === _id ? { ...r, ...updateData } : r),
+          records: prev.records.map(r => r._id === _id ? { ...r, ...savedData } : r),
         }));
         return true;
       }
+      onError?.(result.errMsg || '修改失败');
       return false;
     } catch (err) {
       console.error('更新订单失败:', err);
+      onError?.(err instanceof Error ? err.message : '修改失败，请重试');
       return false;
     }
   }, []);

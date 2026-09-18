@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { canAccessCustomerPage } from '../utils/customerPermissions';
 import {
   callFunction,
   getCurrentPermissionUserPayload,
@@ -146,12 +147,11 @@ export function PermissionProvider({ children }: { children: React.ReactNode }) 
     if (normalizedPath === '/sf-express') {
       return pagePermissions.includes('/orders');
     }
-    // 客户主档案第一期对存量订单角色开放，避免上线后必须立即重配所有角色。
     if (normalizedPath === '/customers') {
-      return pagePermissions.includes('/customers') || pagePermissions.includes('/orders');
+      return canAccessCustomerPage(pagePermissions, actionPermissions);
     }
     return pagePermissions.includes(normalizedPath);
-  }, [pagePermissions]);
+  }, [pagePermissions, actionPermissions]);
 
   const can = useCallback((permission: string) => {
     return actionPermissions.includes('*') || actionPermissions.includes(permission);

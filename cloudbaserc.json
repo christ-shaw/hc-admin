@@ -138,7 +138,8 @@
     {
       "name": "manageCustomers",
       "handler": "index.main",
-      "runtime": "Nodejs18.15"
+      "runtime": "Nodejs18.15",
+      "timeout": 60
     },
     {
       "name": "generateDailyShipmentStats",

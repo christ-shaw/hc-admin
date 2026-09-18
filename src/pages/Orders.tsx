@@ -22,7 +22,10 @@ import { PAGE_SIZE } from '../utils/constants';
 import { DICT_CODES, useDictionaries } from '../contexts/DictionaryContext';
 import { useTabDirty } from '../contexts/TabWorkspaceContext';
 import { usePermission } from '../contexts/PermissionContext';
-import { CustomerOrderLinkFields } from '../components/CustomerOrderLinkFields';
+import { CustomerNameField } from '../components/CustomerNameField';
+import { useOrderCustomerArchive, type OrderCustomerArchivePlan } from '../hooks/useOrderCustomerArchive';
+import { OrderCustomerArchiveOption } from '../components/OrderCustomerArchiveOption';
+import { OrderCustomerArchiveRetry } from '../components/OrderCustomerArchiveRetry';
 
 /** ========== 预计算静态 options（模块级常量，避免每次渲染重建） ========== */
 const PLACEHOLDER_OPTION = { label: '请选择', value: '' };
@@ -70,6 +73,8 @@ const EMPTY_TRANSFER_PRODUCT: TransferProductItem = {
 
 /** 新增订单表单 — 公共字段 + 货品列表 */
 interface OrderFormData {
+  createCustomerArchive?: boolean;
+  customerSelectionMode?: 'explicit' | 'none';
   serialNumber: number;
   date: string;
   orderSource: string;
@@ -856,6 +861,13 @@ export function Orders() {
   const [addCopySourceSerial, setAddCopySourceSerial] = useState<number | null>(null);
   const [addRenewalSource, setAddRenewalSource] = useState<Pick<OrderRecord, '_id' | 'serialNumber'> | null>(null);
   const [addRental2TransferSource, setAddRental2TransferSource] = useState<Rental2TransferSource | null>(null);
+  const archivePlan = useOrderCustomerArchive(
+    addVisible && can('customers:write') && !addForm.customerId && !addRenewalSource && !addRental2TransferSource
+      && (!addForm.orderAttribute || ['rental1', 'rental2', '租赁1', '租赁2'].includes(addForm.orderAttribute)),
+    { customerName: addForm.customerName, consignee: addForm.needsOutbound ? addForm.consignee : '',
+      phone: addForm.needsOutbound ? addForm.consigneePhone : '', address: addForm.needsOutbound ? addForm.consigneeAddress : '' },
+    addForm.createCustomerArchive,
+  );
   const [addNeedsOutboundDecision, setAddNeedsOutboundDecision] = useState<boolean | null>(null);
   const [addAutoOutbound, setAddAutoOutbound] = useState<AutoOutboundOption>(DEFAULT_AUTO_OUTBOUND);
   const [saving, setSaving] = useState(false);
@@ -1598,6 +1610,7 @@ export function Orders() {
 
   /** 新增订单 — 预览确认后提交（Step 6） */
   const handleAddSave = async () => {
+    if (saving) return;
     setSaving(true);
     try {
       // 上传附件到云存储
@@ -1638,9 +1651,8 @@ export function Orders() {
         customerId: addForm.customerId || '',
         customerAliasId: addForm.customerAliasId || '',
         recipientProfileId: addForm.recipientProfileId || '',
-        customerLinkStatus: addForm.customerId ? 'linked' : 'pending',
-        customerLinkedAt: addForm.customerId ? new Date().toISOString() : '',
-        customerLinkedBy: addForm.customerId ? await getCurrentOperatorName() : '',
+        customerSelectionMode: addForm.customerSelectionMode || (addForm.customerId ? 'explicit' : 'none'),
+        createCustomerArchive: archivePlan.checked,
         products: addForm.products.map(serializeProductForSave),
         ...serializeOrderPayment(addForm),
         trackingNumber: shipmentFields.trackingNumber,
@@ -1673,9 +1685,10 @@ export function Orders() {
       };
       const result = await orders.importOrders([newRecord]);
       if (result.success) {
-        if (addForm.recipientProfileId) {
-          callFunction('manageCustomers', { action: 'touchRecipient', recipientId: addForm.recipientProfileId }).catch(() => undefined);
-        }
+        const archive = result.customerArchives?.[0];
+        if (archive?.status === 'created') MessagePlugin.success('客户档案已建立并关联本单');
+        else if (archive?.status === 'pending') MessagePlugin.warning(`订单已保存，${archive.message || '客户档案待补建，可在订单列表重试'}`);
+        else if (newRecord.createCustomerArchive && !archive) MessagePlugin.warning('订单已保存，服务端尚未返回建档结果，请在客户管理中核对归档');
         MessagePlugin.success(addRenewalSource
           ? '续租订单创建成功'
           : addRental2TransferSource
@@ -2132,12 +2145,17 @@ export function Orders() {
         channelCategory: editForm.channelCategory,
         onlineOrderNumber: editForm.onlineOrderNumber,
         customerName: editForm.customerName,
-        customerId: editForm.customerId || '',
-        customerAliasId: editForm.customerAliasId || '',
-        recipientProfileId: editForm.recipientProfileId || '',
-        customerLinkStatus: editForm.customerId ? 'linked' : 'pending',
-        customerLinkedAt: editForm.customerId ? new Date().toISOString() : '',
-        customerLinkedBy: editForm.customerId ? await getCurrentOperatorName() : '',
+        ...(editForm.customerSelectionMode ? {
+          customerSelectionMode: editForm.customerSelectionMode,
+          customerId: editForm.customerId,
+          customerAliasId: editForm.customerAliasId,
+          recipientProfileId: editForm.recipientProfileId,
+          customerLinkExpected: (() => {
+            const original = JSON.parse(editInitialRef.current) as OrderFormData;
+            return { customerId: original.customerId, customerAliasId: original.customerAliasId, recipientProfileId: original.recipientProfileId };
+          })(),
+        } : {}),
+
         products: editForm.products.map(serializeProductForSave),
         // 收款在订单级；清空旧扁平货品字段，避免与 products 并存产生歧义
         ...serializeOrderPayment(editForm),
@@ -2166,17 +2184,15 @@ export function Orders() {
         needsOutbound: editForm.needsOutbound,
       };
 
-      const success = await orders.updateOrder(editId, updateData);
+      let updateError = '';
+      const success = await orders.updateOrder(editId, updateData, message => { updateError = message; });
       if (success) {
-        if (editForm.recipientProfileId) {
-          callFunction('manageCustomers', { action: 'touchRecipient', recipientId: editForm.recipientProfileId }).catch(() => undefined);
-        }
         MessagePlugin.success('修改订单成功');
         setEditVisible(false);
         setEditStep(1);
         setEditAttachFiles([]);
       } else {
-        MessagePlugin.error('修改失败');
+        MessagePlugin.error(updateError || '修改失败');
       }
     } catch (err) {
       MessagePlugin.error('修改异常: ' + String(err));
@@ -2346,6 +2362,7 @@ export function Orders() {
   ], [handleDetail, handleViewOutbound, handleIntroduction, handleRenewalOpen, handleRental2TransferOpen, handleCopyOpen, handleEditOpen, handleAfterSaleOpen, handleAfterSaleHistoryOpen, handleManualTrackingOpen, handleShipOpen, handleGenerateOutboundOpen, handleAfterSaleInboundOpen, handleDeleteConfirm, can, ORDER_SOURCE_MAP, ORDER_TYPE_MAP, SALES_CHANNEL_MAP, ORDER_ATTRIBUTE_MAP, ORDER_STATUS_MAP]);
 
   const displayRecords = orders.getPageRecords(orders.currentPage);
+  const pendingCustomerArchives = displayRecords.filter(record => record.customerArchiveRequested && !record.customerId && record.customerLinkStatus !== 'ignored');
   const hasLoadedNextPage = orders.currentPage * PAGE_SIZE < orders.records.length;
   const canGoNextPage = hasLoadedNextPage || orders.hasMore;
   const handlePrevPage = useCallback(() => {
@@ -2361,6 +2378,12 @@ export function Orders() {
 
   return (
     <div className="space-y-4">
+      {can('customers:write') && pendingCustomerArchives.length > 0 && <details className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+        <summary className="cursor-pointer">本页有 {pendingCustomerArchives.length} 单客户档案待补建，订单已保存</summary>
+        <div className="mt-2 space-y-2">{pendingCustomerArchives.map(record =>
+          <OrderCustomerArchiveRetry key={record._id} orderId={record._id} serialNumber={record.serialNumber}
+            onComplete={() => { void orders.fetchRecords(null, orders.filters); }} />)}</div>
+      </details>}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-gray-800">订单管理</h1>
@@ -3167,7 +3190,7 @@ export function Orders() {
                   {addCopySourceSerial === null && !addRenewalSource && !addRental2TransferSource ? '下一步' : '确认并进入下一步'}
                 </Button>
               ) : (
-                <Button theme="primary" loading={saving} icon={<Check size={16} />} onClick={handleAddSave}>
+                <Button theme="primary" loading={saving} disabled={archivePlan.checking} icon={<Check size={16} />} onClick={handleAddSave}>
                   {addRenewalSource
                     ? '确认创建续租订单'
                     : addRental2TransferSource
@@ -3196,6 +3219,7 @@ export function Orders() {
         )}
         <AddOrderWizard
           step={addStep}
+          archivePlan={archivePlan}
           form={addForm}
           attachFiles={addAttachFiles}
           attachInputRef={addAttachInputRef}
@@ -3739,9 +3763,10 @@ function AfterSaleOrderForm({
 
 /** 新增订单 6 步向导 */
 function AddOrderWizard({
-  step, form, attachFiles, attachInputRef, onChange, onAttachFilesChange, dictionaries, productModelBrands, productModelLoading = false, productModelLoadError = '', mode = 'add', outboundDecision, onOutboundDecisionChange, autoOutbound, onAutoOutboundChange,
+  step, form, attachFiles, attachInputRef, onChange, onAttachFilesChange, dictionaries, productModelBrands, productModelLoading = false, productModelLoadError = '', mode = 'add', outboundDecision, onOutboundDecisionChange, autoOutbound, onAutoOutboundChange, archivePlan,
 }: {
   step: number;
+  archivePlan?: OrderCustomerArchivePlan;
   form: OrderFormData;
   attachFiles: File[];
   attachInputRef: React.RefObject<HTMLInputElement>;
@@ -4016,19 +4041,16 @@ function AddOrderWizard({
                 value={form.date} onChange={e => updateField('date', e.target.value)} />
             </div>
             <div className="order-basic-form-field">
-              <label className="block text-xs text-gray-500 mb-1">客户名称 <span className="text-red-500">*</span></label>
-              <Input placeholder="请输入客户名称"
-                value={form.customerName} onChange={val => onChange(prev => ({ ...prev, customerName: val as string, customerAliasId: '' }))} />
+              <CustomerNameField value={form} salesChannel={form.salesChannel} onChange={patch => onChange(prev => ({ ...prev,
+                ...(patch.customerName !== undefined && patch.customerName !== prev.customerName ? { createCustomerArchive: undefined } : {}), ...patch }))} />
+              {archivePlan && <OrderCustomerArchiveOption plan={archivePlan}
+                onChoice={createCustomerArchive => onChange(prev => ({ ...prev, createCustomerArchive }))}
+                onSelect={patch => onChange(prev => ({ ...prev, ...patch }))} />}
             </div>
             <div className="order-basic-form-field">
               <label className="block text-xs text-gray-500 mb-1">销售人员 <span className="text-red-500">*</span></label>
               <Select placeholder="请选择" value={form.salesperson || ''} onChange={val => updateField('salesperson', val as string)} options={SALESPERSON_OPTIONS} />
             </div>
-            <CustomerOrderLinkFields
-              value={form}
-              salesChannel={form.salesChannel}
-              onChange={patch => onChange(prev => ({ ...prev, ...patch }))}
-            />
           </div>
         </div>
       )}
@@ -4508,11 +4530,14 @@ function AddOrderWizard({
       {step === 6 && (
         <div>
           <h4 className="text-sm font-medium text-gray-600 mb-3">请确认以下信息无误后提交</h4>
+          {archivePlan && <div className="mb-3"><OrderCustomerArchiveOption plan={archivePlan}
+            onChoice={createCustomerArchive => onChange(prev => ({ ...prev, createCustomerArchive }))}
+            onSelect={patch => onChange(prev => ({ ...prev, ...patch }))} /></div>}
           <div className="bg-gray-50 rounded-lg p-4 space-y-2 text-sm max-h-[50vh] overflow-auto">
             <PreviewSection title="基础信息">
               <PreviewItem label="日期" value={form.date} />
               <PreviewItem label="客户名称" value={form.customerName} />
-              <PreviewItem label="客户主档案" value={form.customerId ? '已关联' : '未关联（待后续整理）'} />
+              <PreviewItem label="客户主档案" value={form.customerId ? '已关联' : archivePlan?.checked ? '保存订单时一并建立' : '未关联（待后续整理）'} />
               <PreviewItem label="销售人员" value={form.salesperson} />
             </PreviewSection>
             <PreviewSection title="订单属性">

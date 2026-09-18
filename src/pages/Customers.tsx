@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Button, Dialog, Input, MessagePlugin, Switch, Table, Tag, Textarea } from 'tdesign-react';
+import { Button, Dialog, Input, MessagePlugin, Pagination, Switch, Table, Tag, Textarea } from 'tdesign-react';
 import { Plus, RefreshCw, Search } from 'lucide-react';
 import type { CustomerAliasRecord, CustomerDetail, CustomerRecipientProfileRecord } from '../types';
 import { useCustomers, type CustomerListItem } from '../hooks/useCustomers';
+import { CustomerArchive } from '../components/CustomerArchive';
 import { usePermission } from '../contexts/PermissionContext';
 
 const EMPTY_CUSTOMER = { displayName: '', remark: '' };
@@ -11,10 +12,12 @@ const EMPTY_RECIPIENT = { label: '', consignee: '', phone: '', address: '' };
 
 export function Customers() {
   const customerStore = useCustomers();
+  const [activeTab, setActiveTab] = useState<'customers' | 'archive'>('customers');
   const { can } = usePermission();
   const canWrite = can('customers:write');
   const [keyword, setKeyword] = useState('');
   const [includeDisabled, setIncludeDisabled] = useState(false);
+  const [page, setPage] = useState(1);
   const [customerVisible, setCustomerVisible] = useState(false);
   const [editingCustomer, setEditingCustomer] = useState<CustomerListItem | null>(null);
   const [customerForm, setCustomerForm] = useState(EMPTY_CUSTOMER);
@@ -29,7 +32,7 @@ export function Customers() {
   const [recipientForm, setRecipientForm] = useState(EMPTY_RECIPIENT);
   const [saving, setSaving] = useState(false);
 
-  const load = useCallback(() => customerStore.loadCustomers({ keyword, includeDisabled }), [customerStore.loadCustomers, keyword, includeDisabled]);
+  const load = useCallback(() => customerStore.loadCustomers({ keyword, includeDisabled, page }), [customerStore.loadCustomers, keyword, includeDisabled, page]);
   useEffect(() => { load(); }, [load]);
 
   const openDetail = async (customerId: string) => {
@@ -143,7 +146,7 @@ export function Customers() {
         </div>
       ),
     },
-  ], [canWrite, detail?._id, keyword, includeDisabled]);
+  ], [canWrite, detail?._id, keyword, includeDisabled, page]);
 
   return (
     <div className="space-y-4">
@@ -152,19 +155,22 @@ export function Customers() {
           <h1 className="text-2xl font-semibold text-gray-800">客户管理</h1>
           <p className="mt-1 text-gray-500">统一维护租赁 1 / 租赁 2 客户、别名和多个收货档案</p>
         </div>
-        {canWrite && <Button theme="primary" icon={<Plus size={16} />} onClick={openCreate}>新增客户</Button>}
+        {canWrite && activeTab === 'customers' && <Button theme="primary" icon={<Plus size={16} />} onClick={openCreate}>新增客户</Button>}
       </div>
 
+      <div className="flex gap-2" role="tablist" aria-label="客户管理视图"><Button role="tab" aria-selected={activeTab === 'customers'} variant={activeTab === 'customers' ? 'base' : 'text'} onClick={() => setActiveTab('customers')}>客户列表</Button><Button role="tab" aria-selected={activeTab === 'archive'} variant={activeTab === 'archive' ? 'base' : 'text'} onClick={() => setActiveTab('archive')}>待归档</Button></div>
+      {activeTab === 'archive' && <CustomerArchive onChanged={load} />}
+      <div hidden={activeTab !== 'customers'}>
       <div className="glass-card p-4">
         <div className="mb-4 flex items-center gap-3">
-          <Input className="max-w-md" value={keyword} placeholder="搜索主名称、别名、收货人、电话或地址" prefixIcon={<Search size={16} />} onChange={value => setKeyword(value as string)} onEnter={load} />
+          <Input className="max-w-md" value={keyword} placeholder="搜索主名称、别名、收货人、电话或地址" prefixIcon={<Search size={16} />} onChange={value => { setKeyword(value as string); setPage(1); }} onEnter={load} />
           <Button variant="outline" icon={<Search size={16} />} onClick={load}>查询</Button>
-          <Button variant="text" icon={<RefreshCw size={16} />} onClick={() => { setKeyword(''); customerStore.loadCustomers({ keyword: '', includeDisabled }); }}>重置</Button>
-          <label className="ml-auto flex items-center gap-2 text-sm text-gray-500">显示停用 <Switch value={includeDisabled} onChange={value => setIncludeDisabled(!!value)} /></label>
+          <Button variant="text" icon={<RefreshCw size={16} />} onClick={() => { setKeyword(''); setPage(1); customerStore.loadCustomers({ keyword: '', includeDisabled, page: 1 }); }}>重置</Button>
+          <label className="ml-auto flex items-center gap-2 text-sm text-gray-500">显示停用 <Switch value={includeDisabled} onChange={value => { setIncludeDisabled(!!value); setPage(1); }} /></label>
         </div>
         {customerStore.loadError && <div className="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">{customerStore.loadError}</div>}
         <Table data={customerStore.customers} columns={columns} loading={customerStore.loading} rowKey="_id" tableLayout="fixed" hover stripe />
-        <div className="border-t border-gray-100 py-3 text-center text-sm text-gray-400">共 {customerStore.total} 个客户主档案</div>
+        <div className="border-t border-gray-100 py-3"><Pagination current={page} pageSize={20} total={customerStore.total} showPageSize={false} onCurrentChange={setPage} /></div>
       </div>
 
       <Dialog header={editingCustomer ? '编辑客户主档案' : '新增客户主档案'} visible={customerVisible} width="560px" onClose={() => setCustomerVisible(false)} footer={<div className="flex justify-end gap-2"><Button onClick={() => setCustomerVisible(false)}>取消</Button><Button theme="primary" loading={saving} onClick={saveCustomer}>保存</Button></div>}>
@@ -207,6 +213,7 @@ export function Customers() {
       <Dialog header={editingRecipient ? '编辑收货档案' : '添加收货档案'} visible={recipientVisible} width="600px" onClose={() => setRecipientVisible(false)} footer={<div className="flex justify-end gap-2"><Button onClick={() => setRecipientVisible(false)}>取消</Button><Button theme="primary" loading={saving} onClick={saveRecipient}>保存</Button></div>}>
         <div className="grid grid-cols-2 gap-3"><div><label className="mb-1 block text-sm text-gray-600">标签</label><Input placeholder="例如：本人 / 公司 / 家人" value={recipientForm.label} onChange={value => setRecipientForm(prev => ({ ...prev, label: value as string }))} /></div><div><label className="mb-1 block text-sm text-gray-600">收货人 <span className="text-red-500">*</span></label><Input value={recipientForm.consignee} onChange={value => setRecipientForm(prev => ({ ...prev, consignee: value as string }))} /></div><div><label className="mb-1 block text-sm text-gray-600">电话 <span className="text-red-500">*</span></label><Input value={recipientForm.phone} onChange={value => setRecipientForm(prev => ({ ...prev, phone: value as string }))} /></div><div className="col-span-2"><label className="mb-1 block text-sm text-gray-600">地址 <span className="text-red-500">*</span></label><Input value={recipientForm.address} onChange={value => setRecipientForm(prev => ({ ...prev, address: value as string }))} /></div></div>
       </Dialog>
+      </div>
     </div>
   );
 }
