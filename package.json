@@ -16,7 +16,7 @@
     "test:sf-data-model": "node --test cloud_functions/sfDataModel.test.cjs cloud_functions/manageSfShipment/index.test.cjs",
     "test:purchases": "node --test cloud_functions/managePurchases/index.test.cjs",
     "test:customers": "node scripts/sync-customer-order-modules.cjs --check && node --test cloud_functions/manageCustomers/*.test.cjs scripts/customerNormalizationBackfill.test.cjs scripts/useCustomers.test.cjs scripts/customerSchema.test.cjs scripts/customerWriteRequest.test.cjs scripts/customerArchive.test.cjs",
-    "test:invoices": "node --test cloud_functions/queryInvoices/index.test.cjs scripts/useInvoices.test.cjs",
+    "test:invoices": "node scripts/sync-invoice-modules.cjs --check && node --test scripts/invoiceModel.test.cjs scripts/invoiceOrders.test.cjs cloud_functions/queryInvoiceOrders/index.test.cjs cloud_functions/queryInvoices/index.test.cjs scripts/useInvoices.test.cjs scripts/invoiceExcel.test.cjs",
     "test:product-model-ids": "node --test cloud_functions/manageProductModels/*.test.cjs",
     "test:order-assist-catalog": "node --test cloud_functions/importOrderFromAssist/*.test.cjs",
     "test:sku-mapping-backfill": "node --test scripts/skuMappingBackfill.test.cjs",

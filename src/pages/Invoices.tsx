@@ -2,9 +2,12 @@ import { useEffect, useMemo, useState, useRef } from 'react';
 import { Table, Button, Input, Select, Tag, Dialog, MessagePlugin, Pagination } from 'tdesign-react';
 import { Search, RotateCcw, Plus, Eye, Download, Upload, X, ChevronRight, ChevronLeft, Check } from 'lucide-react';
 import { InvoiceRecord, InvoiceFilters, CompanyTemplate, InvoiceFile, InvoicePhoneProduct, dictToOptions, getDictLabel } from '../types';
+import InvoiceOrderFields, { InvoiceOrderSummary, type InvoiceConflict } from '../components/InvoiceOrderFields';
+import { validateLinkedInvoice } from '../utils/invoiceOrders';
 import { useInvoices } from '../hooks/useInvoices';
 import { callFunction, getCurrentOperatorName, uploadToCloudStorage, getCloudFileURLs } from '../lib/cloudbase';
 import { formatDate } from '../utils/format';
+import { exportInvoicesExcel, prepareInvoiceFilters } from '../utils/invoiceExcel';
 import { DICT_CODES, useDictionaries } from '../contexts/DictionaryContext';
 import { useTabDirty } from '../contexts/TabWorkspaceContext';
 
@@ -79,6 +82,7 @@ function syncPhoneProducts(form: InvoiceForm, products: InvoicePhoneProduct[]): 
 }
 
 function changeInvoiceCategory(form: InvoiceForm, category: string): InvoiceForm {
+  if (form.entryMode === 'linkedOrders') return { ...form, invoiceCategory: category };
   if (category === '二手手机') {
     const products = getInvoicePhoneProducts(form);
     return syncPhoneProducts(
@@ -138,10 +142,19 @@ export function Invoices() {
   const shopNameOptions = dictionaries.getOptions(DICT_CODES.shopName);
 
   const [filters, setFilters] = useState<InvoiceFilters>({});
+  const [exportVisible, setExportVisible] = useState(false);
+  const [exportStartDate, setExportStartDate] = useState('');
+  const [exportEndDate, setExportEndDate] = useState('');
+  const [exporting, setExporting] = useState(false);
+  const exportInProgressRef = useRef(false);
   const [detailVisible, setDetailVisible] = useState(false);
   const [currentRecord, setCurrentRecord] = useState<InvoiceRecord | null>(null);
   const [addVisible, setAddVisible] = useState(false);
   const [addForm, setAddForm] = useState<Omit<InvoiceRecord, '_id' | 'createTime'>>(EMPTY_INVOICE);
+  const [invoiceSession, setInvoiceSession] = useState(0);
+  const [addConflicts, setAddConflicts] = useState<InvoiceConflict[]>([]);
+  const [editConflicts, setEditConflicts] = useState<InvoiceConflict[]>([]);
+  const [relatedInvoice, setRelatedInvoice] = useState<InvoiceRecord | null>(null);
   const [addStep, setAddStep] = useState(1); // 1=选择店铺, 2=公司信息, 3=开票类目和金额, 4=上传附件
   const [editVisible, setEditVisible] = useState(false);
   const [editForm, setEditForm] = useState<Omit<InvoiceRecord, '_id' | 'createTime'>>(EMPTY_INVOICE);
@@ -262,10 +275,48 @@ export function Invoices() {
   };
 
   const handleSearch = () => {
-    const searchFilters: InvoiceFilters = { ...filters };
-    if (searchFilters.companyName) searchFilters.companyName = searchFilters.companyName.trim();
-    if (searchFilters.applicant) searchFilters.applicant = searchFilters.applicant.trim();
-    invoices.fetchRecords(1, searchFilters);
+    try {
+      void invoices.fetchRecords(1, prepareInvoiceFilters(filters));
+    } catch (err) {
+      MessagePlugin.warning(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleExportOpen = () => {
+    setExportStartDate('');
+    setExportEndDate('');
+    setExportVisible(true);
+  };
+
+  const handleExport = async () => {
+    if (exportInProgressRef.current) return;
+    if (!exportStartDate || !exportEndDate) {
+      MessagePlugin.warning('请选择导出的开始日期和结束日期');
+      return;
+    }
+    if (exportStartDate > exportEndDate) {
+      MessagePlugin.warning('开始日期不能晚于结束日期');
+      return;
+    }
+    exportInProgressRef.current = true;
+    setExporting(true);
+    try {
+      const count = await exportInvoicesExcel({
+        startDate: exportStartDate,
+        endDate: exportEndDate,
+      }, INVOICE_STATUS_MAP);
+      if (count === 0) {
+        MessagePlugin.warning('所选时间段内没有可导出的发票');
+      } else {
+        MessagePlugin.success(`已导出 ${count} 条发票`);
+        setExportVisible(false);
+      }
+    } catch (err) {
+      MessagePlugin.error(`导出失败：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      exportInProgressRef.current = false;
+      setExporting(false);
+    }
   };
 
   const handleReset = () => {
@@ -283,7 +334,9 @@ export function Invoices() {
     const today = new Date();
     const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
     const applicant = await getCurrentOperatorName();
-    const form = { ...EMPTY_INVOICE, applyDate: dateStr, applicant };
+    const form: InvoiceForm = { ...EMPTY_INVOICE, entryMode: 'linkedOrders', applyDate: dateStr, applicant };
+    setInvoiceSession(prev => prev + 1);
+    setAddConflicts([]);
     setAddForm(form);
     addInitialRef.current = JSON.stringify(form);
     setAddStep(1);
@@ -302,11 +355,13 @@ export function Invoices() {
       return;
     }
     if (addStep === 3) {
+      const linkedError = validateLinkedInvoice(addForm);
+      if (linkedError) { MessagePlugin.warning(linkedError); return; }
       if (!addForm.invoiceCategory) {
         MessagePlugin.warning('请选择开票类目');
         return;
       }
-      if (addForm.invoiceCategory === '二手手机') {
+      if (addForm.entryMode !== 'linkedOrders' && addForm.invoiceCategory === '二手手机') {
         const validationMessage = validatePhoneProducts(addForm);
         if (validationMessage) {
           MessagePlugin.warning(validationMessage);
@@ -327,20 +382,10 @@ export function Invoices() {
   };
 
   const handleAddSave = async () => {
+    const linkedError = validateLinkedInvoice(addForm);
+    if (linkedError) { MessagePlugin.warning(linkedError); setAddStep(3); return; }
     setSaving(true);
     try {
-      // 先上传附件到云存储
-      const attachments: InvoiceFile[] = [];
-      for (const file of addAttachFiles) {
-        const timestamp = Date.now();
-        const ext = file.name.split('.').pop() || 'bin';
-        const cloudPath = `invoices/attachments/${timestamp}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
-        const fileID = await uploadToCloudStorage(cloudPath, file);
-        attachments.push({ fileID, fileName: file.name });
-      }
-
-      const formToSave = { ...addForm, attachments };
-
       if (!companySelected) {
         const queryResult = await callFunction<{ success?: boolean; data: CompanyTemplate[] }>('queryCompanies', {
           data: { companyName: addForm.companyName.trim(), limit: 1 },
@@ -352,6 +397,18 @@ export function Invoices() {
           return;
         }
       }
+      // 先上传附件到云存储
+      const attachments: InvoiceFile[] = [...(addForm.attachments || [])];
+      for (const file of addAttachFiles) {
+        const timestamp = Date.now();
+        const ext = file.name.split('.').pop() || 'bin';
+        const cloudPath = `invoices/attachments/${timestamp}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
+        const fileID = await uploadToCloudStorage(cloudPath, file);
+        attachments.push({ fileID, fileName: file.name });
+      }
+
+      const formToSave = { ...addForm, attachments };
+
       await doSaveInvoice(formToSave);
     } catch (err) {
       MessagePlugin.error('新增异常: ' + String(err));
@@ -379,7 +436,7 @@ export function Invoices() {
       });
 
       // 上传附件
-      const attachments: InvoiceFile[] = [];
+      const attachments: InvoiceFile[] = [...(addForm.attachments || [])];
       for (const file of addAttachFiles) {
         const timestamp = Date.now();
         const ext = file.name.split('.').pop() || 'bin';
@@ -397,6 +454,7 @@ export function Invoices() {
 
   /** 实际保存发票 */
   const doSaveInvoice = async (formToSave?: Omit<InvoiceRecord, '_id' | 'createTime'>) => {
+    if (formToSave) { setAddForm(formToSave); setAddAttachFiles([]); }
     const result = await invoices.addInvoice(formToSave || addForm);
     if (result.success) {
       MessagePlugin.success('新增发票申请成功');
@@ -406,6 +464,8 @@ export function Invoices() {
       setAddAttachFiles([]);
       setCompanySelected(false);
     } else {
+      setAddConflicts(result.conflicts || []);
+      if (result.conflicts?.length) setAddStep(3);
       MessagePlugin.error('新增失败: ' + (result.errMsg || '未知错误'));
     }
     setSaving(false);
@@ -427,6 +487,10 @@ export function Invoices() {
       bankCode: record.bankCode,
       invoiceCategory: record.invoiceCategory,
       invoiceAmount: record.invoiceAmount,
+      entryMode: record.entryMode || 'manual',
+      linkedOrders: record.linkedOrders || [],
+      linkedOrderTotal: record.linkedOrderTotal,
+      amountAdjustmentReason: record.amountAdjustmentReason || '',
       phoneProducts: getInvoicePhoneProducts(record),
       phoneModel: record.phoneModel || '',
       phoneQuantity: record.phoneQuantity || 0,
@@ -435,6 +499,8 @@ export function Invoices() {
       attachments: record.attachments,
       completedTime: record.completedTime,
     };
+    setInvoiceSession(prev => prev + 1);
+    setEditConflicts([]);
     setEditId(record._id);
     setEditExistingAttachments(record.attachments || []);
     setEditAttachFiles([]);
@@ -444,11 +510,14 @@ export function Invoices() {
   };
 
   const handleEditSave = async () => {
+    const linkedError = validateLinkedInvoice(editForm);
+    if (linkedError) { MessagePlugin.warning(linkedError); return; }
+    if (!editForm.invoiceCategory) { MessagePlugin.warning('请选择开票类目'); return; }
     if (!editForm.companyName.trim()) {
       MessagePlugin.warning('请填写单位名称');
       return;
     }
-    if (editForm.invoiceCategory === '二手手机') {
+    if (editForm.entryMode !== 'linkedOrders' && editForm.invoiceCategory === '二手手机') {
       const validationMessage = validatePhoneProducts(editForm);
       if (validationMessage) {
         MessagePlugin.warning(validationMessage);
@@ -471,12 +540,18 @@ export function Invoices() {
         newAttachments.push({ fileID, fileName: file.name });
       }
       const allAttachments = [...editExistingAttachments, ...newAttachments];
-      const success = await invoices.updateInvoice(editId, { ...editForm, attachments: allAttachments });
+      setEditExistingAttachments(allAttachments);
+      setEditAttachFiles([]);
+      const original = JSON.parse(editInitialRef.current).form as InvoiceForm;
+      const edited = { ...editForm, attachments: allAttachments };
+      const changes = Object.fromEntries(Object.entries(edited).filter(([key, value]) => JSON.stringify(value) !== JSON.stringify(original[key as keyof InvoiceForm]))) as Partial<InvoiceRecord>;
+      const success = await invoices.updateInvoice(editId, changes, result => {
+        setEditConflicts(result.conflicts || []);
+        MessagePlugin.error(result.errMsg || '修改失败');
+      });
       if (success) {
         MessagePlugin.success('修改发票成功');
         setEditVisible(false);
-      } else {
-        MessagePlugin.error('修改失败');
       }
     } catch (err) {
       MessagePlugin.error('修改异常: ' + String(err));
@@ -624,6 +699,7 @@ export function Invoices() {
       width: 100,
       cell: ({ row }: { row: InvoiceRecord }) => row.invoiceAmount ? `¥${row.invoiceAmount}` : '-',
     },
+    { colKey: 'linkedOrders', title: '关联订单', width: 110, cell: ({ row }: { row: InvoiceRecord }) => row.entryMode === 'linkedOrders' ? `${row.linkedOrders?.length || 0} 张订单` : '手工填写' },
     { colKey: 'applicant', title: '开票申请人', width: 90 },
     {
       colKey: 'status', title: '开票状态', width: 90,
@@ -666,14 +742,17 @@ export function Invoices() {
 
   return (
     <div className="min-w-0 space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold text-gray-800">发票管理</h1>
           <p className="text-gray-500 mt-1">管理开票申请</p>
         </div>
-        <Button theme="primary" icon={<Plus size={16} />} onClick={handleAddOpen}>
-          新增发票申请
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" icon={<Download size={16} />} onClick={handleExportOpen}>导出 Excel</Button>
+          <Button theme="primary" icon={<Plus size={16} />} onClick={handleAddOpen}>
+            新增发票申请
+          </Button>
+        </div>
       </div>
 
       {/* 筛选栏 */}
@@ -696,11 +775,26 @@ export function Invoices() {
               options={[{ label: '全部', value: '' }, ...invoiceStatusOptions]}
               popupProps={{ attach: 'body' }} />
           </div>
+          <div className="w-full sm:w-auto">
+            <label className="block text-xs text-gray-500 mb-1">申请日期</label>
+            <div className="flex items-center gap-2">
+              <input type="date" aria-label="申请开始日期" title="申请开始日期"
+                className="h-8 min-w-0 flex-1 rounded border border-gray-300 px-2 text-sm focus:border-blue-500 focus:outline-none"
+                value={filters.startDate || ''} max={filters.endDate || undefined}
+                onChange={e => setFilters(prev => ({ ...prev, startDate: e.target.value }))} />
+              <span className="text-xs text-gray-400">至</span>
+              <input type="date" aria-label="申请结束日期" title="申请结束日期"
+                className="h-8 min-w-0 flex-1 rounded border border-gray-300 px-2 text-sm focus:border-blue-500 focus:outline-none"
+                value={filters.endDate || ''} min={filters.startDate || undefined}
+                onChange={e => setFilters(prev => ({ ...prev, endDate: e.target.value }))} />
+            </div>
+          </div>
           <div className="flex items-end gap-2">
             <Button theme="primary" icon={<Search size={16} />} onClick={handleSearch}>查询</Button>
             <Button variant="outline" icon={<RotateCcw size={16} />} onClick={handleReset}>重置</Button>
           </div>
         </div>
+        <p className="mt-3 text-xs text-gray-400">按申请日期筛选，包含开始和结束当天；日期留空表示不限。</p>
       </div>
 
       {/* 表格 */}
@@ -736,6 +830,41 @@ export function Invoices() {
         </div>
       </div>
 
+      {/* 导出独立选择日期，不读取或修改列表查询条件。 */}
+      <Dialog header="导出发票" visible={exportVisible} width="520px"
+        onClose={() => { if (!exportInProgressRef.current) setExportVisible(false); }}
+        closeOnOverlayClick={!exporting} closeOnEscKeydown={!exporting}
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button disabled={exporting} onClick={() => setExportVisible(false)}>取消</Button>
+            <Button theme="primary" icon={<Download size={16} />} loading={exporting} onClick={handleExport}>导出 Excel</Button>
+          </div>
+        }>
+        <div className="space-y-4">
+          <p className="text-sm text-gray-500">请选择申请日期范围，将导出该时间段内的全部发票，包含开始和结束当天。</p>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div>
+              <label htmlFor="invoice-export-start" className="mb-1 block text-xs text-gray-500">开始日期 <span className="text-red-500">*</span></label>
+              <input id="invoice-export-start" type="date" required disabled={exporting}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+                value={exportStartDate} max={exportEndDate || undefined}
+                onChange={e => setExportStartDate(e.target.value)} />
+            </div>
+            <div>
+              <label htmlFor="invoice-export-end" className="mb-1 block text-xs text-gray-500">结束日期 <span className="text-red-500">*</span></label>
+              <input id="invoice-export-end" type="date" required disabled={exporting}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+                value={exportEndDate} min={exportStartDate || undefined}
+                onChange={e => setExportEndDate(e.target.value)} />
+            </div>
+          </div>
+          <div className="rounded-lg bg-gray-50 p-3 text-xs leading-6 text-gray-500">
+            <p>文件格式：Excel（.xlsx）</p>
+            <p>导出字段：申请日期、公司名称、店铺名字、开票金额、开票申请人、开票状态</p>
+          </div>
+        </div>
+      </Dialog>
+
       {/* 详情弹窗 */}
       <Dialog header="发票详情" visible={detailVisible} onClose={() => setDetailVisible(false)} width="600px"
         footer={<Button onClick={() => setDetailVisible(false)}>关闭</Button>}>
@@ -757,7 +886,7 @@ export function Invoices() {
             <DetailRow label="账号" value={currentRecord.bankAccount} />
             <DetailRow label="开户行行号" value={currentRecord.bankCode} />
             <DetailRow label="开票类目" value={currentRecord.invoiceCategory} />
-            {currentRecord.invoiceCategory === '二手手机' && (
+            {currentRecord.entryMode !== 'linkedOrders' && currentRecord.invoiceCategory === '二手手机' && (
               <DetailRow label="手机货品" value={
                 <div className="space-y-2 w-full">
                   {getInvoicePhoneProducts(currentRecord).map((item, index) => (
@@ -772,6 +901,7 @@ export function Invoices() {
                 </div>
               } />
             )}
+            <InvoiceOrderSummary form={currentRecord} renderAttachments={files => <InvoiceAttachmentPreview files={files} />} />
             <DetailRow label="开票金额" value={currentRecord.invoiceAmount ? `¥${currentRecord.invoiceAmount}` : '-'} />
             {currentRecord.attachments && currentRecord.attachments.length > 0 && (
               <div className="py-2 border-b border-gray-50">
@@ -826,8 +956,8 @@ export function Invoices() {
             {[
               { step: 1, label: '选择店铺' },
               { step: 2, label: '公司信息' },
-              { step: 3, label: '开票类目' },
-              { step: 4, label: '上传附件' },
+              { step: 3, label: '订单与金额' },
+              { step: 4, label: '附件与确认' },
             ].map((item, idx) => (
               <div key={item.step} className="flex items-center">
                 <div className="flex flex-col items-center">
@@ -930,7 +1060,7 @@ export function Invoices() {
           )}
 
           {/* 步骤3: 开票类目和金额 */}
-          {addStep === 3 && (
+          <div hidden={addStep !== 3}>
             <div className="py-4">
               <h4 className="text-sm font-medium text-gray-600 mb-4">开票类目和金额</h4>
               <div className="grid grid-cols-2 gap-3">
@@ -943,8 +1073,9 @@ export function Invoices() {
                     size="large" />
                 </div>
 
+                <InvoiceOrderFields key={invoiceSession} form={addForm} onChange={setAddForm} conflicts={addConflicts} renderAttachments={files => <InvoiceAttachmentPreview files={files} />} onViewInvoice={setRelatedInvoice} />
                 {/* 二手手机 - 动态字段 */}
-                {addForm.invoiceCategory === '二手手机' && (
+                {addForm.entryMode !== 'linkedOrders' && addForm.invoiceCategory === '二手手机' && (
                   <div className="col-span-2">
                     <PhoneProductEditor
                       products={getInvoicePhoneProducts(addForm)}
@@ -954,7 +1085,7 @@ export function Invoices() {
                 )}
 
                 {/* 租赁服务费 - 手动输入金额 */}
-                {addForm.invoiceCategory === '租赁服务费' && (
+                {addForm.entryMode !== 'linkedOrders' && addForm.invoiceCategory === '租赁服务费' && (
                   <div>
                     <label className="block text-xs text-gray-500 mb-1">开票金额 <span className="text-red-500">*</span></label>
                     <Input type="number" placeholder="请输入开票金额" value={addForm.invoiceAmount ? String(addForm.invoiceAmount) : ''}
@@ -970,7 +1101,7 @@ export function Invoices() {
                   <div><span className="text-gray-400">单位：</span><span className="text-gray-700">{addForm.companyName || '-'}</span></div>
                   <div><span className="text-gray-400">申请人：</span><span className="text-gray-700">{addForm.applicant || '-'}</span></div>
                   <div><span className="text-gray-400">类目：</span><span className="text-gray-700">{addForm.invoiceCategory || '-'}</span></div>
-                  {addForm.invoiceCategory === '二手手机' && (
+                  {addForm.entryMode !== 'linkedOrders' && addForm.invoiceCategory === '二手手机' && (
                     <>
                       <div><span className="text-gray-400">货品：</span><span className="text-gray-700">{getInvoicePhoneProducts(addForm).length} 项</span></div>
                       <div><span className="text-gray-400">总数量：</span><span className="text-gray-700">{addForm.phoneQuantity || 0} 台</span></div>
@@ -980,12 +1111,14 @@ export function Invoices() {
                 </div>
               </div>
             </div>
-          )}
+          </div>
 
           {/* 步骤4: 上传附件 */}
           {addStep === 4 && (
             <div className="py-4">
-              <h4 className="text-sm font-medium text-gray-600 mb-4">上传开票附件（可选）</h4>
+              <InvoiceOrderSummary form={addForm} renderAttachments={files => <InvoiceAttachmentPreview files={files} />} />
+              <h4 className="text-sm font-medium text-gray-600 my-4">补充开票附件（可选）</h4>
+              {!!addForm.attachments?.length && <div className="space-y-2 mb-3"><InvoiceAttachmentPreview files={addForm.attachments} />{addForm.attachments.map((file, index) => <div key={`${file.fileID}-${index}`} className="flex items-center justify-between text-xs"><span>{file.fileName}</span><Button size="small" variant="text" theme="danger" onClick={() => setAddForm(prev => ({ ...prev, attachments: prev.attachments?.filter((_, i) => i !== index) }))}>移除附件</Button></div>)}</div>}
               <div>
                 <input
                   ref={addAttachInputRef}
@@ -1035,7 +1168,7 @@ export function Invoices() {
                   <div><span className="text-gray-400">单位：</span><span className="text-gray-700">{addForm.companyName || '-'}</span></div>
                   <div><span className="text-gray-400">申请人：</span><span className="text-gray-700">{addForm.applicant || '-'}</span></div>
                   <div><span className="text-gray-400">类目：</span><span className="text-gray-700">{addForm.invoiceCategory || '-'}</span></div>
-                  {addForm.invoiceCategory === '二手手机' && (
+                  {addForm.entryMode !== 'linkedOrders' && addForm.invoiceCategory === '二手手机' && (
                     <div><span className="text-gray-400">手机货品：</span><span className="text-gray-700">{getInvoicePhoneProducts(addForm).length} 项 / {addForm.phoneQuantity || 0} 台</span></div>
                   )}
                   <div><span className="text-gray-400">金额：</span><span className="text-gray-700 font-medium">¥{addForm.invoiceAmount || 0}</span></div>
@@ -1061,8 +1194,12 @@ export function Invoices() {
         }
       >
         <InvoiceFormFields
+          key={`${editId}-${invoiceSession}`}
           form={editForm}
           onChange={setEditForm}
+          invoiceId={editId}
+          conflicts={editConflicts}
+          onViewInvoice={setRelatedInvoice}
           isEdit
           editExistingAttachments={editExistingAttachments}
           onRemoveExistingAttachment={(index) => setEditExistingAttachments(prev => prev.filter((_, i) => i !== index))}
@@ -1075,6 +1212,9 @@ export function Invoices() {
         />
       </Dialog>
 
+      <Dialog header="关联发票详情" visible={!!relatedInvoice} onClose={() => setRelatedInvoice(null)} width="680px" footer={null}>
+        {relatedInvoice && <div className="space-y-3"><DetailRow label="公司名称" value={relatedInvoice.companyName} /><DetailRow label="申请日期" value={relatedInvoice.applyDate} /><DetailRow label="开票类目" value={relatedInvoice.invoiceCategory} /><DetailRow label="开票状态" value={getDictLabel(INVOICE_STATUS_MAP, relatedInvoice.status)} /><DetailRow label="开票金额" value={`¥${relatedInvoice.invoiceAmount}`} /><InvoiceOrderSummary form={relatedInvoice} renderAttachments={files => <InvoiceAttachmentPreview files={files} />} /></div>}
+      </Dialog>
       {/* 删除确认弹窗 */}
       <Dialog
         header="确认删除"
@@ -1305,10 +1445,13 @@ function PhoneProductEditor({ products, onChange }: {
 }
 
 /** 发票表单字段（新增/编辑共用） */
-function InvoiceFormFields({ form, onChange, isEdit = false, onCompanyNameChange, companySuggestions, showSuggestions, onSelectCompany, suggestionsRef, editExistingAttachments, onRemoveExistingAttachment, editAttachFiles, onEditAttachFilesChange, editAttachInputRef, invoiceCategoryOptions, shopNameOptions, invoiceStatusOptions }: {
+function InvoiceFormFields({ form, onChange, invoiceId, conflicts, onViewInvoice, isEdit = false, onCompanyNameChange, companySuggestions, showSuggestions, onSelectCompany, suggestionsRef, editExistingAttachments, onRemoveExistingAttachment, editAttachFiles, onEditAttachFilesChange, editAttachInputRef, invoiceCategoryOptions, shopNameOptions, invoiceStatusOptions }: {
   form: Omit<InvoiceRecord, '_id' | 'createTime'>;
   onChange: React.Dispatch<React.SetStateAction<Omit<InvoiceRecord, '_id' | 'createTime'>>>;
   isEdit?: boolean;
+  invoiceId?: string;
+  conflicts?: InvoiceConflict[];
+  onViewInvoice: (record: InvoiceRecord) => void;
   onCompanyNameChange?: (val: string) => void;
   companySuggestions?: CompanyTemplate[];
   showSuggestions?: boolean;
@@ -1411,8 +1554,9 @@ function InvoiceFormFields({ form, onChange, isEdit = false, onCompanyNameChange
               popupProps={{ attach: 'body' }} />
           </div>
 
+          <InvoiceOrderFields form={form} onChange={onChange} invoiceId={invoiceId} conflicts={conflicts} renderAttachments={files => <InvoiceAttachmentPreview files={files} />} onViewInvoice={onViewInvoice} />
           {/* 二手手机 - 动态字段 */}
-          {form.invoiceCategory === '二手手机' && (
+          {form.entryMode !== 'linkedOrders' && form.invoiceCategory === '二手手机' && (
             <div className="col-span-2">
               <PhoneProductEditor
                 products={getInvoicePhoneProducts(form)}
@@ -1422,7 +1566,7 @@ function InvoiceFormFields({ form, onChange, isEdit = false, onCompanyNameChange
           )}
 
           {/* 租赁服务费 - 手动输入金额 */}
-          {form.invoiceCategory === '租赁服务费' && (
+          {form.entryMode !== 'linkedOrders' && form.invoiceCategory === '租赁服务费' && (
             <div>
               <label className="block text-xs text-gray-500 mb-1">开票金额</label>
               <Input type="number" placeholder="开票金额" value={form.invoiceAmount ? String(form.invoiceAmount) : ''}
@@ -1431,7 +1575,7 @@ function InvoiceFormFields({ form, onChange, isEdit = false, onCompanyNameChange
           )}
 
           {/* 未选择类目 - 显示金额输入 */}
-          {!form.invoiceCategory && (
+          {form.entryMode !== 'linkedOrders' && !form.invoiceCategory && (
             <div>
               <label className="block text-xs text-gray-500 mb-1">开票金额</label>
               <Input type="number" placeholder="开票金额" value={form.invoiceAmount ? String(form.invoiceAmount) : ''}

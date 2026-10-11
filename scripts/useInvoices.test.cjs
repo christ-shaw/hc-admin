@@ -220,3 +220,14 @@ test('开票状态变化后按原筛选刷新并修正总数，新增回第一�
   assert.equal(hook.current.totalRecords, 21);
   assert.equal(hook.current.records[0]._id, 'new');
 });
+
+test('编辑订单占用冲突返回明确错误与订单定位，保留原列表且不刷新', async () => {
+  const hook = renderInvoices(async name => name === 'updateInvoice'
+    ? { success: false, errMsg: '订单已被占用', conflicts: [{ orderId: 'a', invoiceId: 'other' }] }
+    : { success: true, data: [], total: 0, page: 1, pageSize: 20 });
+  let failure;
+  assert.equal(await hook.current.updateInvoice('invoice', { linkedOrders: [] }, result => { failure = result; }), false);
+  assert.equal(failure.errMsg, '订单已被占用');
+  assert.equal(failure.conflicts[0].orderId, 'a');
+  assert.equal(hook.calls.length, 1);
+});

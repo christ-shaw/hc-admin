@@ -1,0 +1,9 @@
+{
+  "name": "queryInvoiceOrders",
+  "version": "1.0.0",
+  "description": "查询可关联订单和发票详情",
+  "main": "index.js",
+  "dependencies": {
+    "wx-server-sdk": "~2.6.3"
+  }
+}

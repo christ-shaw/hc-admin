@@ -693,6 +693,33 @@ export interface InvoicePhoneProduct {
   amount: number;                 // 小计（数量 × 单价）
 }
 
+/** 开票录入方式；历史记录缺失时按 manual（手工填写）处理。 */
+export type InvoiceEntryMode = 'manual' | 'linkedOrders';
+
+/** 关联时的订单快照；来源订单后续修改不改变历史开票依据。 */
+export interface InvoiceLinkedOrder {
+  orderId: string;                // orders._id，不使用网店订单号作为唯一标识
+  serialNumber: number;          // 订单序号
+  onlineOrderNumber?: string;     // 网店订单号
+  customerName: string;
+  salesChannel?: string;         // 关联时销售渠道；旧快照缺失时查询来源订单
+  orderDate: string;              // 来源订单日期
+  productSummary: string;         // 关联时的货品摘要
+  amount: number;                 // 关联时订单总金额（元，两位小数），不可逐单调整
+  attachments: OrderAttachment[]; // 订单附件引用快照，与本次开票附件分开保存
+}
+
+/**
+ * 订单唯一关联记录，存储于 invoiceOrderLinks 集合。
+ * _id 直接使用 orders._id，确保一个订单只有一份关联记录。
+ * 新增、编辑、删除接口在事务中同步维护发票与关联记录。
+ */
+export interface InvoiceOrderLink {
+  _id: string;                    // orders._id
+  invoiceId: string;              // invoices._id，未开票申请也占用关联
+  createTime?: { $date: string };
+}
+
 /** 发票记录 */
 export interface InvoiceRecord {
   _id: string;
@@ -708,7 +735,11 @@ export interface InvoiceRecord {
   bankAccount: string;            // 账号
   bankCode: string;               // 开户行行号
   invoiceCategory: string;        // 开票类目
-  invoiceAmount: number;          // 开票金额
+  invoiceAmount: number;          // 最终开票金额；关联模式允许与订单合计不同
+  entryMode?: InvoiceEntryMode;   // 缺失时按手工填写处理，兼容历史记录
+  linkedOrders?: InvoiceLinkedOrder[]; // 缺失时视为无关联订单；手工模式不保存关联
+  linkedOrderTotal?: number;      // 关联订单快照金额合计（元），缺失时不推断历史金额
+  amountAdjustmentReason?: string; // 关联模式最终金额与合计不同的调整原因
   phoneProducts?: InvoicePhoneProduct[]; // 手机货品明细（二手手机类目，支持多条）
   phoneModel?: string;            // 手机型号（二手手机类目）
   phoneQuantity?: number;         // 手机数量（二手手机类目）

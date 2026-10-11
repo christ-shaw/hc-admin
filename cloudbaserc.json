@@ -250,6 +250,12 @@
       "runtime": "Nodejs18.15"
     },
     {
+      "name": "queryInvoiceOrders",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15",
+      "timeout": 30
+    },
+    {
       "name": "saveInvoice",
       "handler": "index.main",
       "runtime": "Nodejs18.15"

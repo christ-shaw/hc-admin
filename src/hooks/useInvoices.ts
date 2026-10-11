@@ -12,9 +12,10 @@ interface QueryResult {
   errMsg?: string;
 }
 
-interface SaveResult {
+export interface SaveResult {
   success: boolean;
   errMsg?: string;
+  conflicts?: { orderId: string; invoiceId: string }[];
 }
 
 interface InvoiceState {
@@ -98,14 +99,15 @@ export function useInvoices() {
   }, [fetchRecords]);
 
   /** 更新后重新查询，保持排序、筛选结果和总数一致。 */
-  const updateInvoice = useCallback(async (_id: string, updateData: Partial<InvoiceRecord>): Promise<boolean> => {
+  const updateInvoice = useCallback(async (_id: string, updateData: Partial<InvoiceRecord>, onFailure?: (result: SaveResult) => void): Promise<boolean> => {
     try {
       const result = await callFunction<SaveResult>('updateInvoice', { data: { _id, updateData } });
-      if (!result.success) return false;
+      if (!result.success) { onFailure?.(result); return false; }
       await fetchRecords(stateRef.current.currentPage);
       return true;
     } catch (err) {
       console.error('更新发票失败:', err);
+      onFailure?.({ success: false, errMsg: String(err) });
       return false;
     }
   }, [fetchRecords]);
