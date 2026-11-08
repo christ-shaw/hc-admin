@@ -23,6 +23,7 @@ const USER_ROLE_COLLECTION = 'user_roles';
 
 const { createRepository } = require('./repository');
 const { conditionalMatch } = require('./versionedMatcher');
+const { rememberArchiveCheck } = require('./orderArchiveCheck');
 const { createWriter, WRITE_ACTIONS } = require('./writer');
 const { CustomerError } = require('./errors');
 const { aliasData, recipientData } = require('./records');
@@ -183,7 +184,12 @@ exports.main = async event => {
     if (action === 'search' && payload.scope === 'orderSuggestions') return await suggestCustomers(payload);
     if (action === 'list' || action === 'search') return await listCustomers(payload, action === 'search');
     if (action === 'get') return await (payload.scope === 'orderSelection' ? getOrderSelection(payload) : getCustomer(payload));
-    if (action === 'matchIdentity') return { success: true, data: await conditionalMatch(repository, payload) };
+    if (action === 'matchIdentity') {
+      const forOrder = payload.scope === 'orderArchive';
+      const result = await conditionalMatch(repository, forOrder ? { identity: payload.identity } : payload);
+      return { success: true, data: forOrder
+        ? await rememberArchiveCheck(repository, payload.identity || {}, result, auth.currentUser) : result };
+    }
     if (action === 'createFromOrder') return { success: true, data: await archiveOrder(payload.orderId, auth.currentUser) };
     if (action === 'scanUnlinkedOrders') return await scanUnlinkedOrders({ ...payload, scanMode: 'all' }, auth.currentUser);
     if (action === 'scanNewOrders') return await scanUnlinkedOrders({ ...payload, scanMode: 'new', dryRun: false }, auth.currentUser);

@@ -110,6 +110,11 @@ function trimString(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+// 用户输入按普通文本做包含匹配，避免括号等字符被当作正则语法。
+function escapeSearchKeyword(value) {
+  return trimString(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function isPendingStatus(record) {
   return record.outboundStatus === 'pending';
 }
@@ -207,19 +212,29 @@ exports.main = async (event, context) => {
 
     // 构建查询条件对象（使用 AND 逻辑）
     const conditions = {};
+    let nameCondition = null;
 
     // 根据客户姓名筛选 (模糊查询)
-    if (customerName && customerName.trim() !== '') {
-      conditions.customerName = db.RegExp({
-        regexp: customerName,
+    if (trimString(customerName)) {
+      const nameRegexp = db.RegExp({
+        regexp: escapeSearchKeyword(customerName),
         options: 'i'
       });
+      if (type === 'outbound') {
+        // 出库列表展示收件人；兼容历史记录仅有 customerName 的情况。
+        nameCondition = _.or([
+          { consignee: nameRegexp },
+          { customerName: nameRegexp },
+        ]);
+      } else {
+        conditions.customerName = nameRegexp;
+      }
     }
 
     // 根据物流单号筛选 (模糊查询)
-    if (trackingNumber && trackingNumber.trim() !== '') {
+    if (trimString(trackingNumber)) {
       conditions.trackingNumber = db.RegExp({
-        regexp: trackingNumber,
+        regexp: escapeSearchKeyword(trackingNumber),
         options: 'i'
       });
     }
@@ -272,8 +287,12 @@ exports.main = async (event, context) => {
 
 
     // 应用所有过滤条件（AND 逻辑）
-    if (Object.keys(conditions).length > 0) {
-      query = query.where(conditions);
+    const hasConditions = Object.keys(conditions).length > 0;
+    if (hasConditions || nameCondition) {
+      const finalCondition = nameCondition && hasConditions
+        ? _.and([conditions, nameCondition])
+        : (nameCondition || conditions);
+      query = query.where(finalCondition);
     }
 
     // 按创建时间倒序查询

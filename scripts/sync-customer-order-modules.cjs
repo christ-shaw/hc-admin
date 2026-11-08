@@ -6,7 +6,7 @@ let changed = false;
 for (const name of ['saveOrders', 'updateOrder', 'importOrderFromAssist', 'manageAfterSaleOrders']) {
   const directory = path.join(root, name, 'customer');
   if (!process.argv.includes('--check')) fs.mkdirSync(directory, { recursive: true });
-  for (const file of [...files, ...(name === 'saveOrders' ? ['orderArchive.js', 'records.js'] : [])]) {
+  for (const file of [...files, ...(name === 'saveOrders' ? ['orderArchive.js', 'orderArchiveCheck.js', 'records.js'] : [])]) {
     const source = fs.readFileSync(path.join(root, 'manageCustomers', file), 'utf8');
     const target = path.join(directory, file);
     if (!fs.existsSync(target) || fs.readFileSync(target, 'utf8') !== source) {

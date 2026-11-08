@@ -373,6 +373,9 @@ async function resolveLinkedState(store, record) {
 }
 
 function ensureAllOutboundsCompleted(linkedState) {
+  if (linkedState.orders.some(order => order.needsOutbound !== false && !trimString(order.outboundRecordId))) {
+    throw new Error('请先为全部关联订单生成出库单并完成拍照出库');
+  }
   if (linkedState.outboundIds.length === 0) throw new Error('包裹尚未关联出库单');
   if (linkedState.outbounds.length !== linkedState.outboundIds.length) {
     throw new Error('部分关联出库单不存在，请先核对');
@@ -511,6 +514,103 @@ async function setReuseEnabled(sfExpressOrderId, env, actorId, enabled) {
       shipmentVersion: nextVersion,
       reuseEnabled: enabled,
     };
+  } catch (error) {
+    try { await transaction.rollback(); } catch (_) { /* ignore */ }
+    throw error;
+  }
+}
+
+function validatePrintedShipment(record, env) {
+  validateReuseToggle(record, env);
+  if (!(Number(record.printCount) > 0 || trimString(record.lastPrintTime))) throw new Error('仅已打印的顺丰面单可以追加订单');
+}
+
+async function getAppendableOutbound(store, order, env) {
+  if (order && order.outboundRecordId) return getReusableOutbound(store, order, env);
+  if (!order || trimString(order.trackingNumber) || order.needsOutbound === false
+    || !PENDING_ORDER_STATUSES.has(trimString(order.status))) throw new Error('仅未发货且没有运单的订单可以追加');
+  if (order.sfExpressOrderRecordId) {
+    const previous = await getDoc(store, SF_ORDERS_COLLECTION, order.sfExpressOrderRecordId);
+    if (!previous || previous.status !== 'cancelled' || previous.isCurrent !== true
+      || normalizeSfEnv(previous.env) !== env || previous.sourceOrderId !== order._id) throw new Error('订单仍关联其他顺丰记录');
+  }
+  return null;
+}
+
+async function listAppendOrders(payload, env) {
+  const record = await getDoc(db, SF_ORDERS_COLLECTION, trimString(payload.sfExpressOrderId));
+  validatePrintedShipment(record, env);
+  const date = trimString(payload.date);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('请选择订单日期');
+  const condition = { date };
+  const keyword = trimString(payload.onlineOrderNumber);
+  if (keyword) condition.onlineOrderNumber = keyword;
+  const result = await db.collection(ORDERS_COLLECTION).where(condition).limit(100).get();
+  const data = [];
+  for (const order of result.data || []) {
+    try {
+      const target = await getOrderWithShipping(db, order._id);
+      if (!['prepaid', 'cod'].includes(normalizeShippingFee(target.shippingFee))) continue;
+      await getAppendableOutbound(db, target, env);
+      data.push(target);
+    } catch (_) { /* Ineligible orders are never offered for selection. */ }
+  }
+  return { success: true, data, truncated: (result.data || []).length === 100 };
+}
+
+async function appendOrders(payload, env, actorId) {
+  const ids = uniqueStrings(payload.sourceOrderIds);
+  if (!ids.length || ids.length > 20 || !trimString(payload.requestId)
+    || payload.confirmShipmentRecipient !== true) throw new Error('请选择 1 至 20 条订单并确认使用原面单收件信息');
+  const transaction = await db.startTransaction();
+  try {
+    const record = await getDoc(transaction, SF_ORDERS_COLLECTION, trimString(payload.sfExpressOrderId));
+    validatePrintedShipment(record, env);
+    if (record.lastLinkRequestId === payload.requestId) {
+      await transaction.rollback();
+      return { success: true, duplicated: true, waybillNo: record.waybillNo };
+    }
+    if (Number(payload.shipmentVersion) !== Number(record.shipmentVersion || 1)) throw new Error('包裹状态已变化，请刷新后重试');
+    const state = await resolveLinkedState(transaction, record);
+    const added = [];
+    for (const id of ids) {
+      if (state.orderIds.includes(id)) throw new Error('所选订单已在此包裹中，请刷新');
+      const order = await getOrderWithShipping(transaction, id);
+      if (!order || !['prepaid', 'cod'].includes(normalizeShippingFee(order.shippingFee))) throw new Error('仅顺丰待发货订单可以追加');
+      const outbound = await getAppendableOutbound(transaction, order, env);
+      const relatedIds = uniqueStrings([...(outbound && outbound.orderIds || []), outbound && outbound.orderId]);
+      if (relatedIds.some(other => !ids.includes(other) && !state.orderIds.includes(other))) throw new Error('请同时追加合并出库单的全部订单');
+      added.push(order);
+    }
+    const now = new Date().toISOString();
+    const linkedOrderIds = uniqueStrings([...state.orderIds, ...ids]);
+    const linkedOutboundIds = uniqueStrings([...state.outboundIds, ...added.map(order => order.outboundRecordId)]);
+    const remarks = buildShipmentRemarkData(record, {
+      ensureEntries: buildMissingRemarkEntries([...state.orders, ...added], record.sourceOrderId, now),
+    });
+    for (const id of linkedOrderIds) {
+      await transaction.collection(ORDERS_COLLECTION).doc(id).update({ data: {
+        ...(ids.includes(id) ? { trackingNumber: record.waybillNo, expressProvider: 'sf', sfExpressOrderRecordId: record._id } : {}),
+        sharedWaybill: true, updateTime: db.serverDate(),
+      } });
+    }
+    for (const order of added) {
+      if (!order.outboundRecordId) continue;
+      await transaction.collection(OUTBOUND_COLLECTION).doc(order.outboundRecordId).update({ data: {
+        trackingNumber: record.waybillNo, sfExpressOrderRecordId: record._id,
+      } });
+    }
+    await transaction.collection(SF_ORDERS_COLLECTION).doc(record._id).update({ data: {
+      linkedOrderIds, linkedOutboundIds, ...remarks,
+      shipmentVersion: Number(record.shipmentVersion || 1) + 1, shipmentStatus: 'packing',
+      reuseEnabled: false, reuseDisabledAt: now, finalPackagePhotos: [], packagePhotoInvalidatedAt: now,
+      lastLinkRequestId: payload.requestId,
+      shipmentHistory: appendHistory(record, { action: 'append_orders', orderIds: ids,
+        recipientConfirmed: true, actorId, requestId: payload.requestId, time: now }),
+      updatedAt: now,
+    } });
+    await transaction.commit();
+    return { success: true, waybillNo: record.waybillNo, linkedOrderCount: linkedOrderIds.length };
   } catch (error) {
     try { await transaction.rollback(); } catch (_) { /* ignore */ }
     throw error;
@@ -784,6 +884,9 @@ exports.main = async (event) => {
     if (!auth.allowed) return { success: false, code: auth.code, errMsg: auth.errMsg };
     const env = await resolveSfEnv();
     const actorId = trimString(auth.currentUser && auth.currentUser.id);
+
+    if (action === 'listAppendOrders') return await listAppendOrders(payload, env);
+    if (action === 'appendOrders') return await appendOrders(payload, env, actorId);
 
     if (action === 'listReusable') {
       const candidates = await listReusable(trimString(payload.sourceOrderId), env);

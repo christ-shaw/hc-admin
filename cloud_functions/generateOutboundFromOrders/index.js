@@ -248,6 +248,19 @@ exports.main = async (event) => {
       };
     }
 
+    const sfRecordIds = unique(orders.map(order => String(order.sfExpressOrderRecordId || '').trim()).filter(Boolean));
+    let sfRecord = null;
+    if (sfRecordIds.length) {
+      if (sfRecordIds.length !== 1 || orders.some(order => order.sfExpressOrderRecordId !== sfRecordIds[0])) {
+        throw new Error('不同顺丰包裹的订单不能合并生成出库单');
+      }
+      sfRecord = (await transaction.collection('sf_express_orders').doc(sfRecordIds[0]).get()).data;
+      if (sfRecord && sfRecord.status === 'cancelled' && !trackingPlan.trackingNumber) sfRecord = null;
+      else if (!sfRecord || !sfRecord.isCurrent || sfRecord.status !== 'applied'
+        || !['packing', 'sealed'].includes(sfRecord.shipmentStatus)
+        || sfRecord.waybillNo !== trackingPlan.trackingNumber) throw new Error('请先确认顺丰运单申请成功且尚未交接');
+    }
+
     // 3. 聚合货品并建出库单；备注包含客户下单型号数量，并带入出库备注/客服备注
     const phoneModels = aggregatePhoneModels(orders);
     const now = db.serverDate();
@@ -274,11 +287,21 @@ exports.main = async (event) => {
         phoneModels,
         outboundDate: todayInBeijing(),
         trackingNumber: trackingPlan.trackingNumber,
+        ...(sfRecord ? { sfExpressOrderRecordId: sfRecord._id } : {}),
         phonePhotos: [],
         createTime: now,
       },
     });
     const outboundId = addRes._id;
+
+    if (sfRecord) {
+      await transaction.collection('sf_express_orders').doc(sfRecord._id).update({ data: {
+        linkedOutboundIds: unique([...(sfRecord.linkedOutboundIds || []), outboundId]),
+        shipmentStatus: 'packing',
+        shipmentVersion: Number(sfRecord.shipmentVersion || 1) + 1,
+        updatedAt: new Date().toISOString(),
+      } });
+    }
 
     // 4. 回写订单 outboundRecordId
     for (const id of orderIds) {

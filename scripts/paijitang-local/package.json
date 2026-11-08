@@ -1,0 +1,13 @@
+{
+  "name": "hc-paijitang-local",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "login": "node cli.mjs login",
+    "collect": "node cli.mjs collect",
+    "verify": "node cli.mjs verify",
+    "serve": "node cli.mjs serve",
+    "test": "node --test *.test.mjs"
+  },
+  "dependencies": { "playwright": "1.64.1" }
+}

@@ -34,9 +34,9 @@ const PLACEHOLDER_OPTION = { label: '请选择', value: '' };
 const PLATFORM_CHANNELS = new Set(['aRrz', 'fRrz', 'lRrz', 'jRrz', 'gRrz', 'yuntu', '云途', 'huizuji', 'zujile', '租机乐', 'zhuoshi', 'yunjie', 'jikejuzhen', 'jisushanzu']);
 
 /** 根据 salesChannel key 推算渠道类别 */
-function calcChannelCategory(salesChannel: string): 'platform' | 'offline' | '' {
+function calcChannelCategory(salesChannel: string, labels: Record<string, string> = {}): 'platform' | 'offline' | '' {
   if (!salesChannel) return '';
-  return PLATFORM_CHANNELS.has(salesChannel) ? 'platform' : 'offline';
+  return PLATFORM_CHANNELS.has(salesChannel) || [salesChannel, labels[salesChannel] || ''].some(value => value.trim().toLowerCase() === 'r企业租') ? 'platform' : 'offline';
 }
 
 /** 订单类型 → 虚拟产品货品名称白名单 */
@@ -210,13 +210,25 @@ function serializeAfterSaleDraft(
   return JSON.stringify({ form, outboundDecision, autoOutbound });
 }
 
-function hasCompleteOutboundDetails(form: OrderFormData): boolean {
+function hasCompleteOutboundDetails(form: Pick<OrderFormData, 'shippingFee' | 'consignee' | 'consigneePhone' | 'consigneeAddress'>): boolean {
+  if (normalizeShippingFeeValue(form.shippingFee) === 'pickup') return true;
   return !!(
     form.consignee.trim()
     && CONSIGNEE_PHONE_PATTERN.test(form.consigneePhone.trim())
     && form.consigneeAddress.trim()
     && form.shippingFee
   );
+}
+
+function getRecipientFieldsForSave(form: Pick<OrderFormData,
+  'needsOutbound' | 'shippingFee' | 'consignee' | 'consigneePhone' | 'consigneeAddress'> & Partial<Pick<OrderFormData, 'recipientProfileId'>>) {
+  const needsRecipient = form.needsOutbound && normalizeShippingFeeValue(form.shippingFee) !== 'pickup';
+  return {
+    consignee: needsRecipient ? form.consignee.trim() : '',
+    consigneePhone: needsRecipient ? form.consigneePhone.trim() : '',
+    consigneeAddress: needsRecipient ? form.consigneeAddress.trim() : '',
+    recipientProfileId: needsRecipient ? (form.recipientProfileId || '') : '',
+  };
 }
 
 interface OrderWizardDictionaries {
@@ -1109,14 +1121,16 @@ export function Orders() {
     }
     const needsOutbound = virtualOnly ? false : afterSaleOutboundDecision === true;
     if (needsOutbound) {
-      if (!afterSaleForm.consignee.trim()) { MessagePlugin.warning('请填写收货人名称'); return; }
-      if (!CONSIGNEE_PHONE_PATTERN.test(afterSaleForm.consigneePhone.trim())) {
+      if (normalizeShippingFeeValue(afterSaleForm.shippingFee) !== 'pickup' && !afterSaleForm.consignee.trim()) { MessagePlugin.warning('请填写收货人名称'); return; }
+      if (normalizeShippingFeeValue(afterSaleForm.shippingFee) !== 'pickup' && !CONSIGNEE_PHONE_PATTERN.test(afterSaleForm.consigneePhone.trim())) {
         MessagePlugin.warning('收货人电话只能填写 6–20 位数字'); return;
       }
-      if (!afterSaleForm.consigneeAddress.trim()) { MessagePlugin.warning('请填写收货人地址'); return; }
+      if (normalizeShippingFeeValue(afterSaleForm.shippingFee) !== 'pickup' && !afterSaleForm.consigneeAddress.trim()) { MessagePlugin.warning('请填写收货人地址'); return; }
       if (!afterSaleForm.shippingFee) { MessagePlugin.warning('请选择快递方式'); return; }
       if (afterSaleAutoOutbound.enabled === null) { MessagePlugin.warning('请选择是否自动生成出库单'); return; }
     }
+
+    const recipientFields = getRecipientFieldsForSave({ ...afterSaleForm, needsOutbound });
 
     setAfterSaleSaving(true);
     try {
@@ -1132,9 +1146,9 @@ export function Orders() {
           amount: 0,
         })),
         needsOutbound,
-        consignee: needsOutbound ? afterSaleForm.consignee.trim() : '',
-        consigneePhone: needsOutbound ? afterSaleForm.consigneePhone.trim() : '',
-        consigneeAddress: needsOutbound ? afterSaleForm.consigneeAddress.trim() : '',
+        consignee: recipientFields.consignee,
+        consigneePhone: recipientFields.consigneePhone,
+        consigneeAddress: recipientFields.consigneeAddress,
         shippingFee: needsOutbound ? afterSaleForm.shippingFee : '',
         customerRemark: afterSaleForm.customerRemark.trim(),
       });
@@ -1528,11 +1542,11 @@ export function Orders() {
         MessagePlugin.warning('请选择是否需要出库'); return;
       }
       if (!virtualProductOrder && addNeedsOutboundDecision === true) {
-        if (!addForm.consignee.trim()) { MessagePlugin.warning('请填写收货人名称'); return; }
-        if (!CONSIGNEE_PHONE_PATTERN.test(addForm.consigneePhone.trim())) {
+        if (normalizeShippingFeeValue(addForm.shippingFee) !== 'pickup' && !addForm.consignee.trim()) { MessagePlugin.warning('请填写收货人名称'); return; }
+        if (normalizeShippingFeeValue(addForm.shippingFee) !== 'pickup' && !CONSIGNEE_PHONE_PATTERN.test(addForm.consigneePhone.trim())) {
           MessagePlugin.warning('收货人电话只能填写 6–20 位数字'); return;
         }
-        if (!addForm.consigneeAddress.trim()) { MessagePlugin.warning('请填写收货人地址'); return; }
+        if (normalizeShippingFeeValue(addForm.shippingFee) !== 'pickup' && !addForm.consigneeAddress.trim()) { MessagePlugin.warning('请填写收货人地址'); return; }
         if (!addForm.shippingFee) { MessagePlugin.warning('请选择快递方式'); return; }
         if (addAutoOutbound.enabled === null) { MessagePlugin.warning('请选择是否自动生成出库单'); return; }
       }
@@ -1636,6 +1650,7 @@ export function Orders() {
 
       const firstTransfer = addForm.transferProducts[0];
       const shipmentFields = getEffectiveShipmentFields(addForm);
+      const recipientFields = getRecipientFieldsForSave({ ...addForm, shippingFee: shipmentFields.shippingFee });
       const newRecord: OrderRecord = {
         _id: `manual_${Date.now()}`,
         serialNumber,
@@ -1650,15 +1665,16 @@ export function Orders() {
         customerName: addForm.customerName,
         customerId: addForm.customerId || '',
         customerAliasId: addForm.customerAliasId || '',
-        recipientProfileId: addForm.recipientProfileId || '',
+        recipientProfileId: recipientFields.recipientProfileId,
         customerSelectionMode: addForm.customerSelectionMode || (addForm.customerId ? 'explicit' : 'none'),
         createCustomerArchive: archivePlan.checked,
+        customerArchiveCheckId: archivePlan.checked ? archivePlan.archiveCheckId : undefined,
         products: addForm.products.map(serializeProductForSave),
         ...serializeOrderPayment(addForm),
         trackingNumber: shipmentFields.trackingNumber,
-        consignee: addForm.needsOutbound ? addForm.consignee.trim() : '',
-        consigneePhone: addForm.needsOutbound ? addForm.consigneePhone.trim() : '',
-        consigneeAddress: addForm.needsOutbound ? addForm.consigneeAddress.trim() : '',
+        consignee: recipientFields.consignee,
+        consigneePhone: recipientFields.consigneePhone,
+        consigneeAddress: recipientFields.consigneeAddress,
         shippingFee: addForm.needsOutbound ? shipmentFields.shippingFee : '',
         status: shipmentFields.status,
         customerRemark: addForm.customerRemark,
@@ -2962,7 +2978,8 @@ export function Orders() {
             <div>
               <label className="block text-xs text-gray-500 mb-1">客户名称</label>
               <Input
-                placeholder="使用当前客户名称查询"
+                placeholder="输入客户名称的任意部分"
+                clearable
                 value={afterSaleInboundCustomerName}
                 onChange={val => setAfterSaleInboundCustomerName(val as string)}
                 onEnter={handleAfterSaleInboundSearch}
@@ -2971,7 +2988,8 @@ export function Orders() {
             <div>
               <label className="block text-xs text-gray-500 mb-1">快递单号</label>
               <Input
-                placeholder="输入客户寄回快递单号"
+                placeholder="输入完整单号或末几位"
+                clearable
                 value={afterSaleInboundTrackingNumber}
                 onChange={val => setAfterSaleInboundTrackingNumber(val as string)}
                 onEnter={handleAfterSaleInboundSearch}
@@ -2981,6 +2999,10 @@ export function Orders() {
               查询
             </Button>
           </div>
+
+          <p className="text-xs text-gray-500">
+            支持模糊查询，可填写部分客户名称或快递单号；同时填写时需两项都匹配。仅按单号查询时，请清空客户名称。
+          </p>
 
           {afterSaleInboundLoading ? (
             <div className="py-8 text-center text-gray-400">正在查询入库记录...</div>
@@ -3578,12 +3600,7 @@ function AfterSaleOrderForm({
   }, [form.products, onProductsChange]);
 
   const virtualOnly = isVirtualProductOrder(form.products);
-  const outboundComplete = !!(
-    form.consignee.trim()
-    && CONSIGNEE_PHONE_PATTERN.test(form.consigneePhone.trim())
-    && form.consigneeAddress.trim()
-    && form.shippingFee
-  );
+  const outboundComplete = hasCompleteOutboundDetails(form);
 
   return (
     <div className="max-h-[68vh] space-y-5 overflow-y-auto pr-1">
@@ -3701,28 +3718,41 @@ function AfterSaleOrderForm({
 
         {!virtualOnly && outboundDecision === true && (
           <div className="mt-4 space-y-3 rounded-lg border border-gray-200 p-3">
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-              <div>
-                <label className="mb-1 block text-xs text-gray-500">收货人 <span className="text-red-500">*</span></label>
-                <Input value={form.consignee} onChange={value => onChange(prev => ({ ...prev, consignee: value as string }))} />
-              </div>
-              <div>
-                <label className="mb-1 block text-xs text-gray-500">收货人电话 <span className="text-red-500">*</span></label>
-                <Input value={form.consigneePhone} onChange={value => onChange(prev => ({ ...prev, consigneePhone: value as string }))} />
-              </div>
-              <div className="md:col-span-2">
-                <label className="mb-1 block text-xs text-gray-500">收货人地址 <span className="text-red-500">*</span></label>
-                <Input value={form.consigneeAddress} onChange={value => onChange(prev => ({ ...prev, consigneeAddress: value as string }))} />
-              </div>
-              <div>
-                <label className="mb-1 block text-xs text-gray-500">快递方式 <span className="text-red-500">*</span></label>
-                <Select
-                  value={form.shippingFee || ''}
-                  options={shippingFeeOptions}
-                  onChange={value => onChange(prev => ({ ...prev, shippingFee: value as string }))}
-                />
-              </div>
+            <div>
+              <label className="mb-1 block text-xs text-gray-500">快递方式 <span className="text-red-500">*</span></label>
+              <Select
+                value={form.shippingFee || ''}
+                options={shippingFeeOptions}
+                onChange={value => onChange(prev => ({
+                  ...prev,
+                  shippingFee: value as string,
+                  ...(normalizeShippingFeeValue(value as string) === 'pickup'
+                    ? { consignee: '', consigneePhone: '', consigneeAddress: '' }
+                    : {}),
+                }))}
+              />
             </div>
+
+            {normalizeShippingFeeValue(form.shippingFee) === 'pickup' ? (
+              <div className="rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-sm text-blue-700">
+                客户自提，无需填写收货人、电话和地址。
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                <div>
+                  <label className="mb-1 block text-xs text-gray-500">收货人 <span className="text-red-500">*</span></label>
+                  <Input value={form.consignee} onChange={value => onChange(prev => ({ ...prev, consignee: value as string }))} />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-gray-500">收货人电话 <span className="text-red-500">*</span></label>
+                  <Input value={form.consigneePhone} onChange={value => onChange(prev => ({ ...prev, consigneePhone: value as string }))} />
+                </div>
+                <div className="md:col-span-2">
+                  <label className="mb-1 block text-xs text-gray-500">收货人地址 <span className="text-red-500">*</span></label>
+                  <Input value={form.consigneeAddress} onChange={value => onChange(prev => ({ ...prev, consigneeAddress: value as string }))} />
+                </div>
+              </div>
+            )}
 
             {outboundComplete && (
               <div className="border-t border-gray-100 pt-3">
@@ -3977,6 +4007,19 @@ function AddOrderWizard({
   }, [form.products.map(p => p.brand).join(',')]);
   const needsOutboundForStep = mode === 'add' ? outboundDecision === true : form.needsOutbound;
   const outboundDetailsComplete = hasCompleteOutboundDetails(form);
+  const isCustomerPickup = mode === 'add' && normalizeShippingFeeValue(form.shippingFee) === 'pickup';
+
+  const handleShippingFeeChange = useCallback((value: string) => {
+    const pickup = normalizeShippingFeeValue(value) === 'pickup';
+    onChange(prev => ({
+      ...prev,
+      shippingFee: value,
+      ...(pickup
+        ? { consignee: '', consigneePhone: '', consigneeAddress: '', recipientProfileId: '' }
+        : {}),
+    }));
+    if (pickup) setPasteText('');
+  }, [onChange]);
 
   useEffect(() => {
     if (!virtualProductOrder || form.status === 'noShip') return;
@@ -4008,6 +4051,8 @@ function AddOrderWizard({
   }, [pasteText, onChange]);
 
   const stepLabels = ['基础信息', '订单属性', '货品信息', '收件人信息', '备注 & 附件', '确认预览'];
+  const endIdentityEditing = archivePlan?.endEditing;
+  useEffect(() => { endIdentityEditing?.(); }, [step, endIdentityEditing]);
 
   return (
     <div className="space-y-4">
@@ -4041,7 +4086,9 @@ function AddOrderWizard({
                 value={form.date} onChange={e => updateField('date', e.target.value)} />
             </div>
             <div className="order-basic-form-field">
-              <CustomerNameField value={form} salesChannel={form.salesChannel} onChange={patch => onChange(prev => ({ ...prev,
+              <CustomerNameField value={form} salesChannel={form.salesChannel}
+                onEditingChange={editing => editing ? archivePlan?.beginEditing() : archivePlan?.endEditing()}
+                onChange={patch => onChange(prev => ({ ...prev,
                 ...(patch.customerName !== undefined && patch.customerName !== prev.customerName ? { createCustomerArchive: undefined } : {}), ...patch }))} />
               {archivePlan && <OrderCustomerArchiveOption plan={archivePlan}
                 onChoice={createCustomerArchive => onChange(prev => ({ ...prev, createCustomerArchive }))}
@@ -4116,7 +4163,7 @@ function AddOrderWizard({
               <label className="block text-xs text-gray-500 mb-1">销售渠道 <span className="text-red-500">*</span></label>
               <Select placeholder="请选择" value={form.salesChannel || ''} onChange={val => {
                 const channel = val as string;
-                const category = calcChannelCategory(channel);
+                const category = calcChannelCategory(channel, SALES_CHANNEL_MAP);
                 const updates: Partial<OrderFormData> = { salesChannel: channel, channelCategory: category };
                 if (category === 'offline') updates.onlineOrderNumber = '';
                 onChange(prev => ({ ...prev, ...updates }));
@@ -4359,42 +4406,52 @@ function AddOrderWizard({
 
           {needsOutboundForStep ? (
             <>
-              <div className="mb-3 p-3 bg-blue-50/50 rounded-lg border border-blue-100">
-                <div className="flex items-center gap-2 mb-2">
-                  <span className="text-xs text-blue-600 font-medium">🧠 粘贴识别</span>
-                  <span className="text-xs text-gray-400">粘贴包含姓名、电话、地址的文本，AI 自动识别填入</span>
+              {mode === 'add' && (
+                <div className="mb-3">
+                  <label className="block text-xs text-gray-500 mb-1">快递方式 <span className="text-red-500">*</span></label>
+                  <Select placeholder="请选择快递方式" value={form.shippingFee || ''}
+                    onChange={val => handleShippingFeeChange(val as string)}
+                    options={SHIPPING_FEE_OPTIONS} />
                 </div>
-                <div className="flex gap-2">
-                  <Textarea placeholder="例：张三 13800138000 北京市朝阳区建国路88号" value={pasteText}
-                    onChange={val => setPasteText(val as string)} autosize={{ minRows: 1, maxRows: 3 }} className="flex-1" />
-                  <Button theme="primary" size="small" loading={parsing} onClick={handleSmartParse}>识别</Button>
+              )}
+
+              {isCustomerPickup ? (
+                <div className="mb-3 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-sm text-blue-700">
+                  客户自提，无需填写收货人、电话和地址。
                 </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">收货人名称 {mode === 'add' && <span className="text-red-500">*</span>}</label>
-                  <Input placeholder="收货人名称"
-                    value={form.consignee} onChange={val => onChange(prev => ({ ...prev, consignee: val as string, recipientProfileId: '' }))} />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">收货人电话 {mode === 'add' && <span className="text-red-500">*</span>}</label>
-                  <Input placeholder="收货人电话"
-                    value={form.consigneePhone} onChange={val => onChange(prev => ({ ...prev, consigneePhone: val as string, recipientProfileId: '' }))} />
-                </div>
-                <div className="col-span-2">
-                  <label className="block text-xs text-gray-500 mb-1">收货人地址 {mode === 'add' && <span className="text-red-500">*</span>}</label>
-                  <Input placeholder="收货人地址"
-                    value={form.consigneeAddress} onChange={val => onChange(prev => ({ ...prev, consigneeAddress: val as string, recipientProfileId: '' }))} />
-                </div>
-                {mode === 'add' && (
-                  <div className="col-span-2">
-                    <label className="block text-xs text-gray-500 mb-1">快递方式 <span className="text-red-500">*</span></label>
-                    <Select placeholder="请选择快递方式" value={form.shippingFee || ''}
-                      onChange={val => updateField('shippingFee', val as string)}
-                      options={SHIPPING_FEE_OPTIONS} />
+              ) : (
+                <>
+                  <div className="mb-3 p-3 bg-blue-50/50 rounded-lg border border-blue-100">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="text-xs text-blue-600 font-medium">🧠 粘贴识别</span>
+                      <span className="text-xs text-gray-400">粘贴包含姓名、电话、地址的文本，AI 自动识别填入</span>
+                    </div>
+                    <div className="flex gap-2">
+                      <Textarea placeholder="例：张三 13800138000 北京市朝阳区建国路88号" value={pasteText}
+                        onChange={val => setPasteText(val as string)} autosize={{ minRows: 1, maxRows: 3 }} className="flex-1" />
+                      <Button theme="primary" size="small" loading={parsing} onClick={handleSmartParse}>识别</Button>
+                    </div>
                   </div>
-                )}
-              </div>
+                  <div className="grid grid-cols-2 gap-3" onFocusCapture={() => archivePlan?.beginEditing()}
+                    onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) archivePlan?.endEditing(); }}>
+                    <div>
+                      <label className="block text-xs text-gray-500 mb-1">收货人名称 {mode === 'add' && <span className="text-red-500">*</span>}</label>
+                      <Input placeholder="收货人名称"
+                        value={form.consignee} onChange={val => onChange(prev => ({ ...prev, consignee: val as string, recipientProfileId: '' }))} />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-gray-500 mb-1">收货人电话 {mode === 'add' && <span className="text-red-500">*</span>}</label>
+                      <Input placeholder="收货人电话"
+                        value={form.consigneePhone} onChange={val => onChange(prev => ({ ...prev, consigneePhone: val as string, recipientProfileId: '' }))} />
+                    </div>
+                    <div className="col-span-2">
+                      <label className="block text-xs text-gray-500 mb-1">收货人地址 {mode === 'add' && <span className="text-red-500">*</span>}</label>
+                      <Input placeholder="收货人地址"
+                        value={form.consigneeAddress} onChange={val => onChange(prev => ({ ...prev, consigneeAddress: val as string, recipientProfileId: '' }))} />
+                    </div>
+                  </div>
+                </>
+              )}
 
               {/* 第二步：收件信息完整后明确确认是否自动生成出库单 */}
               {mode === 'add' && autoOutbound && onAutoOutboundChange && (
@@ -4579,12 +4636,15 @@ function AddOrderWizard({
             )}
             <PreviewSection title="收件人信息">
               {mode === 'add' && <PreviewItem label="是否需要出库" value={needsOutboundForStep ? '是' : '否'} />}
-              {(mode === 'edit' || needsOutboundForStep) && (
+              {(mode === 'edit' || (needsOutboundForStep && !isCustomerPickup)) && (
                 <>
                   <PreviewItem label="收货人名称" value={form.consignee} />
                   <PreviewItem label="收货人电话" value={form.consigneePhone} />
                   <PreviewItem label="收货人地址" value={form.consigneeAddress} />
                 </>
+              )}
+              {mode === 'add' && needsOutboundForStep && isCustomerPickup && (
+                <PreviewItem label="收件信息" value="客户自提，无需填写" />
               )}
               {mode === 'add' && needsOutboundForStep && (
                 <>

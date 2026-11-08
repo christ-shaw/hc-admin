@@ -31,7 +31,7 @@ export function OrderCustomerArchiveOption({ plan, onChoice, onSelect }: {
     finally { if (version === request.current) setSelecting(''); }
   };
   return <div className="mt-2 rounded-lg bg-blue-50/60 px-3 py-2 text-xs text-gray-600" aria-live="polite">
-    {plan.checking ? <p>正在核对客户档案…</p> : plan.error ? <div>{plan.error}
+    {plan.waitingForBlur ? <p>填写完成后核对客户档案，可随订单一并建档。</p> : plan.checking ? <p>正在核对客户档案…</p> : plan.error ? <div>{plan.error}
       <Button size="small" variant="text" onClick={plan.retry}>重新检查</Button>
     </div> : plan.candidates.length ? <>
       <p>发现相似客户，可选择关联；暂不选择也能保存订单，后续归档。</p>

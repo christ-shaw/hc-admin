@@ -133,10 +133,17 @@ test('管理员的受限详情仍按白名单返回，停用或合并客户不�
 });
 
 test('Top3 推荐查询在真实入口按订单权限授权，仍不返回客户管理字段', async () => {
-  const service = loadService(['orders:update']);
+  const data = fixture();
+  data.customers.forEach(row => { row.normalizedDisplayName = normalizeName(row.displayName); });
+  data.customer_aliases.forEach(row => { row.normalizedName = normalizeName(row.name); });
+  const service = loadService(['orders:update'], { data });
   const result = await service.call({ action: 'search', scope: 'orderSuggestions', keyword: 'old name' });
   assert.equal(result.success, true); assert.equal(result.data[0]._id, 'c1');
-  assert.equal(result.data[0].recipients[0].address, fixture().customer_recipient_profiles[0].address);
+  assert.deepEqual(result.data[0].recipients, []);
+  assert.equal(result.data[0].detailsDeferred, true);
+  assert.equal(service.reads.filter(row => row.collection === 'customer_recipient_profiles').length, 0);
+  const detail = await service.call({ action: 'get', scope: 'orderSelection', customerId: 'c1' });
+  assert.equal(detail.data.recipients[0].address, fixture().customer_recipient_profiles[0].address);
   assert.equal(JSON.stringify(result).includes('private'), false);
   assert.equal((await loadService(['orders:read']).call({ action: 'search', scope: 'orderSuggestions', keyword: 'old' })).code, 'ACCESS_DENIED');
 });

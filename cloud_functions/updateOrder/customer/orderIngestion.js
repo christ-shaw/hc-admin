@@ -11,7 +11,7 @@ const SOURCE_FIELDS = ['renewalSourceOrderId', 'renewalSourceSerialNumber', 'ren
   'rental2TransferSourceSerialNumber', 'rental2TransferMode', 'afterSaleSourceOrderId', 'afterSaleSourceSerialNumber'];
 const LINK_FIELDS = [...REF_FIELDS, 'customerLinkStatus', 'customerLinkedAt', 'customerLinkedBy',
   'customerLinkIgnoreReason', 'customerLinkMethod', 'customerIngestState', 'customerIngestActor',
-  'customerIngestVersion', 'customerSelectionMode', 'createCustomerArchive', 'customerArchiveRequested'];
+  'customerIngestVersion', 'customerSelectionMode', 'createCustomerArchive', 'customerArchiveRequested', 'customerArchiveCheckId'];
 const rental = value => ['rental1', 'rental2', '租赁1', '租赁2'].includes(value);
 function stripLinkFields(input, editing = false) {
   return Object.fromEntries(Object.entries(input).filter(([key]) => !LINK_FIELDS.includes(key.split('.')[0])

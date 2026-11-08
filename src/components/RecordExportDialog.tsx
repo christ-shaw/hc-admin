@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Button, Dialog, MessagePlugin } from 'tdesign-react';
+import { Button, Dialog, Input, MessagePlugin } from 'tdesign-react';
 import { ChevronLeft, ChevronRight, FileDown } from 'lucide-react';
 
 function formatLocalDate(date: Date): string {
@@ -13,16 +13,27 @@ function getDefaultDateRange() {
   return { startDate: formatLocalDate(start), endDate: formatLocalDate(today) };
 }
 
-export function RecordExportDialog({ visible, recordLabel, exporting, onClose, onExport }: {
+export function RecordExportDialog({
+  visible,
+  recordLabel,
+  exporting,
+  personFilterLabel = '姓名',
+  initialPersonName = '',
+  onClose,
+  onExport,
+}: {
   visible: boolean;
   recordLabel: '入库记录' | '出库记录';
   exporting: boolean;
+  personFilterLabel?: string;
+  initialPersonName?: string;
   onClose: () => void;
-  onExport: (startDate: string, endDate: string) => Promise<void>;
+  onExport: (startDate: string, endDate: string, personName: string) => Promise<void>;
 }) {
   const [step, setStep] = useState(1);
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
+  const [personName, setPersonName] = useState('');
 
   useEffect(() => {
     if (!visible) return;
@@ -30,7 +41,8 @@ export function RecordExportDialog({ visible, recordLabel, exporting, onClose, o
     setStep(1);
     setStartDate(range.startDate);
     setEndDate(range.endDate);
-  }, [visible]);
+    setPersonName(initialPersonName.trim());
+  }, [initialPersonName, visible]);
 
   const validateDateRange = (): string | null => {
     if (!startDate || !endDate) return '请选择完整的日期范围';
@@ -101,6 +113,16 @@ export function RecordExportDialog({ visible, recordLabel, exporting, onClose, o
                 />
               </div>
             </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">{personFilterLabel}（可选）</label>
+              <Input
+                clearable
+                value={personName}
+                onChange={value => setPersonName(String(value))}
+                placeholder={`输入${personFilterLabel}，支持部分名称`}
+              />
+              <p className="mt-1 text-xs text-gray-400">留空时导出日期范围内的全部人员记录。</p>
+            </div>
             <div className="flex gap-2 flex-wrap">
               {[{ label: '近 1 个月', days: 30 }, { label: '近 3 个月', days: 90 }, { label: '近半年', days: 183 }].map(option => (
                 <Button key={option.days} size="small" variant="outline" onClick={() => setQuickRange(option.days)}>
@@ -124,6 +146,10 @@ export function RecordExportDialog({ visible, recordLabel, exporting, onClose, o
                 <span className="font-medium text-gray-800">{startDate} 至 {endDate}</span>
               </div>
               <div className="flex justify-between gap-4 py-1">
+                <span className="text-gray-500">{personFilterLabel}</span>
+                <span className="font-medium text-gray-800">{personName.trim() || '全部'}</span>
+              </div>
+              <div className="flex justify-between gap-4 py-1">
                 <span className="text-gray-500">文件格式</span>
                 <span className="font-medium text-gray-800">Excel（.xlsx）</span>
               </div>
@@ -142,7 +168,8 @@ export function RecordExportDialog({ visible, recordLabel, exporting, onClose, o
             {step === 1 ? (
               <Button theme="primary" icon={<ChevronRight size={14} />} onClick={handleNext}>下一步</Button>
             ) : (
-              <Button theme="primary" icon={<FileDown size={14} />} loading={exporting} onClick={() => onExport(startDate, endDate)}>
+              <Button theme="primary" icon={<FileDown size={14} />} loading={exporting}
+                onClick={() => onExport(startDate, endDate, personName.trim())}>
                 导出 Excel
               </Button>
             )}

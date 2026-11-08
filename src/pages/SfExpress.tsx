@@ -18,6 +18,7 @@ import { usePermission } from '../hooks/usePermission';
 import { SfPrintDialog } from '../components/SfPrintDialog';
 import { useTabWorkspace } from '../contexts/TabWorkspaceContext';
 import { detectSfPrintPlatform } from '../utils/sfPrintPlugin';
+import { SfAppendOrdersDialog } from '../components/SfAppendOrdersDialog';
 
 interface SfFilters {
   date: string;
@@ -195,6 +196,18 @@ function canBatchApply(row: SfExpressWorkbenchRow) {
     && getMissingFields(row.order).length === 0;
 }
 
+function canMergeOrder(row: SfExpressWorkbenchRow) {
+  return row.mergeEligible !== false
+    && ['not_created', 'failed'].includes(row.sfStatus)
+    && !row.order.trackingNumber
+    && !row.currentSfOrder?.waybillNo
+    && !row.currentSfOrder?.printCount
+    && !row.currentSfOrder?.lastPrintTime
+    && (row.currentSfOrder?.linkedOrderIds.length || 0) <= 1
+    && row.order.needsOutbound !== false
+    && ['prepaid', 'cod'].includes(normalizeShippingFee(row.order.shippingFee));
+}
+
 function canBatchPrint(row: SfExpressWorkbenchRow) {
   return row.sfStatus === 'applied'
     && !!row.currentSfOrder?.waybillNo
@@ -239,6 +252,10 @@ export function SfExpress() {
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [selectedRows, setSelectedRows] = useState<Record<string, TableRow>>({});
+  const [mergeTargets, setMergeTargets] = useState<TableRow[]>([]);
+  const [mergeRecipientId, setMergeRecipientId] = useState('');
+  const [merging, setMerging] = useState(false);
+  const [appendTarget, setAppendTarget] = useState<TableRow | null>(null);
   const selectedApplyRows = useMemo(
     () => Object.values(selectedRows).filter(canBatchApply),
     [selectedRows],
@@ -400,11 +417,46 @@ export function SfExpress() {
     setSelectedRows(previous => {
       const next = { ...previous };
       for (const row of rows) {
-        if (selectedKeys.has(row._id) && (canBatchApply(row) || canBatchPrint(row))) next[row._id] = row;
+        if (selectedKeys.has(row._id) && canMergeOrder(row)) next[row._id] = row;
         else delete next[row._id];
       }
       return next;
     });
+  };
+
+  const handleMerge = async () => {
+    const primary = mergeTargets.find(row => row.order._id === mergeRecipientId);
+    if (!primary || merging) return;
+    if (!prepareBatchPdfWindows([primary])) return;
+    setMerging(true);
+    try {
+      const result = await callFunction<SfActionResult>('applySfExpress', { data: {
+        sourceOrderId: primary.order._id,
+        mergeOrderIds: mergeTargets.map(row => row.order._id),
+        recipientChoice: {
+          consignee: primary.order.consignee, consigneePhone: primary.order.consigneePhone,
+          consigneeAddress: primary.order.consigneeAddress, shippingFee: primary.order.shippingFee,
+        },
+      } });
+      if (!result.success) throw new Error(result.errMsg || '合并出单失败');
+      const printRow = createAppliedPrintRow(primary, result);
+      setMergeTargets([]);
+      setSelectedRows({});
+      MessagePlugin.success(`已合并为一张顺丰面单：${result.waybillNo}`);
+      if (printRow) {
+        setBatchPrintTargets([printRow]);
+        setBatchPrintAutoStart(true);
+      }
+    } catch (error) {
+      Object.values(preparedPdfWindowsRef.current).forEach(opened => opened.close());
+      preparedPdfWindowsRef.current = {};
+      setMergeTargets([]);
+      setSelectedRows({});
+      MessagePlugin.error((error instanceof Error ? error.message : String(error)) + '；如已发起申请，请在主订单查询结果或重试');
+    } finally {
+      setMerging(false);
+      await reloadCurrentPage();
+    }
   };
 
   const handleOpenApply = (row: TableRow) => {
@@ -766,9 +818,9 @@ export function SfExpress() {
       type: 'multiple' as const,
       width: 46,
       checkProps: ({ row }: { row: TableRow }) => ({
-        disabled: batchApplying || (!canBatchApply(row) && !canBatchPrint(row)),
-        title: !canBatchApply(row) && !canBatchPrint(row)
-          ? '仅资料完整的待申请订单或已生成运单的订单可以勾选'
+        disabled: batchApplying || merging || !canMergeOrder(row),
+        title: !canMergeOrder(row)
+          ? '仅未生成过快递单号、未打印的顺丰订单可以勾选'
           : '',
       }),
     },
@@ -871,7 +923,7 @@ export function SfExpress() {
       fixed: 'right' as const,
       cell: ({ row }: { row: TableRow }) => {
         const canApply = ['not_created', 'cancelled'].includes(row.sfStatus);
-        const canRetry = row.sfStatus === 'failed';
+        const canRetry = row.sfStatus === 'failed' && row.currentSfOrder?.sourceOrderId === row.order._id;
         const canQuery = ['applying', 'failed', 'applied'].includes(row.sfStatus) && !!row.currentSfOrder;
         const isPrimaryShipmentOrder = row.currentSfOrder?.sourceOrderId === row.order._id;
         const canPrint = row.sfStatus === 'applied'
@@ -963,6 +1015,12 @@ export function SfExpress() {
             )}
             {canManageShipment && (
               <>
+                {isPrimaryShipmentOrder && !!(row.currentSfOrder?.printCount || row.currentSfOrder?.lastPrintTime) && (
+                  <Button size="small" variant="outline" icon={<Link2 size={14} />}
+                    disabled={!canReuseWaybill} onClick={() => setAppendTarget(row)}>
+                    追加订单
+                  </Button>
+                )}
                 {canManageReuse && (
                   <Button
                     size="small"
@@ -1013,7 +1071,7 @@ export function SfExpress() {
           <h1 className="flex items-center gap-2 text-2xl font-semibold text-gray-800">
             <Truck size={24} />顺丰快递
           </h1>
-          <p className="mt-1 text-gray-500">按日期查看全部订单及其当前顺丰状态</p>
+          <p className="mt-1 text-gray-500">勾选 2–20 条未出单、未打印的顺丰订单可合并出单；已打印面单可在操作栏追加订单。</p>
         </div>
         <div className="flex items-center gap-2">
           <Tag theme={sfEnv === 'production' ? 'danger' : sfEnv === 'sandbox' ? 'success' : 'warning'} variant="light">
@@ -1021,7 +1079,12 @@ export function SfExpress() {
           </Tag>
           {cutoverDate && <Tag variant="light">V2 切换日：{cutoverDate}</Tag>}
           {dataModelVersion !== 2 && <Tag theme="warning" variant="light">V2 尚未启用</Tag>}
-          <Tag theme="primary" variant="light">包裹关联：只读</Tag>
+          <Button theme="primary" icon={<Link2 size={16} />}
+            disabled={!canPrintWaybill || !canReuseWaybill || Object.keys(selectedRows).length < 2
+              || Object.keys(selectedRows).length > 20 || merging || batchApplying || applying || dataModelVersion !== 2}
+            onClick={() => { setMergeTargets(Object.values(selectedRows)); setMergeRecipientId(''); }}>
+            合并出单（{Object.keys(selectedRows).length}）
+          </Button>
           <Button
             theme="primary"
             icon={<Printer size={16} />}
@@ -1035,10 +1098,43 @@ export function SfExpress() {
             title={!canPrintWaybill ? '当前角色没有顺丰面单打印权限' : ''}
             onClick={handleOpenBatchApply}
           >
-            {selectedApplyRows.length > 0 ? '批量生成并打印' : '重复批量打印'}（{selectedBatchCount}）
+            逐单生成并打印（{selectedBatchCount}）
           </Button>
         </div>
       </div>
+
+      <Dialog header={`合并出单 · ${mergeTargets.length} 条订单 / 1 张面单`}
+        visible={mergeTargets.length > 0} width="880px"
+        onClose={() => !merging && setMergeTargets([])} onConfirm={handleMerge}
+        confirmBtn={{ content: '确认合并并打印', loading: merging, disabled: !mergeRecipientId }}
+        cancelBtn={{ content: '取消', disabled: merging }}>
+        <div className="space-y-4 text-sm">
+          <p className="rounded-lg bg-blue-50 p-3 text-blue-700">
+            请选择一条订单的收件人、电话、地址及收费方式，作为整个包裹的快递信息。各订单原始资料保留不变，所有订单共用一个单号，仅打印一张面单。
+          </p>
+          <p>新申请配置：{sfProfile === 'huichuan' ? '汇川' : '鸿城'} / {sfEnv === 'production' ? '生产环境（将生成真实运单）' : '沙箱测试'}。所选订单对应人员的寄件配置也将用于本次出单。</p>
+          <div className="max-h-[50vh] space-y-2 overflow-auto">
+            {mergeTargets.map(row => {
+              const missing = getMissingFields(row.order).filter(field => field !== '货品');
+              return <label key={row._id} className={`flex cursor-pointer gap-3 rounded-lg border p-3 ${mergeRecipientId === row._id ? 'border-blue-500 bg-blue-50' : 'border-gray-200'}`}>
+                <input type="radio" name="merge-recipient" aria-label={`使用 ${getOrderLabel(row.order)} 的收件信息`}
+                  checked={mergeRecipientId === row._id} disabled={merging || missing.length > 0}
+                  onChange={() => setMergeRecipientId(row._id)} />
+                <div className="min-w-0 space-y-1">
+                  <div className="font-medium">{getOrderLabel(row.order)}</div>
+                  <div>{row.order.consignee || '未填写姓名'} · {row.order.consigneePhone || '未填写电话'} · {getPaymentLabel(row.order.shippingFee)}</div>
+                  <div className="break-words">{row.order.consigneeAddress || '未填写地址'}</div>
+                  <div className="text-gray-500">{getProductSummary(row.order)}</div>
+                  {missing.length > 0 && <div className="text-rose-600">缺少：{missing.join('、')}，不可作为收件信息</div>}
+                </div>
+              </label>;
+            })}
+          </div>
+        </div>
+      </Dialog>
+
+      <SfAppendOrdersDialog target={appendTarget} onClose={() => setAppendTarget(null)}
+        onSuccess={() => { setAppendTarget(null); setSelectedRows({}); void reloadCurrentPage(); }} />
 
       <div className="glass-card p-4">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">

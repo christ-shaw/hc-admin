@@ -299,6 +299,13 @@
       "name": "completeOutbound",
       "handler": "index.main",
       "runtime": "Nodejs18.15"
+    },
+    {
+      "name": "recognizeRecordPhones",
+      "handler": "index.main",
+      "runtime": "Nodejs18.15",
+      "timeout": 120,
+      "memorySize": 512
     }
   ],
   "framework": {

@@ -5,8 +5,9 @@ const vm = require('node:vm');
 const { createRequire } = require('node:module');
 const { database } = require('../../cloud_functions/manageCustomers/test-support/database.cjs');
 const root = path.resolve(__dirname, '../..');
-const data = { customers: [{ _id: 'existing', displayName: '示例老客户', status: 'active' }],
-  customer_aliases: [], customer_recipient_profiles: [], orders: [],
+const data = { customers: [{ _id: 'existing', displayName: '示例老客户', normalizedDisplayName: '示例老客户', status: 'active' }],
+  customer_aliases: [{ _id: 'alias', customerId: 'existing', name: '示例别名', normalizedName: '示例别名', enabled: true }],
+  customer_recipient_profiles: [{ _id: 'recipient', customerId: 'existing', consignee: '示例收件人', phone: '13800138000', address: '示例地址', enabled: true }], orders: [],
   system_config: [{ _id: 'permission_system', initialized: true }],
   roles: [{ _id: 'role', actionPermissions: ['orders:create', 'customers:write'] }],
   user_roles: [{ _id: 'user', userId: 'preview', roleId: 'role' }] };

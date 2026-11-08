@@ -15,9 +15,11 @@ const ENV_KEYS = [
   'SF_SANDBOX_ACCESS_TOKEN_URL',
   'SF_PROD_ACCESS_TOKEN_URL',
   'SF_PRODUCTION_ACCESS_TOKEN_URL',
+  'SF_HUICHUAN_SANDBOX_CLIENT_CODE',
+  'SF_HUICHUAN_SANDBOX_CHECK_WORD',
 ];
 
-function createMockCloud(initialDocs = {}) {
+function createMockCloud(initialDocs = {}, { missingUpdateReturnsZero = false, setFails = false } = {}) {
   const docs = new Map(Object.entries(initialDocs));
   const calls = {
     init: [],
@@ -50,6 +52,7 @@ function createMockCloud(initialDocs = {}) {
               calls.updates.push({ id, data });
 
               if (!docs.has(id)) {
+                if (missingUpdateReturnsZero) return { stats: { updated: 0 } };
                 const err = new Error('document does not exist');
                 err.errCode = -1;
                 throw err;
@@ -59,8 +62,10 @@ function createMockCloud(initialDocs = {}) {
                 ...docs.get(id),
                 ...data,
               });
+              return { stats: { updated: 1 } };
             },
-            async set(data) {
+            async set({ data }) {
+              if (setFails) throw new Error('cache write unavailable');
               calls.sets.push({ id, data });
               docs.set(id, data);
             },
@@ -87,8 +92,8 @@ function createMockCloud(initialDocs = {}) {
   return { cloud, docs, calls };
 }
 
-async function withFunctionRuntime({ initialDocs, env, fetchImpl }, run) {
-  const mockCloud = createMockCloud(initialDocs);
+async function withFunctionRuntime({ initialDocs, env, fetchImpl, mockOptions }, run) {
+  const mockCloud = createMockCloud(initialDocs, mockOptions);
   const originalLoad = Module._load;
   const originalFetch = global.fetch;
   const originalConsoleError = console.error;
@@ -324,8 +329,8 @@ test('creates token cache document when it does not exist', async () => {
     assert.equal(result.cached, false);
     assert.equal(result.env, 'sandbox');
     assert.equal(result.apiResponseID, 'response-2');
-    assert.equal(mockCloud.calls.adds.length, 1);
-    assert.equal(mockCloud.calls.sets.length, 0);
+    assert.equal(mockCloud.calls.adds.length, 0);
+    assert.equal(mockCloud.calls.sets.length, 1);
     assert.equal(mockCloud.docs.get('sandbox').accessToken, 'created-token-abcdef');
   });
 });
@@ -392,5 +397,45 @@ test('returns a clear error when sandbox secret env var is missing', async () =>
     assert.equal(result.success, false);
     assert.equal(result.env, 'sandbox');
     assert.match(result.errMsg, /SF_SANDBOX_CHECK_WORD/);
+  });
+});
+
+test('first Huichuan token is persisted when missing-document update returns zero, then reused', async () => {
+  let requests = 0;
+  await withFunctionRuntime({
+    initialDocs: { sandbox: { accessToken: 'legacy-token', expiresAt: 123 }, production: { accessToken: 'legacy-prod-token' } },
+    mockOptions: { missingUpdateReturnsZero: true },
+    env: { SF_HUICHUAN_SANDBOX_CLIENT_CODE: 'huichuan-test', SF_HUICHUAN_SANDBOX_CHECK_WORD: 'huichuan-test-secret' },
+    fetchImpl: async () => {
+      requests++;
+      return { ok: true, status: 200, text: async () => JSON.stringify({ apiResultCode: 'A1000', accessToken: 'huichuan-token-test', expiresIn: 7200 }) };
+    },
+  }, async (main, mock) => {
+    const data = { sfConfigProfile: 'huichuan', sfEnv: 'sandbox' };
+    const first = await main({ data });
+    assert.equal(first.success, true);
+    assert.equal(first.cached, false);
+    assert.equal(mock.docs.get('huichuan:sandbox')?.accessToken, 'huichuan-token-test');
+    assert.equal(mock.docs.get('huichuan:sandbox')?.sfConfigProfile, 'huichuan');
+    const second = await main({ data });
+    assert.equal(second.success, true);
+    assert.equal(second.cached, true);
+    assert.equal(requests, 1);
+    assert.deepEqual(mock.docs.get('sandbox'), { accessToken: 'legacy-token', expiresAt: 123 });
+    assert.deepEqual(mock.docs.get('production'), { accessToken: 'legacy-prod-token' });
+  });
+});
+
+test('does not report token success when first cache write fails', async () => {
+  await withFunctionRuntime({
+    initialDocs: {},
+    mockOptions: { missingUpdateReturnsZero: true, setFails: true },
+    env: { SF_HUICHUAN_SANDBOX_CLIENT_CODE: 'huichuan-test', SF_HUICHUAN_SANDBOX_CHECK_WORD: 'huichuan-test-secret' },
+    fetchImpl: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ apiResultCode: 'A1000', accessToken: 'test-token', expiresIn: 7200 }) }),
+  }, async (main, mock) => {
+    const result = await main({ data: { sfConfigProfile: 'huichuan', sfEnv: 'sandbox' } });
+    assert.equal(result.success, false);
+    assert.match(result.errMsg, /cache write unavailable/);
+    assert.equal(mock.docs.has('huichuan:sandbox'), false);
   });
 });

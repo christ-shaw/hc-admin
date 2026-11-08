@@ -1,4 +1,5 @@
 const sfProfile = require('./sfProfile');
+const senderConfig = require('./senderConfig');
 /**
  * manageSfConfig - 管理顺丰下单环境
  *
@@ -321,13 +322,15 @@ exports.main = async (event) => {
   try {
     const permissions = action === 'get'
       ? [READ_PERMISSION, UPDATE_PERMISSION, ORDER_READ_PERMISSION]
-      : [UPDATE_PERMISSION];
+      : action === 'getSenders' ? [READ_PERMISSION, UPDATE_PERMISSION] : [UPDATE_PERMISSION];
     const auth = await requirePermission(permissions);
     if (!auth.allowed) {
       return { success: false, code: auth.code, errMsg: auth.errMsg };
     }
 
     if (action === 'get') return await readSfConfig();
+    if (action === 'getSenders') return await senderConfig.read(db, payload.profile, payload.env);
+    if (action === 'setSenders') return await senderConfig.save(db, payload, auth.currentUser);
     if (action === 'set') return await saveSfConfig(payload, auth.currentUser);
     if (action === 'setPluginPrint') return await savePluginPrintConfig(payload, auth.currentUser);
     if (action === 'setDataModel') return await saveDataModelConfig(payload, auth.currentUser);

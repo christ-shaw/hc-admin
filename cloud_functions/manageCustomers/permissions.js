@@ -21,6 +21,7 @@ const ACTION_PERMISSIONS = Object.freeze({
 function permissionsFor(action, scope) {
   if (!Object.prototype.hasOwnProperty.call(ACTION_PERMISSIONS, action)) return null;
   if (scope !== undefined) {
+    if (scope === 'orderArchive' && action === 'matchIdentity') return WRITE;
     if (scope === 'orderSuggestions' && action === 'search') return SELECT;
     if (scope !== 'orderSelection' || !['get', 'search'].includes(action)) return null;
     return SELECT;

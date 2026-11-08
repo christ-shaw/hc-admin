@@ -6,6 +6,7 @@
  */
 
 const cloud = require('wx-server-sdk');
+const { queryDynamicMessages } = require('./dynamicMessages');
 
 cloud.init({
   env: cloud.DYNAMIC_CURRENT_ENV
@@ -38,6 +39,7 @@ exports.main = async (event, context) => {
   const maxLimit = Math.min(limit, 100);
 
   try {
+    if (data.action === 'dynamicMessages') return await queryDynamicMessages(db);
     // 出库记录等关联业务直接按数据库 ID 定位，不受分页和排序影响。
     if (orderId && String(orderId).trim()) {
       try {

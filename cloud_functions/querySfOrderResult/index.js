@@ -257,6 +257,8 @@ async function markQueryApplied(record, order, requestID, parsed) {
   const now = new Date().toISOString();
   const transaction = await db.startTransaction();
   try {
+    record = (await transaction.collection(SF_ORDERS_COLLECTION).doc(record._id).get()).data;
+    if (!record || !record.isCurrent || record.status === 'cancelled') throw new Error('运单状态已变化，请刷新后重试');
     let currentOrderResult = null;
     try {
       currentOrderResult = await transaction.collection(ORDERS_COLLECTION).doc(record.sourceOrderId).get();
@@ -267,6 +269,7 @@ async function markQueryApplied(record, order, requestID, parsed) {
       throw new Error('关联订单不存在');
     }
     const currentOrder = currentOrderResult.data;
+    if (currentOrder.trackingNumber && currentOrder.trackingNumber !== parsed.waybillNo) throw new Error('主订单已有其他物流单号，请人工核对');
     const outboundRecordId = trimString(currentOrder.outboundRecordId);
     let outbound = null;
     if (outboundRecordId) {
@@ -313,6 +316,23 @@ async function markQueryApplied(record, order, requestID, parsed) {
             : {}),
         },
       });
+    }
+    // Recovery after a timeout must restore every member of a merged shipment.
+    for (const memberId of record.linkedOrderIds || []) {
+      if (memberId === order._id) continue;
+      const member = (await transaction.collection(ORDERS_COLLECTION).doc(memberId).get()).data;
+      if (!member || member.sfExpressOrderRecordId !== record._id
+        || (member.trackingNumber && member.trackingNumber !== parsed.waybillNo)) throw new Error('关联订单物流信息已变化，请人工核对');
+      await transaction.collection(ORDERS_COLLECTION).doc(memberId).update({ data: {
+        trackingNumber: parsed.waybillNo, expressProvider: 'sf', sharedWaybill: true, updateTime: db.serverDate(),
+      } });
+      if (member.outboundRecordId) {
+        const outbound = (await transaction.collection(OUTBOUND_COLLECTION).doc(member.outboundRecordId).get()).data;
+        if (!outbound || (outbound.trackingNumber && outbound.trackingNumber !== parsed.waybillNo)) throw new Error('关联出库单物流信息已变化，请人工核对');
+        await transaction.collection(OUTBOUND_COLLECTION).doc(member.outboundRecordId).update({ data: {
+          trackingNumber: parsed.waybillNo, sfExpressOrderRecordId: record._id,
+        } });
+      }
     }
     await transaction.commit();
     return {

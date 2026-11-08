@@ -38,7 +38,6 @@ export function InboundList() {
   }, []);
 
   const handleSearch = () => {
-    inbound.resetFilters();
     const searchFilters: InboundFilters = { ...filters };
     // trim 字符串字段，避免前后空格导致查不到
     if (searchFilters.customerName) searchFilters.customerName = searchFilters.customerName.trim();
@@ -52,20 +51,22 @@ export function InboundList() {
   const handleReset = () => {
     setFilters({});
     setChannelTypeFilter('');
-    inbound.resetFilters();
     inbound.fetchRecords(null, {});
   };
 
-  const handleExport = async (startDate: string, endDate: string) => {
+  const handleExport = async (startDate: string, endDate: string, personName: string) => {
     setExporting(true);
     try {
       const exportFilters: InboundFilters = {
+        // 沿用列表中已经点击“查询”生效的条件，避免导出混入其他客户或渠道的数据。
+        ...inbound.filters,
+        customerName: personName || undefined,
         startDate,
         endDate,
       };
       const records = await inbound.fetchAllRecords(exportFilters);
       if (records.length === 0) {
-        MessagePlugin.warning('所选日期范围内没有入库记录');
+        MessagePlugin.warning('当前筛选条件和所选日期范围内没有入库记录');
         return;
       }
       exportInboundRecordsExcel(
@@ -74,7 +75,7 @@ export function InboundList() {
         endDate,
         value => dictionaries.getLabel(DICT_CODES.channelType, value),
       );
-      MessagePlugin.success(`已导出 ${records.length} 条入库记录`);
+      MessagePlugin.success(`已按当前筛选条件导出 ${records.length} 条入库记录`);
       setExportVisible(false);
     } catch (err) {
       MessagePlugin.error('导出失败: ' + (err instanceof Error ? err.message : String(err)));
@@ -147,8 +148,6 @@ export function InboundList() {
     },
   ];
 
-  const displayRecords = inbound.getPageRecords(inbound.currentPage);
-
   return (
     <div className="min-w-0 space-y-4">
       <div className="flex items-center justify-between gap-3">
@@ -162,7 +161,7 @@ export function InboundList() {
       {/* 筛选栏 */}
       <div className="glass-card p-4">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4 items-end [&>*]:min-w-0">
-          <Input placeholder="客户名称" value={filters.customerName || ''} onChange={(val) => setFilters(prev => ({ ...prev, customerName: val as string }))} />
+          <Input placeholder="客户名称（支持部分名称）" clearable value={filters.customerName || ''} onChange={(val) => setFilters(prev => ({ ...prev, customerName: val as string }))} onEnter={handleSearch} />
           <Select
             placeholder="渠道类型"
             value={channelTypeFilter}
@@ -182,18 +181,21 @@ export function InboundList() {
           <input type="date" className="w-full min-w-0 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-primary" placeholder="结束日期" value={filters.endDate || ''} onChange={(e) => setFilters(prev => ({ ...prev, endDate: e.target.value }))} />
         </div>
         <div className="flex gap-2 mt-3">
-          <Button theme="primary" icon={<Search size={16} />} onClick={handleSearch}>查询</Button>
+          <Button theme="primary" icon={<Search size={16} />} loading={inbound.loading} onClick={handleSearch}>查询</Button>
           <Button variant="outline" icon={<RotateCcw size={16} />} onClick={handleReset}>重置</Button>
         </div>
       </div>
 
       {/* 表格 */}
       <div className="glass-card min-w-0 overflow-hidden">
+        {inbound.error && <div role="alert" className="p-4 text-sm text-danger">查询失败：{inbound.error}。请重新查询。</div>}
         <div className="max-w-full overflow-x-auto">
           <Table
-            data={displayRecords}
+            key={JSON.stringify([inbound.filters, inbound.currentPage])}
+            data={inbound.records}
             columns={columns}
             loading={inbound.loading}
+            empty={inbound.error ? '查询失败，请重试' : '未找到匹配的入库记录'}
             rowKey="_id"
             tableLayout="fixed"
             hover
@@ -202,13 +204,13 @@ export function InboundList() {
         </div>
         {/* 分页 */}
         <div className="flex justify-center items-center gap-2 py-4 border-t border-gray-100">
-          <Button size="small" variant="outline" disabled={inbound.currentPage <= 1}
-            onClick={() => inbound.setCurrentPage(inbound.currentPage - 1)}>
+          <Button size="small" variant="outline" disabled={inbound.loading || inbound.currentPage <= 1}
+            onClick={() => inbound.changePage(inbound.currentPage - 1)}>
             上一页
           </Button>
           <span className="text-sm text-gray-500">第 {inbound.currentPage} 页</span>
-          <Button size="small" variant="outline" disabled={!inbound.hasMore}
-            onClick={() => inbound.fetchRecords(inbound.cursor)}>
+          <Button size="small" variant="outline" disabled={inbound.loading || !inbound.hasMore}
+            onClick={() => inbound.changePage(inbound.currentPage + 1)}>
             下一页
           </Button>
           <span className="text-sm text-gray-400">共 {inbound.totalRecords} 条</span>
@@ -249,6 +251,8 @@ export function InboundList() {
         visible={exportVisible}
         recordLabel="入库记录"
         exporting={exporting}
+        personFilterLabel="客户姓名"
+        initialPersonName={inbound.filters.customerName || ''}
         onClose={() => setExportVisible(false)}
         onExport={handleExport}
       />

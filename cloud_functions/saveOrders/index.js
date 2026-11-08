@@ -55,6 +55,7 @@ exports.main = async (event, context) => {
           delete orderData.createCustomerArchive;
           delete orderData.customerArchiveRequested;
           if (archiveRequested) orderData.customerArchiveRequested = true;
+          if (archiveRequested && order.customerArchiveCheckId) orderData.customerArchiveCheckId = order.customerArchiveCheckId;
           orderData.createTime = now;
           addRes = await transaction.collection('orders').add({ data: orderData });
           await customerOrders.recordPreparedLink(addRes._id, orderData, actor, transaction);

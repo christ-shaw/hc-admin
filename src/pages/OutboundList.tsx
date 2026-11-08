@@ -35,7 +35,6 @@ export function OutboundList() {
   }, []);
 
   const handleSearch = () => {
-    outbound.resetFilters();
     const searchFilters: OutboundFilters = { ...filters };
     // trim 字符串字段，避免前后空格导致查不到
     if (searchFilters.customerName) searchFilters.customerName = searchFilters.customerName.trim();
@@ -46,24 +45,26 @@ export function OutboundList() {
 
   const handleReset = () => {
     setFilters({});
-    outbound.resetFilters();
     outbound.fetchRecords(null, {});
   };
 
-  const handleExport = async (startDate: string, endDate: string) => {
+  const handleExport = async (startDate: string, endDate: string, personName: string) => {
     setExporting(true);
     try {
       const exportFilters: OutboundFilters = {
+        // 与当前列表使用同一组已生效筛选条件，再应用导出日期范围。
+        ...outbound.filters,
+        customerName: personName || undefined,
         startDate,
         endDate,
       };
       const records = await outbound.fetchAllRecords(exportFilters);
       if (records.length === 0) {
-        MessagePlugin.warning('所选日期范围内没有出库记录');
+        MessagePlugin.warning('当前筛选条件和所选日期范围内没有出库记录');
         return;
       }
       exportOutboundRecordsExcel(records, startDate, endDate);
-      MessagePlugin.success(`已导出 ${records.length} 条出库记录`);
+      MessagePlugin.success(`已按当前筛选条件导出 ${records.length} 条出库记录`);
       setExportVisible(false);
     } catch (err) {
       MessagePlugin.error('导出失败: ' + (err instanceof Error ? err.message : String(err)));
@@ -138,8 +139,6 @@ export function OutboundList() {
     },
   ];
 
-  const displayRecords = outbound.getPageRecords(outbound.currentPage);
-
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-3">
@@ -153,7 +152,8 @@ export function OutboundList() {
       {/* 筛选栏 */}
       <div className="glass-card p-4">
         <div className="grid grid-cols-2 md:grid-cols-6 gap-3 items-end">
-          <Input placeholder="客户名称" value={filters.customerName || ''} onChange={(val) => setFilters(prev => ({ ...prev, customerName: val as string }))} />
+          <Input placeholder="收件人（支持部分名称）" clearable value={filters.customerName || ''}
+            onChange={(val) => setFilters(prev => ({ ...prev, customerName: val as string }))} onEnter={handleSearch} />
           <Input placeholder="快递单号" value={filters.trackingNumber || ''} onChange={(val) => setFilters(prev => ({ ...prev, trackingNumber: val as string }))} />
           <Input placeholder="手机型号" value={filters.model || ''} onChange={(val) => setFilters(prev => ({ ...prev, model: val as string }))} />
           <Select placeholder="出库状态" clearable value={filters.outboundStatus || ''}
@@ -166,7 +166,7 @@ export function OutboundList() {
           <input type="date" className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-primary" placeholder="开始日期" value={filters.startDate || ''} onChange={(e) => setFilters(prev => ({ ...prev, startDate: e.target.value }))} />
           <input type="date" className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-primary" placeholder="结束日期" value={filters.endDate || ''} onChange={(e) => setFilters(prev => ({ ...prev, endDate: e.target.value }))} />
           <div className="flex gap-2">
-            <Button theme="primary" icon={<Search size={16} />} onClick={handleSearch}>查询</Button>
+            <Button theme="primary" icon={<Search size={16} />} loading={outbound.loading} onClick={handleSearch}>查询</Button>
             <Button variant="outline" icon={<RotateCcw size={16} />} onClick={handleReset}>重置</Button>
           </div>
         </div>
@@ -174,10 +174,13 @@ export function OutboundList() {
 
       {/* 表格 */}
       <div className="glass-card">
+        {outbound.error && <div role="alert" className="p-4 text-sm text-danger">查询失败：{outbound.error}。请重新查询。</div>}
         <Table
-          data={displayRecords}
+          key={JSON.stringify([outbound.filters, outbound.currentPage])}
+          data={outbound.records}
           columns={columns}
           loading={outbound.loading}
+          empty={outbound.error ? '查询失败，请重试' : '未找到匹配的出库记录'}
           rowKey="_id"
           tableLayout="fixed"
           hover
@@ -185,13 +188,13 @@ export function OutboundList() {
 
         />
         <div className="flex justify-center items-center gap-2 py-4 border-t border-gray-100">
-          <Button size="small" variant="outline" disabled={outbound.currentPage <= 1}
-            onClick={() => outbound.setCurrentPage(outbound.currentPage - 1)}>
+          <Button size="small" variant="outline" disabled={outbound.loading || outbound.currentPage <= 1}
+            onClick={() => outbound.changePage(outbound.currentPage - 1)}>
             上一页
           </Button>
           <span className="text-sm text-gray-500">第 {outbound.currentPage} 页</span>
-          <Button size="small" variant="outline" disabled={!outbound.hasMore}
-            onClick={() => outbound.fetchRecords(outbound.cursor)}>
+          <Button size="small" variant="outline" disabled={outbound.loading || !outbound.hasMore}
+            onClick={() => outbound.changePage(outbound.currentPage + 1)}>
             下一页
           </Button>
           <span className="text-sm text-gray-400">共 {outbound.totalRecords} 条</span>
@@ -259,6 +262,8 @@ export function OutboundList() {
         visible={exportVisible}
         recordLabel="出库记录"
         exporting={exporting}
+        personFilterLabel="收件人"
+        initialPersonName={outbound.filters.customerName || ''}
         onClose={() => setExportVisible(false)}
         onExport={handleExport}
       />

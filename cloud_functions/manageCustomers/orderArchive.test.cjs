@@ -33,6 +33,79 @@ function entry(name, memory) {
 }
 const save = (f, order = input) => entry('saveOrders', f)({ data: { orders: [order] } });
 
+async function checkedOrder(f, order = input) {
+  const result = await entry('manageCustomers', f)({ action: 'matchIdentity', scope: 'orderArchive', identity: order });
+  assert.equal(result.success, true);
+  return { ...order, customerArchiveCheckId: result.data.archiveCheckId };
+}
+
+test('填写阶段查重结果直接复用：客户库版本变化也不扫描，提交及重试只按 ID 读记录', async () => {
+  const f = fixture(), order = await checkedOrder(f);
+  assert.match(order.customerArchiveCheckId, /^order-check-[a-f0-9]{48}$/);
+  await f.db.collection('system_config').doc('customer_identity_revision').set({ data: { revision: 99 } });
+  f.reads.length = 0;
+  const result = await save(f, order);
+  assert.equal(result.customerArchives[0].status, 'created');
+  assert.equal(f.data.customer_write_requests[0].orderId, result.savedIds[0]);
+  assert.equal((await f.archive(result.savedIds[0], actor)).status, 'linked');
+  assert.equal(f.reads.some(row => ['customers', 'customer_aliases', 'customer_recipient_profiles'].includes(row.collection) && !row.id), false);
+  assert.equal(f.data.customers.length, 1);
+});
+
+test('首步发现相似客户或合并链异常时不签发建档凭据，客户端不能伪造无重复结果', async () => {
+  for (const customer of [{ _id: 'c', displayName: input.customerName, status: 'active' },
+    { _id: 'c', displayName: '异常客户', status: 'merged', mergedIntoCustomerId: 'missing' }]) {
+    const f = fixture(); f.data.customers.push(customer);
+    const result = await entry('manageCustomers', f)({ action: 'matchIdentity', scope: 'orderArchive', identity: input,
+      knownIdentityRevision: 0, knownNormalizationVersion: 'customer-identity-v2', candidates: [] });
+    assert.equal(result.success, true); assert.equal(result.data.archiveCheckId, undefined);
+    assert.equal((f.data.customer_write_requests || []).length, 0);
+  }
+});
+
+test('伪造、身份已修改或他人凭据不触发重复扫描，订单保留待归档', async () => {
+  for (const change of ['missing', 'identity', 'actor']) {
+    const f = fixture(), order = await checkedOrder(f);
+    if (change === 'missing') order.customerArchiveCheckId = 'order-check-' + 'a'.repeat(48);
+    if (change === 'identity') order.consigneePhone = '13900139000';
+    if (change === 'actor') f.data.customer_write_requests[0].actorId = 'someone-else';
+    f.reads.length = 0;
+    const result = await save(f, order);
+    assert.equal(result.savedCount, 1); assert.equal(result.customerArchives[0].code, 'CUSTOMER_ARCHIVE_CHECK_INVALID');
+    assert.equal(f.data.customers.length, 0);
+    assert.equal(f.reads.some(row => ['customers', 'customer_aliases', 'customer_recipient_profiles'].includes(row.collection) && !row.id), false);
+  }
+});
+
+test('一份查重凭据不能为两个订单重复建档', async () => {
+  const f = fixture(), order = await checkedOrder(f);
+  const first = await save(f, order), second = await save(f, order);
+  assert.equal(first.customerArchives[0].status, 'created');
+  assert.equal(second.customerArchives[0].code, 'CUSTOMER_ARCHIVE_CHECK_INVALID');
+  assert.equal(f.data.orders.length, 2); assert.equal(f.data.customers.length, 1);
+});
+
+test('复用结果的建档事务失败不消耗凭据，重试可建档', async () => {
+  let failed = false;
+  const f = fixture({ beforeCommit: writes => {
+    if (!failed && writes.some(row => row.collection === 'customers')) { failed = true; throw new Error('transient'); }
+  } });
+  const order = await checkedOrder(f), result = await save(f, order);
+  assert.equal(result.customerArchives[0].status, 'pending');
+  assert.equal(f.data.customer_write_requests[0].orderId, '');
+  assert.equal((await f.archive(result.savedIds[0], actor)).status, 'created');
+  assert.equal(f.data.customers.length, 1);
+});
+
+test('编辑和非建档订单不能植入查重凭据；订单权限不等于建档权限', async () => {
+  assert.deepEqual(stripLinkFields({ customerArchiveCheckId: 'forged', customerName: '客户' }, true), { customerName: '客户' });
+  const f = fixture({}, ['orders:create']);
+  const check = await entry('manageCustomers', f)({ action: 'matchIdentity', scope: 'orderArchive', identity: input });
+  assert.equal(check.code, 'ACCESS_DENIED');
+  await save(f, { ...input, createCustomerArchive: false, customerArchiveCheckId: 'forged' });
+  assert.equal(f.data.orders[0].customerArchiveCheckId, undefined);
+});
+
 test('保存新租赁订单后创建主档、渠道别名、收货档案并关联，重试不重复', async () => {
   const f = fixture(); const result = await save(f);
   assert.equal(result.savedCount, 1); assert.equal(result.failedCount, 0);

@@ -209,6 +209,7 @@ exports.main = async (event, context) => {
       code: 'admin',
       description: '拥有全部页面和功能权限',
       pagePermissions: ALL_PAGE_PERMISSIONS,
+      // Wildcard includes customers:read/write/merge. Do not grant customer access to order-only roles.
       actionPermissions: ['*'],
       systemRole: true,
       updatedAt: timestamp,

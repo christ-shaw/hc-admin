@@ -142,17 +142,20 @@ async function saveToken(config, tokenData) {
   };
 
   try {
-    await collection.doc(config.tokenDocId).update({ data: updateData });
+    const result = await collection.doc(config.tokenDocId).update({ data: updateData });
+    // A missing document can return updated: 0 instead of throwing.
+    if (Number(result && result.stats && result.stats.updated) > 0) return;
   } catch (err) {
     if (!isNotFoundError(err)) throw err;
-    await collection.add({
-      data: {
-        _id: config.tokenDocId,
-        ...updateData,
-        createTime: db.serverDate(),
-      },
-    });
   }
+
+  // Use the exact ID consumed by apply/query/cancel/print, including new profiles.
+  await collection.doc(config.tokenDocId).set({
+    data: {
+      ...updateData,
+      createTime: db.serverDate(),
+    },
+  });
 }
 
 async function requestAccessToken(config) {

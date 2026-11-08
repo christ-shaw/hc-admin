@@ -1,9 +1,10 @@
-import { useState, FormEvent } from 'react';
+import { useRef, useState, FormEvent } from 'react';
 import { Input, Button, MessagePlugin } from 'tdesign-react';
 import { Package } from 'lucide-react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { signIn, callFunction, getCurrentPermissionUserPayload } from '../lib/cloudbase';
 import { usePermission } from '../contexts/PermissionContext';
+import { loginErrorMessage } from '../utils/loginErrors';
 
 /** 记录登录日志（成功/失败都记录） */
 async function recordLogin(username: string, success: boolean, failReason?: string) {
@@ -31,28 +32,36 @@ export function Login() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const submitting = useRef(false);
 
   const handleLogin = async (e?: FormEvent) => {
     e?.preventDefault();
+    if (submitting.current) return;
     if (!username) { MessagePlugin.warning('请输入用户名'); return; }
     if (!password) { MessagePlugin.warning('请输入密码'); return; }
 
+    submitting.current = true;
     setLoading(true);
-    const { error } = await signIn(username, password);
-    if (error) {
+    let authenticated = false;
+    try {
+      const { error } = await signIn(username, password);
+      if (error) throw error;
+      authenticated = true;
+      await refreshPermissions();
+      void recordLogin(username, true);
+      MessagePlugin.success('登录成功');
+      const rawFrom = (location.state as any)?.from?.pathname || '/';
+      // 避免跳回禁止访问页或登录页本身
+      const from = ['/forbidden', '/login'].includes(rawFrom) ? '/' : rawFrom;
+      navigate(from, { replace: true, state: { restoreWorkspace: from === '/' } });
+    } catch (error) {
+      const message = authenticated ? '账号已验证，但权限加载失败，请重试' : loginErrorMessage(error);
+      if (!authenticated) void recordLogin(username, false, message);
+      MessagePlugin.error(message);
+    } finally {
       setLoading(false);
-      void recordLogin(username, false, '用户名或密码错误');
-      MessagePlugin.error('登录失败：用户名或密码错误');
-      return;
+      submitting.current = false;
     }
-    await refreshPermissions();
-    setLoading(false);
-    void recordLogin(username, true);
-    MessagePlugin.success('登录成功');
-    const rawFrom = (location.state as any)?.from?.pathname || '/';
-    // 避免跳回禁止访问页或登录页本身
-    const from = ['/forbidden', '/login'].includes(rawFrom) ? '/' : rawFrom;
-    navigate(from, { replace: true, state: { restoreWorkspace: from === '/' } });
   };
 
   return (

@@ -3,7 +3,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const crypto = require('node:crypto');
 
-const FUNCTION_NAMES = ['manageSfConfig', 'applySfExpress', 'getSfAccessToken', 'querySfOrderResult', 'cancelSfExpress', 'manageSfPluginPrint', 'printSfWaybill', 'querySfExpressOrders', 'manageSfShipment'];
+const FUNCTION_NAMES = ['manageSfConfig', 'applySfExpress', 'getSfAccessToken', 'querySfOrderResult', 'cancelSfExpress', 'manageSfPluginPrint', 'printSfWaybill', 'querySfExpressOrders', 'manageSfShipment', 'generateOutboundFromOrders'];
 const clone = value => value === undefined ? undefined : structuredClone(value);
 const valueAt = (obj, key) => key.split('.').reduce((v, k) => v?.[k], obj);
 function matches(row, query) {
@@ -142,6 +142,7 @@ function createRuntime({ legacyToken = false } = {}) {
       require(id) {
         if (id === 'wx-server-sdk') return cloud;
         if (id === './permissionAuth') return { getCurrentUser: async () => ({ id: `local-${state.role}`, ids: [`local-${state.role}`] }) };
+        if (id === './miniappAuth') return { requireMiniappPermission: async () => ({ allowed: state.role === 'admin' }) };
         if (id.startsWith('.')) return load(path.resolve(path.dirname(file), id.endsWith('.js') ? id : id + '.js'));
         if (id.startsWith('node:')) return require(id);
         throw new Error(`本地调试不支持模块 ${id}`);

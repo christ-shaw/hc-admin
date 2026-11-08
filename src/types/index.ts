@@ -229,6 +229,10 @@ export interface SfExpressOrderRecord {
   errorCode?: string;
   errorMessage?: string;
   orderSnapshot?: {
+    consignee?: string;
+    consigneePhone?: string;
+    consigneeAddress?: string;
+    shippingFee?: string;
     customerRemark?: string;
     rawCustomerRemark?: string;
     productRemark?: string;
@@ -282,6 +286,7 @@ export interface SfExportSummary {
 }
 
 export interface SfExpressWorkbenchRow {
+  mergeEligible?: boolean;
   order: OrderRecord;
   sfStatus: SfWorkbenchStatus;
   currentSfOrder: SfExpressOrderRecord | null;
@@ -310,6 +315,7 @@ export interface OrderRecord {
   customerLinkIgnoreReason?: string; // 人工忽略归档的原因
   customerSelectionMode?: 'explicit' | 'none';
   createCustomerArchive?: boolean;  // 本次新建订单申请随单建档（不持久化）
+  customerArchiveCheckId?: string;  // 填写阶段的服务端查重凭据
   customerArchiveRequested?: boolean; // 服务端保存，用于建档失败后的独立重试
   customerLinkExpected?: { customerId: string; customerAliasId: string; recipientProfileId: string };
   customerLinkMethod?: 'manual' | 'inherited' | 'exact' | '';
@@ -456,7 +462,10 @@ export interface CustomerOrderSelection extends CustomerSelectionItem {
   recipientTotal: number;
 }
 
-export type CustomerSuggestion = Pick<CustomerOrderSelection, '_id' | 'displayName' | 'aliases' | 'recipients' | 'aliasTotal' | 'recipientTotal'>;
+export type CustomerSuggestion = Pick<CustomerOrderSelection, '_id' | 'displayName' | 'aliases' | 'recipients' | 'aliasTotal' | 'recipientTotal'> & {
+  /** Only matching aliases are loaded; addresses and totals require getOrderSelection. */
+  detailsDeferred?: boolean;
+};
 
 export type CustomerRelationType = 'family' | 'cohabitant' | 'colleague' | 'ordered_on_behalf' | 'guarantor' | 'other';
 export type CustomerRelationDirection = 'undirected' | 'directed';
@@ -496,6 +505,7 @@ export interface CustomerIdentityMatch {
 }
 
 export interface CustomerIdentityMatchResult {
+  archiveCheckId?: string;
   identityRevision?: number;
   normalizationVersion: string;
   identityFingerprint: string | null;

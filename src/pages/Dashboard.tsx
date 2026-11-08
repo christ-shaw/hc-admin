@@ -14,7 +14,8 @@ import {
 import { callFunction } from '../lib/cloudbase';
 import { OrderFilters, OrderRecord } from '../types';
 import { formatDate } from '../utils/format';
-import { getOrderTotalAmount, hasUnreceivedPayment } from '../utils/orderProducts';
+import { getOrderTotalAmount } from '../utils/orderProducts';
+import { useDashboardMessages } from '../hooks/useDashboardMessages';
 import { AnnouncementCenter } from '../components/AnnouncementCenter';
 
 interface QuickStat {
@@ -62,14 +63,6 @@ interface DailyShipmentStats {
   totalOutboundPhones: number;
 }
 
-interface QueryOrdersResult {
-  data?: OrderRecord[];
-  cursor?: string | null;
-  hasMore?: boolean;
-}
-
-const DYNAMIC_MESSAGE_PAGE_SIZE = 100;
-const DYNAMIC_MESSAGE_MAX_SCAN = 10000;
 const DYNAMIC_MESSAGE_DISPLAY_LIMIT = 20;
 
 const RETURN_STATUS_LABELS: Record<string, string> = {
@@ -125,24 +118,6 @@ const buildOrderLabel = (order: OrderRecord) => {
 const getOwnerName = (order: OrderRecord) => order.salesperson || '-';
 const buildOwnerLabel = (order: OrderRecord) => `责任人 ${getOwnerName(order)}`;
 
-async function fetchOrdersForDynamicMessages() {
-  const orders: OrderRecord[] = [];
-  let cursor: string | null = null;
-  let hasMore = true;
-
-  while (hasMore && orders.length < DYNAMIC_MESSAGE_MAX_SCAN) {
-    const result: QueryOrdersResult = await callFunction<QueryOrdersResult>('queryOrders', {
-      data: { limit: DYNAMIC_MESSAGE_PAGE_SIZE, cursor },
-    });
-    const pageData = result.data || [];
-    orders.push(...pageData);
-    cursor = result.cursor || null;
-    hasMore = !!result.hasMore && !!cursor && pageData.length > 0;
-  }
-
-  return orders;
-}
-
 export function Dashboard() {
   const navigate = useNavigate();
   const [stats, setStats] = useState<QuickStat[]>(DEFAULT_STATS);
@@ -151,9 +126,7 @@ export function Dashboard() {
   const [topShippedModels, setTopShippedModels] = useState<TopShippedModelItem[]>([]);
   const [dailyStatsLoading, setDailyStatsLoading] = useState(false);
   const [dailyStatsRange, setDailyStatsRange] = useState('');
-  const [messages, setMessages] = useState<DynamicMessage[]>([]);
-  const [messageCounts, setMessageCounts] = useState({ return: 0, payment: 0 });
-  const [messagesLoading, setMessagesLoading] = useState(false);
+  const { summary, loading: messagesLoading, error: messagesError, refresh: loadDynamicMessages } = useDashboardMessages();
 
   const loadDailyShipmentStats = async () => {
     setDailyStatsLoading(true);
@@ -210,57 +183,35 @@ export function Dashboard() {
     }
   };
 
-  const loadDynamicMessages = async () => {
-    setMessagesLoading(true);
-    try {
-      const orders = await fetchOrdersForDynamicMessages();
-      const returnMessages = orders
-        .filter(order => ['postRentalShip', 'postRentalReturn'].includes(order.orderType))
-        .filter(order => order.returnStatus !== 'returned')
-        .map((order): DynamicMessage => ({
-          id: `${order._id}-return`,
-          type: 'return',
-          title: '归还状态待处理',
-          detail: `${buildOrderLabel(order)} · ${buildOwnerLabel(order)} · ${RETURN_STATUS_LABELS[order.returnStatus || ''] || '未填写归还状态'}`,
-          owner: getOwnerName(order),
-          date: getOrderTime(order),
-          orderId: order._id,
-          onlineOrderNumber: order.onlineOrderNumber || '',
-          customerName: order.customerName || '',
-        }));
+  const returnMessages = (summary?.unreturned.orders || [])
+    .map((order): DynamicMessage => ({
+      id: `${order._id}-return`,
+      type: 'return',
+      title: '归还状态待处理',
+      detail: `${buildOrderLabel(order)} · ${buildOwnerLabel(order)} · ${RETURN_STATUS_LABELS[order.returnStatus || ''] || '未填写归还状态'}`,
+      owner: getOwnerName(order),
+      date: getOrderTime(order),
+      orderId: order._id,
+      onlineOrderNumber: order.onlineOrderNumber || '',
+      customerName: order.customerName || '',
+    }));
 
-      const paymentMessages = orders
-        .filter(hasUnreceivedPayment)
-        .map((order): DynamicMessage => ({
-          id: `${order._id}-payment`,
-          type: 'payment',
-          title: '订单待收款',
-          detail: `${buildOrderLabel(order)} · ${buildOwnerLabel(order)} · 金额 ¥${getOrderTotalAmount(order)}`,
-          owner: getOwnerName(order),
-          date: getOrderTime(order),
-          orderId: order._id,
-          onlineOrderNumber: order.onlineOrderNumber || '',
-          customerName: order.customerName || '',
-        }));
+  const paymentMessages = (summary?.unreceived.orders || [])
+    .map((order): DynamicMessage => ({
+      id: `${order._id}-payment`,
+      type: 'payment',
+      title: '订单待收款',
+      detail: `${buildOrderLabel(order)} · ${buildOwnerLabel(order)} · 金额 ¥${getOrderTotalAmount(order)}`,
+      owner: getOwnerName(order),
+      date: getOrderTime(order),
+      orderId: order._id,
+      onlineOrderNumber: order.onlineOrderNumber || '',
+      customerName: order.customerName || '',
+    }));
 
-      setMessageCounts({
-        return: returnMessages.length,
-        payment: paymentMessages.length,
-      });
-
-      const nextMessages = [...returnMessages, ...paymentMessages]
-        .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
-        .slice(0, DYNAMIC_MESSAGE_DISPLAY_LIMIT);
-
-      setMessages(nextMessages);
-    } catch (err) {
-      console.error('获取首页动态消息失败:', err);
-      setMessages([]);
-      setMessageCounts({ return: 0, payment: 0 });
-    } finally {
-      setMessagesLoading(false);
-    }
-  };
+  const messages = [...returnMessages, ...paymentMessages]
+    .sort((a, b) => (new Date(b.date).getTime() || 0) - (new Date(a.date).getTime() || 0))
+    .slice(0, DYNAMIC_MESSAGE_DISPLAY_LIMIT);
 
   const handleMessageClick = (message: DynamicMessage) => {
     const filter: OrderFilters = {};
@@ -276,31 +227,8 @@ export function Dashboard() {
     loadDailyShipmentStats();
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    const fetchDynamicMessages = async () => {
-      setMessagesLoading(true);
-      try {
-        await loadDynamicMessages();
-      } catch (err) {
-        console.error('获取首页动态消息失败:', err);
-        if (!cancelled) setMessages([]);
-      } finally {
-        if (!cancelled) setMessagesLoading(false);
-      }
-    };
-
-    fetchDynamicMessages();
-    const timer = window.setInterval(fetchDynamicMessages, 60000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, []);
-
-  const returnMessageCount = messageCounts.return;
-  const paymentMessageCount = messageCounts.payment;
+  const returnMessageCount = summary?.unreturned.total ?? '—';
+  const paymentMessageCount = summary?.unreceived.total ?? '—';
   const shouldRollMessages = messages.length > 4;
   const rollingMessages = shouldRollMessages ? [...messages, ...messages] : messages;
   const rollDuration = `${Math.max(18, messages.length * 3)}s`;
@@ -358,9 +286,16 @@ export function Dashboard() {
         </div>
       </div>
 
+      {messagesError && (
+        <div role="alert" className="px-4 pt-3 text-sm text-red-600">
+          {messagesError}{summary ? '（当前显示上次结果）' : ''}
+        </div>
+      )}
       <div className="h-[34rem] overflow-hidden p-3">
         {messagesLoading && messages.length === 0 ? (
           <div className="flex h-full items-center justify-center text-sm text-gray-400">正在加载动态消息...</div>
+        ) : messagesError && !summary ? (
+          <div className="flex h-full items-center justify-center text-sm text-gray-400">暂时无法获取动态消息</div>
         ) : messages.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-gray-400">
             <Bell size={28} />

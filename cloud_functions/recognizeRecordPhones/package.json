@@ -1,0 +1,10 @@
+{
+  "name": "recognize-record-phones",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.js",
+  "dependencies": {
+    "@cloudbase/node-sdk": "^3.16.0",
+    "wx-server-sdk": "~2.6.3"
+  }
+}

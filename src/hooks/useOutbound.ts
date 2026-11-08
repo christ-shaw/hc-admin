@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { callFunction, getCurrentPermissionUserPayload } from '../lib/cloudbase';
 import { OutboundRecord, OutboundFilters } from '../types';
 import { PAGE_SIZE } from '../utils/constants';
@@ -8,6 +8,7 @@ interface QueryResult {
   data: OutboundRecord[];
   cursor: string | null;
   hasMore: boolean;
+  total: number;
   errMsg?: string;
 }
 
@@ -19,6 +20,7 @@ interface OutboundState {
   totalRecords: number;
   filters: OutboundFilters;
   loading: boolean;
+  error: string | null;
 }
 
 interface SyncModelsResult {
@@ -33,16 +35,24 @@ export function useOutbound() {
   const [state, setState] = useState<OutboundState>({
     records: [],
     cursor: null,
-    hasMore: true,
+    hasMore: false,
     currentPage: 1,
     totalRecords: 0,
     filters: {},
     loading: false,
+    error: null,
   });
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  const requestIdRef = useRef(0);
 
   const fetchRecords = useCallback(async (cursor?: string | null, filters?: OutboundFilters) => {
-    setState(prev => ({ ...prev, loading: true }));
-    const currentFilters = filters ?? state.filters;
+    const requestId = ++requestIdRef.current;
+    const currentFilters = { ...(filters ?? stateRef.current.filters) };
+    const offset = Math.max(0, Number(cursor) || 0);
+    setState(prev => ({ ...prev, records: [], cursor: null, hasMore: false,
+      currentPage: Math.floor(offset / PAGE_SIZE) + 1, totalRecords: 0,
+      filters: currentFilters, loading: true, error: null }));
 
     const requestData: Record<string, unknown> = {
       type: 'outbound',
@@ -54,32 +64,34 @@ export function useOutbound() {
     try {
       const currentUser = await getCurrentPermissionUserPayload().catch(() => null);
       const result = await callFunction<QueryResult>('queryRecords', { data: { ...requestData, currentUser } });
-      if (!result.success && result.errMsg) throw new Error(result.errMsg);
-      const records = result.data || [];
-      const nextCursor = result.cursor;
+      if (requestId !== requestIdRef.current) return null;
+      if (result.success === false) throw new Error(result.errMsg || '查询出库记录失败');
+      if (!Array.isArray(result.data) || !Number.isInteger(result.total) || result.total < 0) {
+        throw new Error('出库查询结果异常，请重试');
+      }
+      const records = Array.from(new Map(result.data.map(record => [record._id, record])).values());
+      const nextCursor = result.cursor == null ? null : String(result.cursor);
       const hasMore = result.hasMore !== undefined ? result.hasMore : !!nextCursor;
 
-      setState(prev => {
-        const newRecords = cursor ? [...prev.records, ...records] : records;
-        const totalPages = Math.ceil(newRecords.length / PAGE_SIZE);
-        return {
-          records: newRecords,
+      setState({
+          records,
           cursor: nextCursor,
           hasMore,
-          currentPage: cursor ? Math.min(prev.currentPage + 1, totalPages) : 1,
-          totalRecords: newRecords.length,
+          currentPage: Math.floor(offset / PAGE_SIZE) + 1,
+          totalRecords: result.total,
           filters: currentFilters,
           loading: false,
-        };
+          error: null,
       });
 
       return { records, nextCursor, hasMore };
     } catch (err) {
+      if (requestId !== requestIdRef.current) return null;
       console.error('查询出库记录失败:', err);
-      setState(prev => ({ ...prev, loading: false }));
+      setState(prev => ({ ...prev, loading: false, error: err instanceof Error ? err.message : String(err) }));
       return null;
     }
-  }, [state.filters]);
+  }, []);
 
   const updateRecord = useCallback(async (recordId: string, updateData: Partial<OutboundRecord>) => {
     try {
@@ -132,26 +144,9 @@ export function useOutbound() {
     }
   }, []);
 
-  const resetFilters = useCallback(() => {
-    setState(prev => ({
-      ...prev,
-      records: [],
-      cursor: null,
-      hasMore: true,
-      currentPage: 1,
-      totalRecords: 0,
-      filters: {},
-    }));
-  }, []);
-
-  const setCurrentPage = useCallback((page: number) => {
-    setState(prev => ({ ...prev, currentPage: page }));
-  }, []);
-
-  const getPageRecords = useCallback((page: number): OutboundRecord[] => {
-    const start = (page - 1) * PAGE_SIZE;
-    return state.records.slice(start, start + PAGE_SIZE);
-  }, [state.records]);
+  const changePage = useCallback((page: number) => {
+    return fetchRecords(String((Math.max(1, page) - 1) * PAGE_SIZE));
+  }, [fetchRecords]);
 
   /** 按条件获取全部出库记录（用于导出，自动分页）。 */
   const fetchAllRecords = useCallback(async (filters: OutboundFilters): Promise<OutboundRecord[]> => {
@@ -180,5 +175,5 @@ export function useOutbound() {
     return allRecords.slice(0, 10000);
   }, []);
 
-  return { ...state, fetchRecords, fetchAllRecords, updateRecord, syncModelsFromOrders, deleteRecord, resetFilters, getPageRecords, setCurrentPage };
+  return { ...state, fetchRecords, fetchAllRecords, updateRecord, syncModelsFromOrders, deleteRecord, changePage };
 }

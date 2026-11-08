@@ -1,4 +1,6 @@
+const senderConfig = require('./senderConfig');
 const sfProfile = require('./sfProfile');
+const { getCurrentUser } = require('./permissionAuth');
 /**
  * applySfExpress - 顺丰下快递单
  *
@@ -470,8 +472,11 @@ function buildMsgData(order, sfOrderId, sender, config) {
     contactInfoList: buildContactInfoList(order, sender),
     payMethod: payment.payMethod,
     expressTypeId: config.expressTypeId,
-    parcelQty: config.parcelQty,
-    remark: buildPrintOrderRemark(order, 100),
+    parcelQty: order._shipmentMembers?.length > 1 ? 1 : config.parcelQty,
+    remark: order._shipmentMembers?.length > 1
+      ? buildShipmentPrintRemark(order._shipmentMembers.map(member => buildShipmentRemarkEntry(member,
+        member._id === order._id ? 'primary' : 'appended')))
+      : buildPrintOrderRemark(order, 100),
   };
 
   if (payment.monthlyCard) {
@@ -866,6 +871,115 @@ async function prepareSfRecord({ order, config, sender }) {
   return { ...record, requestID, msgData };
 }
 
+// Claim every member before contacting SF. A competing single/merged request must
+// read these same order documents, so only one package can own an order.
+async function claimShipmentOrders(record, members) {
+  const transaction = await db.startTransaction();
+  try {
+    const outboundIds = new Set();
+    for (const member of members) {
+      const result = await transaction.collection(ORDERS_COLLECTION).doc(member._id).get();
+      const current = result.data;
+      if (!current || trimString(current.trackingNumber)) throw new Error('订单已生成快递单号，请刷新后重试');
+      if (!isApplicableOrderStatus(current.status) || current.needsOutbound === false) throw new Error('订单已不符合出单条件');
+      for (const field of ['consignee', 'consigneePhone', 'consigneeAddress', 'shippingFee', 'outboundRecordId', 'products', 'customerRemark']) {
+        const expected = field === 'shippingFee' ? member._rawShippingFee : member[field];
+        if (JSON.stringify(current[field] || '') !== JSON.stringify(expected || '')) throw new Error('订单资料已变化，请刷新后重新确认');
+      }
+      const checkOwner = async ownerId => {
+        if (!ownerId || ownerId === record._id) return;
+        const previous = (await transaction.collection(SF_ORDERS_COLLECTION).doc(ownerId).get()).data;
+        if (members.length > 1 && previous && (previous.waybillNo || Number(previous.printCount) > 0 || previous.lastPrintTime)) {
+          throw new Error('订单已生成过快递单号或打印过，不能合并');
+        }
+        const replacedFailedAttempt = previous && previous.status === 'failed'
+          && previous.isCurrent === false && previous.sourceOrderId === record.sourceOrderId
+          && members.length === 1 && (previous.linkedOrderIds || []).length <= 1;
+        if (!previous || (previous.status !== 'cancelled' && !replacedFailedAttempt)) throw new Error('订单正在出单或已关联其他顺丰包裹');
+      };
+      await checkOwner(current.sfExpressOrderRecordId);
+      if (current.outboundRecordId) {
+        const outbound = (await transaction.collection(OUTBOUND_COLLECTION).doc(current.outboundRecordId).get()).data;
+        if (!outbound || outbound.outboundStatus !== 'pending' || trimString(outbound.trackingNumber)) throw new Error('出库单已发货或已有物流单号');
+        await checkOwner(outbound.sfExpressOrderRecordId);
+        // A shared outbound must not silently assign its other orders to this package.
+        const relatedIds = [...(outbound.orderIds || []), outbound.orderId].filter(Boolean);
+        if (relatedIds.some(id => !members.some(item => item._id === id))) throw new Error('请同时选择该合并出库单的全部订单');
+        outboundIds.add(current.outboundRecordId);
+      }
+    }
+    const entries = members.map(member => buildShipmentRemarkEntry(member,
+      member._id === record.sourceOrderId ? 'primary' : 'appended', record.createdAt));
+    const updates = {
+      linkedOrderIds: members.map(member => member._id),
+      linkedOutboundIds: [...outboundIds],
+      shipmentRemarkEntries: entries,
+      shipmentRemarkFull: buildShipmentRemarkFull(entries),
+      shipmentPrintRemark: buildShipmentPrintRemark(entries),
+    };
+    await transaction.collection(SF_ORDERS_COLLECTION).doc(record._id).update({ data: updates });
+    for (const member of members) {
+      await transaction.collection(ORDERS_COLLECTION).doc(member._id).update({ data: {
+        sfExpressOrderRecordId: record._id, sharedWaybill: members.length > 1,
+      } });
+    }
+    for (const id of outboundIds) {
+      await transaction.collection(OUTBOUND_COLLECTION).doc(id).update({ data: { sfExpressOrderRecordId: record._id } });
+    }
+    await transaction.commit();
+    return { ...record, ...updates };
+  } catch (error) {
+    try { await transaction.rollback(); } catch (_) { /* ignore */ }
+    throw error;
+  }
+}
+
+async function loadShipmentMembers(sourceOrderId, requestedIds, env) {
+  if (requestedIds !== undefined && (!Array.isArray(requestedIds) || requestedIds.some(id => typeof id !== 'string' || !id.trim()))) throw new Error('合并订单参数无效');
+  const source = await getOrder(sourceOrderId);
+  if (!source) throw new Error('订单不存在');
+  const previous = source.sfExpressOrderRecordId ? await getSfRecord(source.sfExpressOrderRecordId) : null;
+  const retryIds = previous && previous.status === 'failed' && previous.sourceOrderId === sourceOrderId
+    && (previous.linkedOrderIds || []).length > 1
+    ? previous.linkedOrderIds : null;
+  const ids = Array.from(new Set(requestedIds || retryIds || [sourceOrderId]));
+  if (!ids.includes(sourceOrderId) || ids.length > 20 || (requestedIds && ids.length < 2)) throw new Error('合并出单需选择 2 至 20 条订单，收件信息必须来自所选订单');
+  if (retryIds && (ids.length !== retryIds.length || retryIds.some(id => !ids.includes(id)))) throw new Error('请按原合并订单重试，不能更换成员');
+  if (ids.length > 1) {
+    const user = await getCurrentUser();
+    if (!user) throw new Error('请先登录');
+    let mapping;
+    for (const userId of user.ids || [user.id]) {
+      const result = await db.collection('user_roles').where({ userId }).limit(1).get();
+      mapping = result.data && result.data[0];
+      if (mapping) break;
+    }
+    const role = mapping && (await db.collection('roles').doc(mapping.roleId).get()).data;
+    const actions = role && role.actionPermissions || [];
+    if (!actions.some(action => ['*', 'orders:create', 'orders:update'].includes(action))) throw new Error('当前角色没有合并出单权限');
+  }
+  const members = [];
+  for (const id of [sourceOrderId, ...ids.filter(id => id !== sourceOrderId)]) {
+    const raw = await getOrder(id);
+    const member = await resolveOrderShippingFee(raw);
+    if (!member) throw new Error('订单不存在');
+    if (ids.length > 1) {
+      if (member.needsOutbound === false || !['prepaid', 'cod'].includes(normalizeShippingFee(member.shippingFee))) throw new Error('仅需顺丰发货的订单可以合并');
+      const history = await db.collection(SF_ORDERS_COLLECTION).where({ sourceOrderId: id }).limit(100).get();
+      const records = history.data || [];
+      const linked = member.sfExpressOrderRecordId ? await getSfRecord(member.sfExpressOrderRecordId) : null;
+      if (member.sfWaybillNo || Number(member.sfPrintCount) > 0
+        || [...records, linked].filter(Boolean).some(item => item.waybillNo || item.printCount > 0 || item.lastPrintTime || item.status === 'cancelled')) {
+        throw new Error('已生成过快递单号或打印过的订单不能合并出单');
+      }
+    }
+    // Shipping fee may be inherited from an outbound; preserve the raw value for
+    // the transactional change check while using resolved data for the SF request.
+    members.push({ ...member, _rawShippingFee: raw.shippingFee });
+  }
+  return members;
+}
+
 async function prepareNextDuplicateRecord({ order, config, sender, currentRecord, parsed }) {
   await updateSfRecord(currentRecord._id, {
     status: 'failed',
@@ -923,6 +1037,8 @@ async function markSfApplied({ sfRecord, order, parsed, requestID }) {
       throw new Error('关联订单不存在');
     }
     const currentOrder = currentOrderResult.data;
+    if (currentOrder.sfExpressOrderRecordId !== sfRecord._id
+      || (currentOrder.trackingNumber && currentOrder.trackingNumber !== parsed.waybillNo)) throw new Error('主订单物流信息已变化，请查询原运单恢复');
     const outboundRecordId = trimString(currentOrder.outboundRecordId);
     let outbound = null;
     if (outboundRecordId) {
@@ -954,7 +1070,7 @@ async function markSfApplied({ sfRecord, order, parsed, requestID }) {
         trackingNumber: parsed.waybillNo,
         expressProvider: 'sf',
         sfExpressOrderRecordId: sfRecord._id,
-        sharedWaybill: false,
+        sharedWaybill: sfRecord.linkedOrderIds.length > 1,
         updateTime: db.serverDate(),
       },
     });
@@ -965,6 +1081,22 @@ async function markSfApplied({ sfRecord, order, parsed, requestID }) {
           sfExpressOrderRecordId: sfRecord._id,
         },
       });
+    }
+    for (const memberId of sfRecord.linkedOrderIds || []) {
+      if (memberId === order._id) continue;
+      const member = (await transaction.collection(ORDERS_COLLECTION).doc(memberId).get()).data;
+      if (!member || member.sfExpressOrderRecordId !== sfRecord._id
+        || (member.trackingNumber && member.trackingNumber !== parsed.waybillNo)) throw new Error('合并订单关联已变化，请查询原运单恢复');
+      await transaction.collection(ORDERS_COLLECTION).doc(memberId).update({ data: {
+        trackingNumber: parsed.waybillNo, expressProvider: 'sf', sharedWaybill: true, updateTime: db.serverDate(),
+      } });
+      if (member.outboundRecordId) {
+        const outbound = (await transaction.collection(OUTBOUND_COLLECTION).doc(member.outboundRecordId).get()).data;
+        if (!outbound || (outbound.trackingNumber && outbound.trackingNumber !== parsed.waybillNo)) throw new Error('合并出库单物流信息已变化');
+        await transaction.collection(OUTBOUND_COLLECTION).doc(member.outboundRecordId).update({ data: {
+          trackingNumber: parsed.waybillNo, sfExpressOrderRecordId: sfRecord._id,
+        } });
+      }
     }
     await transaction.commit();
     return {
@@ -1187,10 +1319,18 @@ exports.main = async (event) => {
     resolvedEnv = env;
     await assertDataModelV2();
     const config = getSfConfig(env);
-    const order = await resolveOrderShippingFee(await getOrder(sourceOrderId));
+    const members = await loadShipmentMembers(sourceOrderId, (event.data || {}).mergeOrderIds, env);
+    const order = { ...members[0], products: members.flatMap(getOrderProducts), _shipmentMembers: members };
+    if ((event.data || {}).mergeOrderIds) {
+      const choice = (event.data || {}).recipientChoice;
+      if (!choice || ['consignee', 'consigneePhone', 'consigneeAddress', 'shippingFee'].some(field => trimString(choice[field]) !== trimString(order[field]))) {
+        throw new Error('所选收件信息或收费方式已变化，请刷新后重新确认');
+      }
+    }
     validateOrder(order);
-    const sender = getSenderConfig(order, env);
+    const sender = await senderConfig.resolve(db, sfProfile.currentProfile(), env, order.salesperson, () => getSenderConfig(order, env));
     activeSfRecord = await prepareSfRecord({ order, config, sender });
+    activeSfRecord = await claimShipmentOrders(activeSfRecord, members);
     let lastParsed = null;
 
     for (let attempt = 1; attempt <= config.duplicateRetryLimit; attempt += 1) {
@@ -1240,7 +1380,7 @@ exports.main = async (event) => {
           };
         }
 
-        if (shouldRetryWithNextSfOrderId(recovered) && attempt < config.duplicateRetryLimit) {
+        if (members.length === 1 && shouldRetryWithNextSfOrderId(recovered) && attempt < config.duplicateRetryLimit) {
           activeSfRecord = await prepareNextDuplicateRecord({
             order,
             config,
@@ -1248,6 +1388,7 @@ exports.main = async (event) => {
             currentRecord: activeSfRecord,
             parsed,
           });
+          activeSfRecord = await claimShipmentOrders(activeSfRecord, members);
           continue;
         }
 
@@ -1312,6 +1453,8 @@ exports.main = async (event) => {
 };
 
 exports.__test__ = {
+  claimShipmentOrders,
+  loadShipmentMembers,
   buildSfOrderId,
   buildSfRecordId,
   getCurrentSfRecord,

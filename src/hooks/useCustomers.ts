@@ -84,8 +84,10 @@ export function useCustomers() {
     return result.data;
   }, []);
 
-  const matchCustomerIdentity = useCallback(async (identity: CustomerObservedIdentity) => {
-    const result = await callFunction<CustomerResult<CustomerIdentityMatchResult>>('manageCustomers', { action: 'matchIdentity', identity });
+  const matchCustomerIdentity = useCallback(async (identity: CustomerObservedIdentity, forOrderArchive = false) => {
+    const result = await callFunction<CustomerResult<CustomerIdentityMatchResult>>('manageCustomers', {
+      action: 'matchIdentity', identity, ...(forOrderArchive ? { scope: 'orderArchive' } : {}),
+    });
     if (!result.success || !result.data) throw new Error(result.errMsg || '客户身份匹配失败');
     return result.data;
   }, []);

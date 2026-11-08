@@ -5,6 +5,7 @@ const { readIdentityRevision, bumpIdentityRevision } = require('./identityRevisi
 const { aliasData, recipientData } = require('./records');
 const { clean, normalizeName, NORMALIZATION_VERSION } = require('./normalizers');
 const { fail } = require('./errors');
+const { consumeArchiveCheck } = require('./orderArchiveCheck');
 
 const rental = value => ['rental1', 'rental2', '租赁1', '租赁2'].includes(value);
 const digest = value => createHash('sha256').update(value).digest('hex');
@@ -24,21 +25,23 @@ function createOrderArchive(db) {
     if (order.customerLinkStatus === 'ignored') fail('ARCHIVE_IGNORED', '订单已忽略归档');
     if (!normalizeName(order.customerName)) fail('INVALID_CUSTOMER_NAME', '客户名称不能为空');
 
-    const revision = await readIdentityRevision(repository);
-    const match = await matchIdentity(repository, order);
-    // Never silently merge or create a second identity, even if only a phone or
-    // recipient matches. An operator can review these orders in customer archives.
-    if (match.status === 'invalid_cluster') return { status: 'pending', code: 'CUSTOMER_MATCH_UNAVAILABLE', message: '客户资料需核对，请稍后归档' };
-    if (match.candidates.length) return { status: 'pending', code: 'CUSTOMER_POSSIBLE_DUPLICATE', message: '发现相似客户，请选择已有档案或在客户管理中核对归档' };
+    const reuseCheck = !!order.customerArchiveCheckId;
+    const revision = reuseCheck ? null : await readIdentityRevision(repository);
+    const match = reuseCheck ? null : await matchIdentity(repository, order);
+    // New forms reuse their server check. Legacy orders without a receipt still
+    // need matching; existing candidates must be reviewed rather than merged.
+    if (match?.status === 'invalid_cluster') return { status: 'pending', code: 'CUSTOMER_MATCH_UNAVAILABLE', message: '客户资料需核对，请稍后归档' };
+    if (match?.candidates.length) return { status: 'pending', code: 'CUSTOMER_POSSIBLE_DUPLICATE', message: '发现相似客户，请选择已有档案或在客户管理中核对归档' };
 
     const tx = await db.startTransaction();
     try {
       const current = await get('orders', order._id, tx);
       if (current?.customerId) { await tx.rollback(); return { status: 'linked', customerId: current.customerId }; }
       if (JSON.stringify(current) !== JSON.stringify(order)
-        || await readIdentityRevision(repository, tx) !== revision) {
+        || (!reuseCheck && await readIdentityRevision(repository, tx) !== revision)) {
         fail('CUSTOMER_WRITE_CONFLICT', '客户或订单资料已变化，请重试建档');
       }
+      if (reuseCheck) await consumeArchiveCheck(repository, current, tx);
       const customerId = digest(`order-archive:${order._id}`);
       const aliasId = digest(`order-archive-alias:${order._id}`);
       const recipientId = digest(`order-archive-recipient:${order._id}`);

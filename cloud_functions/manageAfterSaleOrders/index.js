@@ -148,9 +148,9 @@ function normalizeCreatePayload(payload) {
   const shippingFee = needsOutbound ? trim(payload.shippingFee) : '';
 
   if (needsOutbound) {
-    if (!consignee) throw new Error('请填写收货人名称');
-    if (!PHONE_PATTERN.test(consigneePhone)) throw new Error('收货人电话只能填写 6–20 位数字');
-    if (!consigneeAddress) throw new Error('请填写收货人地址');
+    if (!['pickup', '自提'].includes(shippingFee) && !consignee) throw new Error('请填写收货人名称');
+    if (!['pickup', '自提'].includes(shippingFee) && !PHONE_PATTERN.test(consigneePhone)) throw new Error('收货人电话只能填写 6–20 位数字');
+    if (!['pickup', '自提'].includes(shippingFee) && !consigneeAddress) throw new Error('请填写收货人地址');
     if (!SHIPPING_METHODS.has(shippingFee)) throw new Error('请选择有效的快递方式');
   }
 

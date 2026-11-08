@@ -21,12 +21,13 @@ function Preview() {
     <section className="mx-auto max-w-2xl rounded-xl bg-white p-6 shadow-sm">
       <p className="mb-4 text-xs text-gray-500">本地交互验证 · 虚构客户与内存订单，不连接云端</p>
       <h1 className="mb-6 text-xl font-semibold">新建订单 · 随单建档</h1>
-      <CustomerNameField value={form} salesChannel="微信" onChange={patch => {
+      <CustomerNameField value={form} salesChannel="微信" onEditingChange={editing => editing ? plan.beginEditing() : plan.endEditing()} onChange={patch => {
         if (patch.customerName !== undefined && patch.customerName !== form.customerName) setChoice(undefined);
         change(patch);
       }} />
       <OrderCustomerArchiveOption plan={plan} onChoice={setChoice} onSelect={change} />
-      <div className="mt-6 grid grid-cols-1 gap-3 sm:grid-cols-2">
+      <div className="mt-6 grid grid-cols-1 gap-3 sm:grid-cols-2" onFocusCapture={plan.beginEditing}
+        onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) plan.endEditing(); }}>
         {(['consignee', 'consigneePhone', 'consigneeAddress'] as const).map((field, index) => <label key={field} className="text-xs text-gray-500">
           {['收件人', '电话', '地址'][index]}<input aria-label={['收件人', '电话', '地址'][index]} className="mt-1 block h-10 w-full rounded-lg border px-3 text-sm"
             value={form[field]} onChange={event => change({ [field]: event.target.value })} />
@@ -36,6 +37,7 @@ function Preview() {
       <div className="mt-6 flex gap-3"><button className="rounded-lg border px-4 py-2 text-sm" onClick={() => { setForm(blank); setChoice(undefined); }}>取消录单</button>
         <button className="rounded-lg bg-blue-600 px-4 py-2 text-sm text-white disabled:opacity-50" disabled={plan.checking || !form.customerName.trim()} onClick={async () => {
           const saved = await callFunction('saveOrders', { data: { orders: [{ ...form, createCustomerArchive: plan.checked,
+            customerArchiveCheckId: plan.checked ? plan.archiveCheckId : undefined,
             orderAttribute: 'rental1', salesChannel: '微信', customerSelectionMode: form.customerId ? 'explicit' : 'none' }] } });
           setResult(JSON.stringify({ saved, database: await callFunction('inspect', {}) }, null, 2));
         }}>保存到本地测试订单</button></div>

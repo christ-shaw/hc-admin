@@ -347,6 +347,7 @@ function publicSfOrder(record, fallbackOrder) {
     cancelTime: record.cancelTime || '',
     errorCode: record.errorCode || '',
     errorMessage: record.errorMessage || '',
+    orderSnapshot: record.orderSnapshot || null,
     shipmentRemarkEntries: Array.isArray(record.shipmentRemarkEntries)
       ? record.shipmentRemarkEntries
       : [],
@@ -390,6 +391,11 @@ async function buildWorkbenchRows(orders, config) {
     );
     return {
       order,
+      mergeEligible: !isNotRequired(order) && !trimString(order.trackingNumber)
+        && !related.some(record => record.waybillNo || Number(record.printCount) > 0
+          || record.lastPrintTime || record.status === 'cancelled'
+          || ['applying', 'applied'].includes(record.status)
+          || (record.linkedOrderIds || []).length > 1),
       sfStatus: deriveSfStatus(order, currentSfOrder, config.dataModelCutoverDate),
       currentSfOrder: publicSfOrder(currentSfOrder, order),
       otherEnvSummary: buildOtherEnvSummary(related, config.env),
